@@ -2,10 +2,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use pair_protocol::{
     Action, BackendInfo, Card, ErrorCard, FilePatch, FindingCard, HypothesisCard, PatchCard,
-    SummaryCard,
+    SummaryCard, TokenUsage,
 };
+use serde_json::to_string;
 
-use crate::{BackendAction, BackendAdapter, BackendMetadata, BackendRequest, BackendResponse};
+use crate::{
+    BackendAction, BackendAdapter, BackendMetadata, BackendRequest, BackendResponse,
+    estimate_tokens,
+};
 
 #[derive(Default)]
 pub struct MockBackend;
@@ -27,11 +31,15 @@ impl BackendAdapter for MockBackend {
         };
 
         Ok(BackendResponse {
-            card,
-            raw_output: None,
             metadata: BackendMetadata {
                 backend: "mock".into(),
+                token_usage: Some(TokenUsage::estimated(
+                    estimate_tokens(&req.session.prompt),
+                    estimate_tokens(&to_string(&card).unwrap_or_default()),
+                )),
             },
+            card,
+            raw_output: None,
         })
     }
 

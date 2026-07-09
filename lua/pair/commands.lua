@@ -37,6 +37,10 @@ function M.setup()
     require("pair").reset()
   end, { force = true })
 
+  vim.api.nvim_create_user_command("PairLog", function()
+    print(require("pair.log").path())
+  end, { force = true })
+
   vim.api.nvim_create_user_command("PairBackend", function()
     require("pair").backend()
   end, { force = true })

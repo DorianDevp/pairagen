@@ -2,13 +2,13 @@ use std::process::Stdio;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use pair_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard};
+use pair_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard, TokenUsage};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
-use crate::{BackendAdapter, BackendMetadata, BackendRequest, BackendResponse};
+use crate::{BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, estimate_tokens};
 
 pub struct StdioAgentBackend {
     command: String,
@@ -75,7 +75,7 @@ impl StdioAgentBackend {
         Ok(())
     }
 
-    async fn ask(&self, req: &BackendRequest) -> Result<String> {
+    async fn ask(&self, req: &BackendRequest) -> Result<AgentAnswer> {
         self.ensure().await?;
 
         let mut process = self.process.lock().await;
@@ -84,6 +84,7 @@ impl StdioAgentBackend {
             .ok_or_else(|| anyhow!("agent process unavailable"))?;
         let event = agent_event(req);
         let line = serde_json::to_string(&event)?;
+        let input_tokens = estimate_tokens(&line);
 
         process.stdin.write_all(line.as_bytes()).await?;
         process.stdin.write_all(b"\n").await?;
@@ -93,7 +94,7 @@ impl StdioAgentBackend {
             return Err(anyhow!("agent closed stdout"));
         };
 
-        Ok(line)
+        Ok(AgentAnswer { line, input_tokens })
     }
 
     fn error_card(message: impl Into<String>) -> Card {
@@ -115,7 +116,9 @@ impl Drop for AgentProcess {
 #[async_trait]
 impl BackendAdapter for StdioAgentBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
-        let raw_output = self.ask(&req).await?;
+        let answer = self.ask(&req).await?;
+        let raw_output = answer.line;
+        let output_tokens = estimate_tokens(&raw_output);
         let card = parse_agent_output(&raw_output)
             .unwrap_or_else(|error| Self::error_card(format!("{}\n\n{}", error, raw_output)));
 
@@ -124,6 +127,7 @@ impl BackendAdapter for StdioAgentBackend {
             raw_output: Some(raw_output),
             metadata: BackendMetadata {
                 backend: "agent_stdio".into(),
+                token_usage: Some(TokenUsage::estimated(answer.input_tokens, output_tokens)),
             },
         })
     }
@@ -138,6 +142,11 @@ impl BackendAdapter for StdioAgentBackend {
             can_use_tools: false,
         }
     }
+}
+
+struct AgentAnswer {
+    line: String,
+    input_tokens: usize,
 }
 
 fn agent_event(req: &BackendRequest) -> serde_json::Value {

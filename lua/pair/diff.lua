@@ -1,5 +1,6 @@
 local apply = require("pair.apply")
 local config = require("pair.config")
+local log = require("pair.log")
 local rpc = require("pair.rpc")
 local state = require("pair.state")
 local thinking = require("pair.thinking")
@@ -105,11 +106,13 @@ function M.send(accepted, patch_ids, changed_files, error)
     thinking.stop()
 
     if message.error then
+      log.write("patch apply error", message.error)
       ui.notify(message.error.message, vim.log.levels.ERROR)
 
       return
     end
 
+    state.token_usage = message.result.token_usage
     require("pair.card").show(message.result.card)
   end)
 end

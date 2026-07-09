@@ -24,11 +24,9 @@ function M.show(card)
   state.last_card = card
   navigation.from_card(card)
 
-  ui.close(state.card_win)
-
   local lines = M.lines(card)
   local width = M.width(lines)
-  local buf, win = ui.float(lines, {
+  local buf, win = ui.render(state.card_buf, state.card_win, lines, {
     width = width,
     height = math.min(#lines, config.values.card.max_height),
   })
@@ -68,6 +66,7 @@ function M.lines(card)
     M.add(lines, card.question or card.title)
   end
 
+  M.tokens(lines)
   table.insert(lines, "")
   table.insert(lines, M.actions(card))
 
@@ -80,6 +79,23 @@ function M.add(lines, text)
   for line in (text .. "\n"):gmatch("([^\n]*)\n") do
     table.insert(lines, line)
   end
+end
+
+function M.tokens(lines)
+  local usage = state.token_usage
+
+  if not usage then
+    return
+  end
+
+  table.insert(lines, "")
+  table.insert(lines, string.format(
+    "Tokens: in %s / out %s / total %s%s",
+    usage.input_tokens or 0,
+    usage.output_tokens or 0,
+    usage.total_tokens or 0,
+    usage.estimated and " est" or ""
+  ))
 end
 
 function M.signal(lines, text)

@@ -4,7 +4,7 @@ pub mod stdio_agent;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use pair_protocol::{Action, BackendInfo, Card, ContextBundle};
+use pair_protocol::{Action, BackendInfo, Card, ContextBundle, TokenUsage};
 use serde::Serialize;
 
 pub use generic::*;
@@ -59,6 +59,15 @@ pub struct BackendResponse {
 #[derive(Clone, Debug)]
 pub struct BackendMetadata {
     pub backend: String,
+    pub token_usage: Option<TokenUsage>,
+}
+
+pub fn estimate_tokens(text: &str) -> usize {
+    let chars = text.chars().count();
+    let words = text.split_whitespace().count();
+    let estimate = (chars / 4).max(words);
+
+    estimate.max(1)
 }
 
 #[derive(Clone, Debug, Serialize)]

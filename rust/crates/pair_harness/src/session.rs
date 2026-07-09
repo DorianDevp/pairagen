@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use pair_protocol::{
-    Card, ContextBundle, Cursor, Location, Mode, PatchId, Selection, StartSessionParams,
+    Card, ContextBundle, Cursor, Location, Mode, PatchId, Selection, StartSessionParams, TokenUsage,
 };
 use uuid::Uuid;
 
@@ -25,6 +25,7 @@ pub struct Session {
     pub constraints: Vec<String>,
     pub state: SessionState,
     pub context: ContextBundle,
+    pub token_usage: TokenUsage,
 }
 
 impl Session {
@@ -46,6 +47,7 @@ impl Session {
             constraints: vec!["one card only".into(), "patches require user apply".into()],
             state: SessionState::Thinking,
             context,
+            token_usage: TokenUsage::default(),
         }
     }
 

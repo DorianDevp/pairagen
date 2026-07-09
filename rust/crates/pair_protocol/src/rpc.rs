@@ -3,6 +3,32 @@ use serde_json::Value;
 
 use crate::{Action, Card};
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TokenUsage {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub total_tokens: usize,
+    pub estimated: bool,
+}
+
+impl TokenUsage {
+    pub fn estimated(input: usize, output: usize) -> Self {
+        Self {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+            estimated: true,
+        }
+    }
+
+    pub fn add(&mut self, other: &Self) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.total_tokens += other.total_tokens;
+        self.estimated = self.estimated || other.estimated;
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
@@ -62,6 +88,7 @@ pub struct JsonRpcNotification {
 pub struct StartSessionResult {
     pub session_id: String,
     pub card: Card,
+    pub token_usage: TokenUsage,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -74,6 +101,7 @@ pub struct ActionParams {
 pub struct ActionResult {
     pub session_id: String,
     pub card: Card,
+    pub token_usage: TokenUsage,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

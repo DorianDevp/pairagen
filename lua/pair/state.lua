@@ -10,6 +10,7 @@ local M = {
   thinking_buf = nil,
   thinking_timer = nil,
   last_card = nil,
+  token_usage = nil,
 }
 
 return M

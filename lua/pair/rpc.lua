@@ -1,4 +1,5 @@
 local config = require("pair.config")
+local log = require("pair.log")
 local ui = require("pair.ui")
 
 local M = {
@@ -32,6 +33,7 @@ function M.ensure()
     end,
     on_exit = function(_, code)
       if code ~= 0 and code ~= 143 then
+        log.write("backend exited", { code = code })
         ui.notify("Backend exited with code " .. code, vim.log.levels.ERROR)
       end
       M.job = nil
@@ -113,6 +115,7 @@ function M.handle(line)
   local ok, message = pcall(vim.json.decode, line)
 
   if not ok then
+    log.write("invalid backend JSON", line)
     ui.notify("Invalid backend JSON", vim.log.levels.ERROR)
 
     return
@@ -134,7 +137,10 @@ function M.on_stderr(data)
   end, data or {})
 
   if #lines > 0 then
-    ui.notify(table.concat(lines, "\n"), vim.log.levels.WARN)
+    local message = table.concat(lines, "\n")
+
+    log.write("backend stderr", message)
+    ui.notify(message, vim.log.levels.WARN)
   end
 end
 

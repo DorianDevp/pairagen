@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use pair_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard};
+use pair_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard, TokenUsage};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::{BackendAdapter, BackendMetadata, BackendRequest, BackendResponse};
+use crate::{BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, estimate_tokens};
 
 pub struct GenericCliBackend {
     command: String,
@@ -153,6 +153,10 @@ impl BackendAdapter for GenericCliBackend {
             raw_output: Some(raw_output),
             metadata: BackendMetadata {
                 backend: "generic_cli".into(),
+                token_usage: Some(TokenUsage::estimated(
+                    estimate_tokens(&prompt),
+                    estimate_tokens(&stdout),
+                )),
             },
         })
     }

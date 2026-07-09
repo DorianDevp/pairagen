@@ -30,28 +30,50 @@ impl Engine {
         let context = ContextBundle::from_start(params);
         let request = self.request(&session, BackendAction::Start, context);
         let response = self.backend.next_card(request).await?;
+        self.add_usage(&mut session, &response.metadata.token_usage);
+
         let card = self.accept_card(&mut session, response.card)?;
         let session_id = session.id.clone();
+        let token_usage = session.token_usage.clone();
 
         self.sessions.insert(session_id.clone(), session);
 
-        Ok(StartSessionResult { session_id, card })
+        Ok(StartSessionResult {
+            session_id,
+            card,
+            token_usage,
+        })
     }
 
     pub async fn action(&mut self, session_id: &str, action: Action) -> Result<ActionResult> {
         let mut session = self.take_session(session_id)?;
+        let result = self.action_taken(session_id, &mut session, action).await;
+
+        self.sessions.insert(session_id.into(), session);
+
+        result
+    }
+
+    async fn action_taken(
+        &self,
+        session_id: &str,
+        session: &mut Session,
+        action: Action,
+    ) -> Result<ActionResult> {
         let state = session.state.next(&action)?;
+        let previous_state = session.state.clone();
 
         if action == Action::Stop {
             session.state = SessionState::Finished;
             let card = session.stop_card();
-            session.cards.push(card.clone());
+            let token_usage = session.token_usage.clone();
 
-            self.sessions.insert(session_id.into(), session);
+            session.cards.push(card.clone());
 
             return Ok(ActionResult {
                 session_id: session_id.into(),
                 card,
+                token_usage,
             });
         }
 
@@ -60,20 +82,42 @@ impl Engine {
 
         session.state = SessionState::Thinking;
 
-        let response = self.backend.next_card(request).await?;
-        let card = self.accept_card_with_state(&mut session, response.card, state)?;
+        let response = match self.backend.next_card(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                session.state = previous_state;
 
-        self.sessions.insert(session_id.into(), session);
+                return Err(error);
+            }
+        };
+
+        self.add_usage(session, &response.metadata.token_usage);
+
+        let card = self.accept_card_with_state(session, response.card, state)?;
+        let token_usage = session.token_usage.clone();
 
         Ok(ActionResult {
             session_id: session_id.into(),
             card,
+            token_usage,
         })
     }
 
     pub fn apply_result(&mut self, result: PatchApplyResult) -> Result<ActionResult> {
         let mut session = self.take_session(&result.session_id)?;
+        let session_id = result.session_id.clone();
+        let output = self.apply_result_taken(&mut session, result);
 
+        self.sessions.insert(session_id, session);
+
+        output
+    }
+
+    fn apply_result_taken(
+        &self,
+        session: &mut Session,
+        result: PatchApplyResult,
+    ) -> Result<ActionResult> {
         session.state.require_patch()?;
 
         if result.accepted {
@@ -85,13 +129,17 @@ impl Engine {
         }
 
         let card = session.apply_summary(&result);
+        let token_usage = session.token_usage.clone();
 
         session.cards.push(card.clone());
 
         let session_id = result.session_id;
-        self.sessions.insert(session_id.clone(), session);
 
-        Ok(ActionResult { session_id, card })
+        Ok(ActionResult {
+            session_id,
+            card,
+            token_usage,
+        })
     }
 
     pub fn get(&self, session_id: &str) -> Option<&Session> {
@@ -142,6 +190,12 @@ impl Engine {
             .remove(session_id)
             .ok_or_else(|| anyhow!("unknown session {session_id}"))
     }
+
+    fn add_usage(&self, session: &mut Session, usage: &Option<pair_protocol::TokenUsage>) {
+        if let Some(usage) = usage {
+            session.token_usage.add(usage);
+        }
+    }
 }
 
 fn validate_one_card(card: &Card) -> Result<()> {
@@ -191,9 +245,14 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use pair_backends::MockBackend;
-    use pair_protocol::{Cursor, Mode};
+    use async_trait::async_trait;
+    use pair_backends::{
+        BackendAction, BackendAdapter, BackendMetadata, BackendRequest, BackendResponse,
+        MockBackend,
+    };
+    use pair_protocol::{BackendInfo, Cursor, FindingCard, HypothesisCard, Mode};
 
     use super::*;
 
@@ -255,5 +314,77 @@ mod tests {
         let summary = engine.apply_result(result).unwrap();
 
         assert!(matches!(summary.card, Card::Summary(_)));
+    }
+
+    #[tokio::test]
+    async fn keeps_session_after_backend_error() {
+        let backend = Arc::new(FlakyBackend::default());
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+        let error = engine
+            .action(&start.session_id, Action::Follow)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("backend failed"));
+
+        let next = engine.action(&start.session_id, Action::Why).await.unwrap();
+
+        assert!(matches!(next.card, Card::Finding(_)));
+    }
+
+    #[derive(Default)]
+    struct FlakyBackend {
+        failed: AtomicBool,
+    }
+
+    #[async_trait]
+    impl BackendAdapter for FlakyBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            if matches!(req.action, BackendAction::User(Action::Follow))
+                && !self.failed.swap(true, Ordering::SeqCst)
+            {
+                return Err(anyhow!("backend failed"));
+            }
+
+            let card = match req.action {
+                BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                    id: "c_1".into(),
+                    title: "Start".into(),
+                    claim: "Initial claim.".into(),
+                    evidence: None,
+                    next_move: None,
+                    actions: vec![Action::Follow, Action::Why, Action::Stop],
+                }),
+                _ => Card::Finding(FindingCard {
+                    id: "c_2".into(),
+                    title: "Recovered".into(),
+                    finding: "Session still works.".into(),
+                    location: None,
+                    annotation: None,
+                    actions: vec![Action::Stop],
+                }),
+            };
+
+            Ok(BackendResponse {
+                card,
+                raw_output: None,
+                metadata: BackendMetadata {
+                    backend: "flaky".into(),
+                    token_usage: None,
+                },
+            })
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "flaky".into(),
+                streaming: false,
+                patches: false,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
     }
 }

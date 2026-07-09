@@ -1,6 +1,7 @@
 local card = require("pair.card")
 local config = require("pair.config")
 local context = require("pair.context")
+local log = require("pair.log")
 local prompt = require("pair.prompt")
 local rpc = require("pair.rpc")
 local state = require("pair.state")
@@ -30,12 +31,14 @@ function M.start(text, mode)
     thinking.stop()
 
     if message.error then
+      log.write("session start error", message.error)
       ui.notify(message.error.message, vim.log.levels.ERROR)
 
       return
     end
 
     state.session_id = message.result.session_id
+    state.token_usage = message.result.token_usage
     card.show(message.result.card)
   end)
 end
@@ -63,11 +66,13 @@ function M.action(action)
     thinking.stop()
 
     if message.error then
+      log.write("session action error", message.error)
       ui.notify(message.error.message, vim.log.levels.ERROR)
 
       return
     end
 
+    state.token_usage = message.result.token_usage
     card.show(message.result.card)
   end)
 end
@@ -97,7 +102,7 @@ function M.resume()
 end
 
 function M.reset()
-  thinking.stop()
+  thinking.stop(true)
   ui.close(state.prompt_win)
   ui.close(state.card_win)
   ui.close(state.thinking_win)
@@ -111,6 +116,7 @@ function M.reset()
   state.card_win = nil
   state.card_buf = nil
   state.diff_tab = nil
+  state.token_usage = nil
 
   ui.notify("Pair reset")
 end
@@ -118,6 +124,7 @@ end
 function M.backend()
   rpc.request("backend/list", {}, function(message)
     if message.error then
+      log.write("backend list error", message.error)
       ui.notify(message.error.message, vim.log.levels.ERROR)
 
       return
