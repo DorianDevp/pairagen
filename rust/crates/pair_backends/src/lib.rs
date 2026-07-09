@@ -76,4 +76,5 @@ pub struct SessionSnapshot {
     pub prompt: String,
     pub card_count: usize,
     pub last_card: Option<Card>,
+    pub last_summary: Option<String>,
 }

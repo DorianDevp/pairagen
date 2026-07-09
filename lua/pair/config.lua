@@ -67,7 +67,13 @@ M.values = {
   },
   thinking = {
     enabled = true,
-    interval = 80,
+    interval = 800,
+  },
+  context = {
+    before = 24,
+    after = 24,
+    max_diagnostics = 8,
+    max_diagnostic_length = 160,
   },
   navigation = {
     open = "tab",

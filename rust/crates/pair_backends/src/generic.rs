@@ -39,80 +39,22 @@ impl GenericCliBackend {
 
     fn prompt(&self, req: &BackendRequest) -> String {
         let value = json!({
-            "contract": {
-                "role": "Pair Agent API",
-                "one_card_only": req.card_contract.one_card_only,
-                "patch_only_on_fix": req.card_contract.patch_only_on_fix,
-                "max_body_chars": req.card_contract.max_body_chars,
-                "rules": [
-                    "Return exactly one JSON object.",
-                    "Return one Pair op, not a card.",
-                    "Do not return a full plan.",
-                    "Do not write prose outside JSON.",
-                    "Patch only when action asks for fix.",
-                    "If uncertain, return hypothesis.",
-                    "When the active output schema requires unused fields, set them to null."
-                ],
-                "ops": {
-                    "hypothesis": {
-                        "required": ["op", "title", "claim"],
-                        "optional": ["evidence", "next"]
-                    },
-                    "finding": {
-                        "required": ["op", "title", "finding"],
-                        "optional": ["location", "annotation"]
-                    },
-                    "patch": {
-                        "required": ["op", "title", "explanation", "patches"],
-                        "patch": ["file", "diff", "explanation"]
-                    },
-                    "choice": {
-                        "required": ["op", "title", "question", "options"]
-                    },
-                    "summary": {
-                        "required": ["op", "title", "summary", "changed_files"]
-                    },
-                    "error": {
-                        "required": ["op", "title", "message"]
-                    }
-                },
-                "examples": [
-                    {
-                        "op": "hypothesis",
-                        "title": "Payload may be skipped",
-                        "claim": "This branch can return before payload construction.",
-                        "evidence": {
-                            "file": "src/work.ts",
-                            "line": 42,
-                            "column": 1,
-                            "annotation": "early return skips payload construction"
-                        }
-                    },
-                    {
-                        "op": "patch",
-                        "title": "Guard payload shape",
-                        "explanation": "Keep body present for callers.",
-                        "patches": [
-                            {
-                                "file": "src/work.ts",
-                                "diff": "@@ -1,1 +1,1 @@\n-placeholder\n+payload = payload || {}\n",
-                                "explanation": "Creates a payload fallback."
-                            }
-                        ]
-                    }
-                ]
+            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), summary(title,summary,changed_files), error(title,message). Patch only for fix. Unused schema fields null.",
+            "limits": {
+                "one": req.card_contract.one_card_only,
+                "max": req.card_contract.max_body_chars
             },
-            "session": {
+            "s": {
                 "id": req.session.id,
-                "prompt": req.session.prompt,
-                "card_count": req.session.card_count,
-                "last_card": req.session.last_card
+                "p": req.session.prompt,
+                "n": req.session.card_count,
+                "last": req.session.last_summary
             },
-            "action": format!("{:?}", req.action),
-            "context": req.context
+            "a": format!("{:?}", req.action),
+            "ctx": req.context
         });
 
-        serde_json::to_string_pretty(&value).unwrap_or_default()
+        serde_json::to_string(&value).unwrap_or_default()
     }
 
     fn error_card(message: impl Into<String>) -> Card {

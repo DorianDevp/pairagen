@@ -158,6 +158,7 @@ impl Engine {
                 prompt: session.original_prompt.clone(),
                 card_count: session.cards.len(),
                 last_card: session.cards.last().cloned(),
+                last_summary: session.cards.last().map(card_summary),
             },
             action,
             context,
@@ -212,6 +213,17 @@ fn validate_one_card(card: &Card) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn card_summary(card: &Card) -> String {
+    match card {
+        Card::Hypothesis(card) => format!("hypothesis: {}", card.claim),
+        Card::Finding(card) => format!("finding: {}", card.finding),
+        Card::Patch(card) => format!("patch: {}", card.explanation),
+        Card::Choice(card) => format!("choice: {}", card.question),
+        Card::Summary(card) => format!("summary: {}", card.summary),
+        Card::Error(card) => format!("error: {}", card.message),
+    }
 }
 
 impl Session {

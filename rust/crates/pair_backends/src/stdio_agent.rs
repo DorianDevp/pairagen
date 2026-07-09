@@ -151,39 +151,24 @@ struct AgentAnswer {
 
 fn agent_event(req: &BackendRequest) -> serde_json::Value {
     json!({
-        "type": "pair_event",
+        "t": "pair_event",
         "api": agent_api(),
-        "session": req.session,
-        "action": format!("{:?}", req.action),
-        "context": req.context,
-        "contract": req.card_contract
+        "s": {
+            "id": req.session.id,
+            "p": req.session.prompt,
+            "n": req.session.card_count,
+            "last": req.session.last_summary
+        },
+        "a": format!("{:?}", req.action),
+        "ctx": req.context,
+        "limits": req.card_contract
     })
 }
 
 fn agent_api() -> serde_json::Value {
-    json!({
-        "hypothesis": {
-            "required": ["op", "title", "claim"],
-            "optional": ["evidence", "next"]
-        },
-        "finding": {
-            "required": ["op", "title", "finding"],
-            "optional": ["location", "annotation"]
-        },
-        "patch": {
-            "required": ["op", "title", "explanation", "patches"],
-            "patch": ["file", "diff", "explanation"]
-        },
-        "choice": {
-            "required": ["op", "title", "question", "options"]
-        },
-        "summary": {
-            "required": ["op", "title", "summary", "changed_files"]
-        },
-        "error": {
-            "required": ["op", "title", "message"]
-        }
-    })
+    json!(
+        "Return one JSON Pair op only. Ops: hypothesis, finding, patch, choice, summary, error. Patch only for fix."
+    )
 }
 
 fn parse_agent_output(output: &str) -> Result<Card> {

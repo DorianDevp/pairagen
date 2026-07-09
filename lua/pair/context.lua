@@ -1,3 +1,4 @@
+local config = require("pair.config")
 local selection = require("pair.selection")
 
 local M = {}
@@ -17,26 +18,51 @@ function M.current(prompt, mode)
     selection = selection.get(),
     prompt = prompt,
     mode = mode or "auto",
-    buffer_text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n"),
+    buffer_text = M.buffer_text(cursor[1]),
     diagnostics = M.diagnostics(file),
   }
+end
+
+function M.buffer_text(line)
+  local before = config.values.context.before
+  local after = config.values.context.after
+  local start = math.max(line - before - 1, 0)
+  local finish = math.min(line + after, vim.api.nvim_buf_line_count(0))
+  local lines = vim.api.nvim_buf_get_lines(0, start, finish, false)
+
+  return table.concat(lines, "\n")
 end
 
 function M.diagnostics(file)
   local items = {}
   local diagnostics = vim.diagnostic.get(0)
+  local limit = config.values.context.max_diagnostics
 
   for _, diagnostic in ipairs(diagnostics) do
+    if #items >= limit then
+      break
+    end
+
     table.insert(items, {
       file = vim.fn.fnamemodify(file, ":."),
       line = diagnostic.lnum + 1,
       column = diagnostic.col + 1,
       severity = tostring(diagnostic.severity),
-      message = diagnostic.message,
+      message = M.truncate(diagnostic.message, config.values.context.max_diagnostic_length),
     })
   end
 
   return items
+end
+
+function M.truncate(text, limit)
+  text = tostring(text or "")
+
+  if #text <= limit then
+    return text
+  end
+
+  return text:sub(1, limit) .. "..."
 end
 
 return M
