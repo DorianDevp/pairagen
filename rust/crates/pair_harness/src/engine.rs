@@ -54,6 +54,15 @@ impl Engine {
         result
     }
 
+    pub async fn reply(&mut self, session_id: &str, text: String) -> Result<ActionResult> {
+        let mut session = self.take_session(session_id)?;
+        let result = self.reply_taken(session_id, &mut session, text).await;
+
+        self.sessions.insert(session_id.into(), session);
+
+        result
+    }
+
     async fn action_taken(
         &self,
         session_id: &str,
@@ -94,6 +103,43 @@ impl Engine {
         self.add_usage(session, &response.metadata.token_usage);
 
         let card = self.accept_card_with_state(session, response.card, state)?;
+        let token_usage = session.token_usage.clone();
+
+        Ok(ActionResult {
+            session_id: session_id.into(),
+            card,
+            token_usage,
+        })
+    }
+
+    async fn reply_taken(
+        &self,
+        session_id: &str,
+        session: &mut Session,
+        text: String,
+    ) -> Result<ActionResult> {
+        if text.trim().is_empty() {
+            return Err(anyhow!("reply is empty"));
+        }
+
+        let previous_state = session.state.clone();
+        let context = session.context.clone();
+        let request = self.request(session, BackendAction::Reply(text), context);
+
+        session.state = SessionState::Thinking;
+
+        let response = match self.backend.next_card(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                session.state = previous_state;
+
+                return Err(error);
+            }
+        };
+
+        self.add_usage(session, &response.metadata.token_usage);
+
+        let card = self.accept_card_with_state(session, response.card, NextState::Any)?;
         let token_usage = session.token_usage.clone();
 
         Ok(ActionResult {
@@ -384,6 +430,23 @@ mod tests {
             .unwrap();
 
         assert!(matches!(retry.card, Card::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn replies_inside_session() {
+        let backend = Arc::new(MockBackend);
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+        let result = engine
+            .reply(&start.session_id, "that is not it".into())
+            .await
+            .unwrap();
+
+        let Card::Finding(card) = result.card else {
+            panic!("expected finding card");
+        };
+
+        assert!(card.finding.contains("that is not it"));
     }
 
     #[derive(Default)]

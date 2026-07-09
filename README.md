@@ -118,6 +118,7 @@ Summary
 
 ```vim
 :Pair
+:PairReply
 :PairFix
 :PairWhy
 :PairFollow

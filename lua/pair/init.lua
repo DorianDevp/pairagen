@@ -21,6 +21,16 @@ function M.prompt(mode)
   prompt.open(mode or config.values.backend.mode)
 end
 
+function M.reply_prompt()
+  if not state.session_id then
+    ui.notify("No active session", vim.log.levels.WARN)
+
+    return
+  end
+
+  prompt.reply()
+end
+
 function M.start(text, mode)
   if not text or text == "" then
     return
@@ -86,6 +96,50 @@ function M.action(action)
 
     if message.result.session_id ~= state.session_id then
       log.write("stale session action result", message.result)
+
+      return
+    end
+
+    state.token_usage = message.result.token_usage
+    card.show(message.result.card)
+  end)
+end
+
+function M.reply(text)
+  if not state.session_id then
+    ui.notify("No active session", vim.log.levels.WARN)
+
+    return
+  end
+
+  if not text or text == "" then
+    return
+  end
+
+  status.hide()
+
+  local session_id = state.session_id
+  local request_id = thinking.start("Thinking", session_id)
+
+  rpc.request("session/reply", {
+    session_id = session_id,
+    text = text,
+  }, function(message)
+    if not thinking.current(request_id) then
+      return
+    end
+
+    thinking.stop()
+
+    if message.error then
+      log.write("session reply error", message.error)
+      ui.notify(message.error.message, vim.log.levels.ERROR)
+
+      return
+    end
+
+    if message.result.session_id ~= state.session_id then
+      log.write("stale session reply result", message.result)
 
       return
     end

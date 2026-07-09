@@ -45,7 +45,7 @@ impl GenericCliBackend {
                 "n": req.session.card_count,
                 "last": req.session.last_summary
             },
-            "a": format!("{:?}", req.action),
+            "a": action_value(&req.action),
             "ctx": req.context
         });
 
@@ -59,6 +59,16 @@ impl GenericCliBackend {
             message: message.into(),
             actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
         })
+    }
+}
+
+fn action_value(action: &crate::BackendAction) -> serde_json::Value {
+    match action {
+        crate::BackendAction::Start => json!({"kind": "start"}),
+        crate::BackendAction::User(action) => {
+            json!({"kind": "user", "action": format!("{action:?}")})
+        }
+        crate::BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
     }
 }
 

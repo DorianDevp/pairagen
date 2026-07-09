@@ -5,7 +5,7 @@ use anyhow::Result;
 use pair_backends::{BackendAdapter, GenericCliBackend, MockBackend, StdioAgentBackend};
 use pair_harness::Engine;
 use pair_protocol::{
-    ActionParams, BackendInfo, JsonRpcRequest, JsonRpcResponse, PatchApplyResult,
+    ActionParams, BackendInfo, JsonRpcRequest, JsonRpcResponse, PatchApplyResult, ReplyParams,
     StartSessionParams,
 };
 use serde_json::{Value, json};
@@ -109,6 +109,16 @@ impl Server {
 
                 json!(result)
             }
+            "session/reply" => {
+                let params = parse::<ReplyParams>(&id, request.params)?;
+                let result = self
+                    .engine
+                    .reply(&params.session_id, params.text)
+                    .await
+                    .map_err(server_error(&id))?;
+
+                json!(result)
+            }
             "patch/apply_result" => {
                 let params = parse::<PatchApplyResult>(&id, request.params)?;
                 let result = self
@@ -201,10 +211,21 @@ fn run_stdio_agent() -> Result<()> {
         let line = line?;
         let value = serde_json::from_str::<serde_json::Value>(&line)?;
         let action = value
-            .get("action")
+            .get("a")
+            .and_then(|value| value.get("action"))
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        let op = if action.contains("Fix") {
+        let reply = value
+            .get("a")
+            .and_then(|value| value.get("text"))
+            .and_then(|value| value.as_str());
+        let op = if let Some(reply) = reply {
+            json!({
+                "op": "finding",
+                "title": "Reply received",
+                "finding": format!("You said: {reply}")
+            })
+        } else if action.contains("Fix") {
             json!({
                 "op": "patch",
                 "title": "Guard payload shape",

@@ -5,6 +5,26 @@ local ui = require("pair.ui")
 local M = {}
 
 function M.open(mode)
+  M.open_for({
+    title = " Pair Prompt ",
+    footer = " Ctrl-s submit  Esc normal  q close ",
+    submit = function(text)
+      require("pair").start(text, mode)
+    end,
+  })
+end
+
+function M.reply()
+  M.open_for({
+    title = " Pair Reply ",
+    footer = " Ctrl-s send  Esc normal  q close ",
+    submit = function(text)
+      require("pair").reply(text)
+    end,
+  })
+end
+
+function M.open_for(opts)
   M.close()
 
   local size = M.size()
@@ -19,9 +39,9 @@ function M.open(mode)
     height = size.outer_height,
     style = "minimal",
     border = config.values.prompt.border,
-    title = " Pair Prompt ",
+    title = opts.title,
     title_pos = "left",
-    footer = " Ctrl-s submit  Esc normal  q close ",
+    footer = opts.footer,
     footer_pos = "right",
   })
 
@@ -46,7 +66,7 @@ function M.open(mode)
   state.prompt_win = win
 
   M.prepare(buf, win)
-  M.bind(buf, win, mode)
+  M.bind(buf, opts.submit)
 
   vim.cmd("startinsert")
 end
@@ -64,13 +84,13 @@ function M.prepare(buf, win)
   vim.wo[win].signcolumn = "no"
 end
 
-function M.bind(buf, win, mode)
+function M.bind(buf, submit)
   vim.keymap.set({ "i", "n" }, "<C-s>", function()
-    M.submit(buf, win, mode)
+    M.submit(buf, submit)
   end, { buffer = buf, nowait = true, silent = true })
 
   vim.keymap.set("n", "<CR>", function()
-    M.submit(buf, win, mode)
+    M.submit(buf, submit)
   end, { buffer = buf, nowait = true, silent = true })
 
   vim.keymap.set("n", "q", function()
@@ -78,7 +98,7 @@ function M.bind(buf, win, mode)
   end, { buffer = buf, nowait = true, silent = true })
 end
 
-function M.submit(buf, win, mode)
+function M.submit(buf, submit)
   local text = M.text(buf)
 
   if text == "" then
@@ -90,7 +110,7 @@ function M.submit(buf, win, mode)
   end
 
   M.close()
-  require("pair").start(text, mode)
+  submit(text)
 end
 
 function M.close()

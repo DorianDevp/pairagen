@@ -28,6 +28,7 @@ impl BackendAdapter for MockBackend {
             BackendAction::User(Action::Next) => other_card(),
             BackendAction::User(Action::Stop) => stop_card(),
             BackendAction::User(action) => unsupported_card(action),
+            BackendAction::Reply(text) => reply_card(text),
         };
 
         Ok(BackendResponse {
@@ -117,6 +118,17 @@ fn other_card() -> Card {
         claim: "A caller may replace the response before it reaches this code.".into(),
         evidence: None,
         next_move: None,
+        actions: vec![Action::Follow, Action::Why, Action::Fix, Action::Stop],
+    })
+}
+
+fn reply_card(text: String) -> Card {
+    Card::Finding(FindingCard {
+        id: "c_reply".into(),
+        title: "Reply received".into(),
+        finding: format!("You said: {text}"),
+        location: None,
+        annotation: None,
         actions: vec![Action::Follow, Action::Why, Action::Fix, Action::Stop],
     })
 }

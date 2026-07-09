@@ -30,6 +30,7 @@ pub struct BackendRequest {
 pub enum BackendAction {
     Start,
     User(Action),
+    Reply(String),
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -98,6 +98,12 @@ pub struct ActionParams {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReplyParams {
+    pub session_id: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActionResult {
     pub session_id: String,
     pub card: Card,

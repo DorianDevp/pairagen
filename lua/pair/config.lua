@@ -47,6 +47,7 @@ M.values = {
   },
   keymaps = {
     prompt = "<leader>a",
+    reply = "<leader>pm",
     follow = "<leader>pf",
     why = "<leader>pw",
     fix = "<leader>px",

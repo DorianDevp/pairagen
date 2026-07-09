@@ -8,7 +8,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
-use crate::{BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, estimate_tokens};
+use crate::{
+    BackendAction, BackendAdapter, BackendMetadata, BackendRequest, BackendResponse,
+    estimate_tokens,
+};
 
 pub struct StdioAgentBackend {
     command: String,
@@ -159,10 +162,18 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
             "n": req.session.card_count,
             "last": req.session.last_summary
         },
-        "a": format!("{:?}", req.action),
+        "a": action_value(&req.action),
         "ctx": req.context,
         "limits": req.card_contract
     })
+}
+
+fn action_value(action: &BackendAction) -> serde_json::Value {
+    match action {
+        BackendAction::Start => json!({"kind": "start"}),
+        BackendAction::User(action) => json!({"kind": "user", "action": format!("{action:?}")}),
+        BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
+    }
 }
 
 fn agent_api() -> serde_json::Value {

@@ -7,6 +7,7 @@ local ui = require("pair.ui")
 local M = {}
 
 local labels = {
+  reply = { "m", "Message" },
   follow = { "f", "Follow" },
   why = { "w", "Why" },
   fix = { "x", "Fix" },
@@ -113,7 +114,7 @@ end
 
 function M.actions(card)
   local actions = card.actions or card.next_actions or {}
-  local parts = { "[h] Hide" }
+  local parts = { "[m] Message", "[h] Hide" }
 
   for _, action in ipairs(actions) do
     local name = type(action) == "table" and "apply_patch" or action
@@ -132,6 +133,10 @@ function M.bind(buf, card)
 
   vim.keymap.set("n", "h", function()
     require("pair").hide()
+  end, { buffer = buf, nowait = true, silent = true })
+
+  vim.keymap.set("n", "m", function()
+    require("pair").reply_prompt()
   end, { buffer = buf, nowait = true, silent = true })
 
   for _, action in ipairs(actions) do

@@ -5,6 +5,10 @@ function M.setup()
     require("pair").prompt()
   end, { force = true })
 
+  vim.api.nvim_create_user_command("PairReply", function()
+    require("pair").reply_prompt()
+  end, { force = true })
+
   vim.api.nvim_create_user_command("PairFix", function()
     M.action_or_prompt("fix", "fix")
   end, { force = true })

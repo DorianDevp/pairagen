@@ -12,6 +12,7 @@ function M.setup()
     end, { silent = true })
   end
 
+  M.call(keys.reply, "reply_prompt")
   M.action(keys.follow, "follow")
   M.action(keys.why, "why")
   M.action(keys.fix, "fix")
