@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 pair_backends = { path = "../pair_backends" }
+pair_patch = { path = "../pair_patch" }
 pair_protocol = { path = "../pair_protocol" }
 thiserror.workspace = true
 tokio.workspace = true

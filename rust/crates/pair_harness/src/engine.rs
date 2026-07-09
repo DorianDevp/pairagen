@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use pair_backends::{BackendAction, BackendAdapter, BackendRequest, CardContract, SessionSnapshot};
+use pair_patch::PatchValidator;
 use pair_protocol::{
     Action, ActionResult, Card, ContextBundle, PatchApplyResult, StartSessionParams,
     StartSessionResult, SummaryCard,
@@ -127,6 +128,7 @@ impl Engine {
         next_state: NextState,
     ) -> Result<Card> {
         validate_one_card(&card)?;
+        PatchValidator::validate_card(&card)?;
         next_state.validate(&card)?;
 
         session.state = SessionState::from_card(&card);

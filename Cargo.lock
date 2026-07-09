@@ -143,6 +143,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "pair_backends",
+ "pair_patch",
  "pair_protocol",
  "thiserror",
  "tokio",
