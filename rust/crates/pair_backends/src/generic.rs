@@ -21,7 +21,7 @@ impl GenericCliBackend {
         Self {
             command: command.into(),
             args,
-            timeout: Duration::from_secs(60),
+            timeout: Duration::from_secs(180),
         }
     }
 
@@ -33,8 +33,17 @@ impl GenericCliBackend {
             .split_whitespace()
             .map(str::to_string)
             .collect();
+        let timeout = std::env::var("PAIR_GENERIC_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(180));
 
-        Ok(Self::new(command, args))
+        Ok(Self {
+            command,
+            args,
+            timeout,
+        })
     }
 
     fn prompt(&self, req: &BackendRequest) -> String {
@@ -71,18 +80,40 @@ impl GenericCliBackend {
 impl BackendAdapter for GenericCliBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
         let prompt = self.prompt(&req);
-        let mut child = Command::new(&self.command)
+        let mut command = Command::new(&self.command);
+
+        command
             .args(&self.args)
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = command.spawn()?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await?;
         }
 
-        let output = timeout(self.timeout, child.wait_with_output()).await??;
+        let output = match timeout(self.timeout, child.wait_with_output()).await {
+            Ok(output) => output?,
+            Err(_) => {
+                let message = format!(
+                    "Backend timed out after {}s while waiting for {}.",
+                    self.timeout.as_secs(),
+                    self.command
+                );
+
+                return Ok(BackendResponse {
+                    card: Self::error_card(message),
+                    raw_output: None,
+                    metadata: BackendMetadata {
+                        backend: "generic_cli".into(),
+                        token_usage: Some(TokenUsage::estimated(estimate_tokens(&prompt), 0)),
+                    },
+                });
+            }
+        };
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let raw_output = format!("{stdout}{stderr}");

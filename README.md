@@ -62,6 +62,7 @@ require("pair").setup({
     codex = {
       kind = "generic",
       command = "codex",
+      timeout = 180,
       args = {
         "exec",
         "--sandbox",

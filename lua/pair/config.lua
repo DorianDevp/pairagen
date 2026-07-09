@@ -14,6 +14,7 @@ M.values = {
     codex = {
       kind = "generic",
       command = "codex",
+      timeout = 180,
       args = {
         "exec",
         "--sandbox",
@@ -32,16 +33,19 @@ M.values = {
     claude = {
       kind = "generic",
       command = "claude",
+      timeout = 180,
       args = {},
     },
     aider = {
       kind = "generic",
       command = "aider",
+      timeout = 180,
       args = {},
     },
     ["local"] = {
       kind = "generic",
       command = "ollama",
+      timeout = 180,
       args = { "run", "qwen2.5-coder:7b" },
     },
   },
@@ -150,6 +154,7 @@ function M.backend_env()
     PAIR_BACKEND = "generic",
     PAIR_GENERIC_COMMAND = agent.command,
     PAIR_GENERIC_ARGS = table.concat(agent.args or {}, " "),
+    PAIR_GENERIC_TIMEOUT_SECS = tostring(agent.timeout or 180),
   }
 end
 
