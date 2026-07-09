@@ -21,6 +21,7 @@ function M.ensure()
 
   M.job = vim.fn.jobstart(command, {
     cwd = vim.fn.getcwd(),
+    env = config.backend_env(),
     stdout_buffered = false,
     stderr_buffered = false,
     on_stdout = function(_, data)
@@ -40,6 +41,16 @@ function M.ensure()
   if M.job <= 0 then
     error("Could not start pair backend")
   end
+end
+
+function M.stop()
+  if M.job and vim.fn.jobwait({ M.job }, 0)[1] == -1 then
+    vim.fn.jobstop(M.job)
+  end
+
+  M.job = nil
+  M.pending = {}
+  M.buffer = ""
 end
 
 function M.request(method, params, callback)

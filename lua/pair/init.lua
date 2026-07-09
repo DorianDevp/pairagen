@@ -82,4 +82,22 @@ function M.backend()
   end)
 end
 
+function M.agent(name)
+  if not name or name == "" then
+    ui.notify("Pair agent: " .. config.agent())
+
+    return config.agent()
+  end
+
+  config.agent(name)
+  rpc.stop()
+  ui.notify("Pair agent: " .. name)
+
+  return name
+end
+
+function M.agents()
+  return config.agent_names()
+end
+
 return M

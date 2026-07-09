@@ -28,6 +28,7 @@ require("pair").setup({
   backend = {
     command = "paird",
     args = { "--stdio" },
+    agent = "mock",
     mode = "auto",
   },
 })
@@ -40,9 +41,47 @@ require("pair").setup({
   backend = {
     command = "cargo",
     args = { "run", "-p", "paird", "--", "--stdio" },
+    agent = "mock",
     mode = "auto",
   },
 })
+```
+
+## Agents
+
+```lua
+require("pair").setup({
+  backend = {
+    command = "paird",
+    args = { "--stdio" },
+    agent = "codex",
+  },
+  agents = {
+    codex = {
+      kind = "generic",
+      command = "codex",
+      args = {},
+    },
+    claude = {
+      kind = "generic",
+      command = "claude",
+      args = {},
+    },
+    ["local"] = {
+      kind = "generic",
+      command = "ollama",
+      args = { "run", "qwen2.5-coder:7b" },
+    },
+  },
+})
+```
+
+Switch at runtime:
+
+```vim
+:PairAgent codex
+:PairAgent claude
+:PairAgent local
 ```
 
 ## Flow
@@ -65,6 +104,7 @@ Summary
 :PairWhy
 :PairStop
 :PairBackend
+:PairAgent
 ```
 
 ## paird

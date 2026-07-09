@@ -5,6 +5,32 @@ M.values = {
     command = "paird",
     args = {},
     mode = "auto",
+    agent = "mock",
+  },
+  agents = {
+    mock = {
+      kind = "mock",
+    },
+    codex = {
+      kind = "generic",
+      command = "codex",
+      args = {},
+    },
+    claude = {
+      kind = "generic",
+      command = "claude",
+      args = {},
+    },
+    aider = {
+      kind = "generic",
+      command = "aider",
+      args = {},
+    },
+    ["local"] = {
+      kind = "generic",
+      command = "ollama",
+      args = { "run", "qwen2.5-coder:7b" },
+    },
   },
   keymaps = {
     prompt = "<leader>a",
@@ -31,6 +57,57 @@ function M.setup(opts)
   M.values = vim.tbl_deep_extend("force", M.values, opts or {})
 
   return M.values
+end
+
+function M.agent(name)
+  if name then
+    if not M.values.agents[name] then
+      error("Unknown Pair agent: " .. name)
+    end
+
+    M.values.backend.agent = name
+  end
+
+  return M.values.backend.agent
+end
+
+function M.agent_config()
+  local name = M.agent()
+  local agent = M.values.agents[name]
+
+  if not agent then
+    error("Unknown Pair agent: " .. name)
+  end
+
+  return name, agent
+end
+
+function M.agent_names()
+  local names = {}
+
+  for name, _ in pairs(M.values.agents) do
+    table.insert(names, name)
+  end
+
+  table.sort(names)
+
+  return names
+end
+
+function M.backend_env()
+  local _, agent = M.agent_config()
+
+  if agent.kind == "mock" then
+    return {
+      PAIR_BACKEND = "mock",
+    }
+  end
+
+  return {
+    PAIR_BACKEND = "generic",
+    PAIR_GENERIC_COMMAND = agent.command,
+    PAIR_GENERIC_ARGS = table.concat(agent.args or {}, " "),
+  }
 end
 
 return M
