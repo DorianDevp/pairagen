@@ -1,19 +1,15 @@
-use std::time::Duration;
-
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use pair_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard, TokenUsage};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::time::timeout;
 
 use crate::{BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, estimate_tokens};
 
 pub struct GenericCliBackend {
     command: String,
     args: Vec<String>,
-    timeout: Duration,
 }
 
 impl GenericCliBackend {
@@ -21,7 +17,6 @@ impl GenericCliBackend {
         Self {
             command: command.into(),
             args,
-            timeout: Duration::from_secs(180),
         }
     }
 
@@ -33,17 +28,8 @@ impl GenericCliBackend {
             .split_whitespace()
             .map(str::to_string)
             .collect();
-        let timeout = std::env::var("PAIR_GENERIC_TIMEOUT_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or_else(|| Duration::from_secs(180));
 
-        Ok(Self {
-            command,
-            args,
-            timeout,
-        })
+        Ok(Self { command, args })
     }
 
     fn prompt(&self, req: &BackendRequest) -> String {
@@ -95,25 +81,7 @@ impl BackendAdapter for GenericCliBackend {
             stdin.write_all(prompt.as_bytes()).await?;
         }
 
-        let output = match timeout(self.timeout, child.wait_with_output()).await {
-            Ok(output) => output?,
-            Err(_) => {
-                let message = format!(
-                    "Backend timed out after {}s while waiting for {}.",
-                    self.timeout.as_secs(),
-                    self.command
-                );
-
-                return Ok(BackendResponse {
-                    card: Self::error_card(message),
-                    raw_output: None,
-                    metadata: BackendMetadata {
-                        backend: "generic_cli".into(),
-                        token_usage: Some(TokenUsage::estimated(estimate_tokens(&prompt), 0)),
-                    },
-                });
-            }
-        };
+        let output = child.wait_with_output().await?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let raw_output = format!("{stdout}{stderr}");
