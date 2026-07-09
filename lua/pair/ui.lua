@@ -13,7 +13,10 @@ function M.float(lines, opts)
   lines = M.lines(lines)
 
   local width = opts.width or config.values.card.max_width
-  local height = math.min(#lines, opts.height or config.values.card.max_height)
+  local height = opts.height or math.min(#lines, config.values.card.max_height)
+  width = math.min(width, math.max(vim.o.columns - 4, 20))
+  height = math.min(height, math.max(vim.o.lines - 4, 1))
+
   local row = opts.row or math.floor((vim.o.lines - height) / 2)
   local col = opts.col or math.floor((vim.o.columns - width) / 2)
   local buf = vim.api.nvim_create_buf(false, true)

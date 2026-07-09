@@ -21,6 +21,7 @@ local labels = {
 
 function M.show(card)
   state.card = card
+  state.last_card = card
   navigation.from_card(card)
 
   ui.close(state.card_win)

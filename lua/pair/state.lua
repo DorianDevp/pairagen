@@ -6,6 +6,10 @@ local M = {
   card_win = nil,
   card_buf = nil,
   diff_tab = nil,
+  thinking_win = nil,
+  thinking_buf = nil,
+  thinking_timer = nil,
+  last_card = nil,
 }
 
 return M

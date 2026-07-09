@@ -29,6 +29,14 @@ function M.setup()
     require("pair").stop()
   end, { force = true })
 
+  vim.api.nvim_create_user_command("PairResume", function()
+    require("pair").resume()
+  end, { force = true })
+
+  vim.api.nvim_create_user_command("PairReset", function()
+    require("pair").reset()
+  end, { force = true })
+
   vim.api.nvim_create_user_command("PairBackend", function()
     require("pair").backend()
   end, { force = true })

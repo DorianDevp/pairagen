@@ -13,7 +13,8 @@ The editor experience stays the same.
 
 MVP core is implemented:
 
-- Neovim prompt, card, navigation, annotation, diff, apply and reject UI
+- Neovim textarea prompt, card, navigation, annotation, diff, apply and reject UI
+- thinking spinner, resume and reset controls
 - JSON-RPC over stdio
 - Rust session harness
 - one-card state machine
@@ -118,7 +119,12 @@ Summary
 :Pair
 :PairFix
 :PairWhy
+:PairFollow
+:PairOther
+:PairNext
 :PairStop
+:PairResume
+:PairReset
 :PairBackend
 :PairAgent
 ```

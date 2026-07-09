@@ -52,14 +52,22 @@ M.values = {
     fix = "<leader>px",
     other_lead = "<leader>pn",
     stop = "<leader>pq",
+    resume = "<leader>pr",
+    reset = "<leader>pR",
   },
   prompt = {
     border = "rounded",
+    width = 88,
+    height = 8,
   },
   card = {
     border = "rounded",
     max_width = 72,
     max_height = 12,
+  },
+  thinking = {
+    enabled = true,
+    interval = 80,
   },
   navigation = {
     open = "tab",

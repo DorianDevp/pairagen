@@ -2,6 +2,7 @@ local apply = require("pair.apply")
 local config = require("pair.config")
 local rpc = require("pair.rpc")
 local state = require("pair.state")
+local thinking = require("pair.thinking")
 local ui = require("pair.ui")
 
 local M = {}
@@ -91,6 +92,8 @@ function M.reject()
 end
 
 function M.send(accepted, patch_ids, changed_files, error)
+  thinking.start("Applying")
+
   rpc.request("patch/apply_result", {
     session_id = state.session_id,
     card_id = state.card and state.card.id or "",
@@ -99,6 +102,8 @@ function M.send(accepted, patch_ids, changed_files, error)
     changed_files = changed_files,
     error = error,
   }, function(message)
+    thinking.stop()
+
     if message.error then
       ui.notify(message.error.message, vim.log.levels.ERROR)
 
