@@ -17,11 +17,9 @@ impl BackendAdapter for MockBackend {
             BackendAction::Start => first_card(),
             BackendAction::User(Action::Follow) => finding_card(),
             BackendAction::User(Action::Why) => why_card(),
-            BackendAction::User(Action::Fix) => patch_card(req.context.file.display().to_string()),
+            BackendAction::User(Action::Fix) => patch_card(relative_file(&req)),
             BackendAction::User(Action::OtherLead) => other_card(),
-            BackendAction::User(Action::Retry) => {
-                patch_card(req.context.file.display().to_string())
-            }
+            BackendAction::User(Action::Retry) => patch_card(relative_file(&req)),
             BackendAction::User(Action::RunCheck) => check_card(),
             BackendAction::User(Action::Next) => other_card(),
             BackendAction::User(Action::Stop) => stop_card(),
@@ -133,6 +131,22 @@ fn patch_card(file: String) -> Card {
             Action::Stop,
         ],
     })
+}
+
+fn relative_file(req: &BackendRequest) -> String {
+    if !req.context.file.is_absolute() {
+        return req.context.file.display().to_string();
+    }
+
+    if let Ok(file) = req.context.file.strip_prefix(&req.context.cwd) {
+        return file.display().to_string();
+    }
+
+    req.context
+        .file
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "buffer".into())
 }
 
 fn check_card() -> Card {
