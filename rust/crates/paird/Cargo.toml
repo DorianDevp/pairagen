@@ -1,0 +1,9 @@
+[package]
+name = "paird"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+pair_protocol = { path = "../pair_protocol" }
+serde_json.workspace = true

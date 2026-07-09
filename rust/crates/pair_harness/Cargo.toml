@@ -1,0 +1,10 @@
+[package]
+name = "pair_harness"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+pair_protocol = { path = "../pair_protocol" }
+thiserror.workspace = true
+uuid.workspace = true
