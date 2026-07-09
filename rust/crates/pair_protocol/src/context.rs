@@ -62,3 +62,16 @@ pub struct StartSessionParams {
     pub buffer_text: String,
     pub diagnostics: Vec<Diagnostic>,
 }
+
+impl ContextBundle {
+    pub fn from_start(params: StartSessionParams) -> Self {
+        Self {
+            cwd: params.cwd,
+            file: params.file,
+            cursor: params.cursor,
+            selection: params.selection,
+            buffer_text: params.buffer_text,
+            diagnostics: params.diagnostics,
+        }
+    }
+}
