@@ -37,9 +37,9 @@ M.values = {
       args = {},
     },
     ["local"] = {
-      kind = "generic",
-      command = "ollama",
-      args = { "run", "qwen2.5-coder:7b" },
+      kind = "api",
+      base_url = "http://127.0.0.1:11434/v1",
+      model = "qwen2.5-coder:7b",
     },
   },
   keymaps = {
@@ -111,6 +111,22 @@ function M.backend_env()
     return {
       PAIR_BACKEND = "mock",
     }
+  end
+
+  if agent.kind == "api" then
+    local env = {
+      PAIR_BACKEND = "openai_compat",
+      PAIR_API_BASE = agent.base_url,
+      PAIR_API_MODEL = agent.model,
+    }
+
+    if agent.api_key_env and vim.env[agent.api_key_env] then
+      env.PAIR_API_KEY = vim.env[agent.api_key_env]
+    elseif agent.api_key then
+      env.PAIR_API_KEY = agent.api_key
+    end
+
+    return env
   end
 
   return {
