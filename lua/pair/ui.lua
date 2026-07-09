@@ -10,6 +10,7 @@ end
 
 function M.float(lines, opts)
   opts = opts or {}
+  lines = M.lines(lines)
 
   local width = opts.width or config.values.card.max_width
   local height = math.min(#lines, opts.height or config.values.card.max_height)
@@ -31,6 +32,24 @@ function M.float(lines, opts)
   })
 
   return buf, win
+end
+
+function M.lines(lines)
+  local out = {}
+
+  for _, line in ipairs(lines or {}) do
+    local text = tostring(line)
+
+    for part in (text .. "\n"):gmatch("([^\n]*)\n") do
+      table.insert(out, part)
+    end
+  end
+
+  if #out == 0 then
+    return { "" }
+  end
+
+  return out
 end
 
 function M.notify(message, level)

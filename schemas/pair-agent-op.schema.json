@@ -2,125 +2,130 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "PairAgentOp",
   "type": "object",
-  "oneOf": [
-    {
-      "required": ["op", "title", "claim"],
-      "properties": {
-        "op": { "const": "hypothesis" },
-        "title": { "type": "string", "minLength": 1 },
-        "claim": { "type": "string", "minLength": 1 },
-        "evidence": { "$ref": "#/$defs/location" },
-        "next": { "$ref": "#/$defs/location" }
-      },
-      "additionalProperties": false
-    },
-    {
-      "required": ["op", "title", "finding"],
-      "properties": {
-        "op": { "const": "finding" },
-        "title": { "type": "string", "minLength": 1 },
-        "finding": { "type": "string", "minLength": 1 },
-        "location": { "$ref": "#/$defs/location" },
-        "annotation": { "type": "string" }
-      },
-      "additionalProperties": false
-    },
-    {
-      "required": ["op", "title", "explanation", "patches"],
-      "properties": {
-        "op": { "const": "patch" },
-        "title": { "type": "string", "minLength": 1 },
-        "explanation": { "type": "string", "minLength": 1 },
-        "patches": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/patch" }
-        }
-      },
-      "additionalProperties": false
-    },
-    {
-      "required": ["op", "title", "question", "options"],
-      "properties": {
-        "op": { "const": "choice" },
-        "title": { "type": "string", "minLength": 1 },
-        "question": { "type": "string", "minLength": 1 },
-        "options": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/choice" }
-        }
-      },
-      "additionalProperties": false
-    },
-    {
-      "required": ["op", "title", "summary", "changed_files"],
-      "properties": {
-        "op": { "const": "summary" },
-        "title": { "type": "string", "minLength": 1 },
-        "summary": { "type": "string", "minLength": 1 },
-        "changed_files": {
-          "type": "array",
-          "items": { "type": "string" }
-        }
-      },
-      "additionalProperties": false
-    },
-    {
-      "required": ["op", "title", "message"],
-      "properties": {
-        "op": { "const": "error" },
-        "title": { "type": "string", "minLength": 1 },
-        "message": { "type": "string", "minLength": 1 }
-      },
-      "additionalProperties": false
-    }
+  "required": [
+    "op",
+    "title",
+    "claim",
+    "evidence",
+    "next",
+    "finding",
+    "location",
+    "annotation",
+    "explanation",
+    "patches",
+    "question",
+    "options",
+    "summary",
+    "changed_files",
+    "message"
   ],
-  "$defs": {
+  "properties": {
+    "op": {
+      "enum": ["hypothesis", "finding", "patch", "choice", "summary", "error"]
+    },
+    "title": {
+      "type": "string"
+    },
+    "claim": {
+      "type": ["string", "null"]
+    },
+    "evidence": {
+      "type": ["object", "null"],
+      "required": ["file", "line", "column", "annotation"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "column": { "type": "integer" },
+        "annotation": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "next": {
+      "type": ["object", "null"],
+      "required": ["file", "line", "column", "annotation"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "column": { "type": "integer" },
+        "annotation": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "finding": {
+      "type": ["string", "null"]
+    },
     "location": {
-      "type": "object",
-      "required": ["file", "line"],
+      "type": ["object", "null"],
+      "required": ["file", "line", "column", "annotation"],
       "properties": {
-        "file": { "type": "string", "minLength": 1 },
-        "line": { "type": "integer", "minimum": 1 },
-        "column": { "type": "integer", "minimum": 1 },
-        "annotation": { "type": "string" }
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "column": { "type": "integer" },
+        "annotation": { "type": ["string", "null"] }
       },
       "additionalProperties": false
     },
-    "patch": {
-      "type": "object",
-      "required": ["file", "diff", "explanation"],
-      "properties": {
-        "id": { "type": "string" },
-        "file": { "type": "string", "minLength": 1 },
-        "diff": { "type": "string", "minLength": 1 },
-        "explanation": { "type": "string", "minLength": 1 }
-      },
-      "additionalProperties": false
+    "annotation": {
+      "type": ["string", "null"]
     },
-    "choice": {
-      "type": "object",
-      "required": ["id", "label", "action"],
-      "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "label": { "type": "string", "minLength": 1 },
-        "action": {
-          "enum": [
-            "follow",
-            "why",
-            "fix",
-            "other_lead",
-            "retry",
-            "edit_prompt",
-            "open",
-            "run_check",
-            "next",
-            "stop"
-          ]
-        }
-      },
-      "additionalProperties": false
+    "explanation": {
+      "type": ["string", "null"]
+    },
+    "patches": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["id", "file", "diff", "explanation"],
+        "properties": {
+          "id": { "type": ["string", "null"] },
+          "file": { "type": "string" },
+          "diff": { "type": "string" },
+          "explanation": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "question": {
+      "type": ["string", "null"]
+    },
+    "options": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "action"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string" },
+          "action": {
+            "enum": [
+              "follow",
+              "why",
+              "fix",
+              "other_lead",
+              "retry",
+              "edit_prompt",
+              "open",
+              "run_check",
+              "next",
+              "stop"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "summary": {
+      "type": ["string", "null"]
+    },
+    "changed_files": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "string"
+      }
+    },
+    "message": {
+      "type": ["string", "null"]
     }
-  }
+  },
+  "additionalProperties": false
 }

@@ -49,27 +49,35 @@ function M.lines(card)
   }
 
   if card.kind == "hypothesis" then
-    table.insert(lines, card.claim or card.title)
+    M.add(lines, card.claim or card.title)
     M.signal(lines, type(card.evidence) == "table" and card.evidence.annotation)
   elseif card.kind == "finding" then
-    table.insert(lines, card.finding or card.title)
+    M.add(lines, card.finding or card.title)
     M.signal(lines, card.annotation)
   elseif card.kind == "patch" then
-    table.insert(lines, card.explanation or card.title)
+    M.add(lines, card.explanation or card.title)
     table.insert(lines, "")
     table.insert(lines, tostring(#(card.patches or {})) .. " file patch pending")
   elseif card.kind == "summary" then
-    table.insert(lines, card.summary or card.title)
+    M.add(lines, card.summary or card.title)
   elseif card.kind == "error" then
-    table.insert(lines, card.message or card.title)
+    M.add(lines, card.message or card.title)
   elseif card.kind == "choice" then
-    table.insert(lines, card.question or card.title)
+    M.add(lines, card.question or card.title)
   end
 
   table.insert(lines, "")
   table.insert(lines, M.actions(card))
 
   return lines
+end
+
+function M.add(lines, text)
+  text = tostring(text or "")
+
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    table.insert(lines, line)
+  end
 end
 
 function M.signal(lines, text)
@@ -79,7 +87,7 @@ function M.signal(lines, text)
 
   table.insert(lines, "")
   table.insert(lines, "Signal:")
-  table.insert(lines, text)
+  M.add(lines, text)
 end
 
 function M.actions(card)

@@ -50,7 +50,8 @@ impl GenericCliBackend {
                     "Do not return a full plan.",
                     "Do not write prose outside JSON.",
                     "Patch only when action asks for fix.",
-                    "If uncertain, return hypothesis."
+                    "If uncertain, return hypothesis.",
+                    "When the active output schema requires unused fields, set them to null."
                 ],
                 "ops": {
                     "hypothesis": {

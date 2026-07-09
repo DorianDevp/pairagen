@@ -64,8 +64,6 @@ require("pair").setup({
         "exec",
         "--sandbox",
         "read-only",
-        "--ask-for-approval",
-        "never",
         "--color",
         "never",
         "--skip-git-repo-check",
