@@ -34,7 +34,7 @@ impl GenericCliBackend {
 
     fn prompt(&self, req: &BackendRequest) -> String {
         let value = json!({
-            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), summary(title,summary,changed_files), error(title,message). Patch only for fix. Unused schema fields null.",
+            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), summary(title,summary,changed_files), error(title,message). Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
             "limits": {
                 "one": req.card_contract.one_card_only,
                 "max": req.card_contract.max_body_chars

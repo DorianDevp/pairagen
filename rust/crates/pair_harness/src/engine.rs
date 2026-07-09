@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use pair_backends::{BackendAction, BackendAdapter, BackendRequest, CardContract, SessionSnapshot};
 use pair_patch::PatchValidator;
 use pair_protocol::{
-    Action, ActionResult, Card, ContextBundle, PatchApplyResult, StartSessionParams,
+    Action, ActionResult, Card, ContextBundle, ErrorCard, PatchApplyResult, StartSessionParams,
     StartSessionResult, SummaryCard,
 };
 
@@ -176,9 +176,10 @@ impl Engine {
         card: Card,
         next_state: NextState,
     ) -> Result<Card> {
-        validate_one_card(&card)?;
-        PatchValidator::validate_card(&card)?;
-        next_state.validate(&card)?;
+        let card = match validate_backend_card(&card, &next_state) {
+            Ok(()) => card,
+            Err(error) => rejected_card(session, error),
+        };
 
         session.state = SessionState::from_card(&card);
         session.cards.push(card.clone());
@@ -199,6 +200,14 @@ impl Engine {
     }
 }
 
+fn validate_backend_card(card: &Card, next_state: &NextState) -> Result<()> {
+    validate_one_card(card)?;
+    PatchValidator::validate_card(card)?;
+    next_state.validate(card)?;
+
+    Ok(())
+}
+
 fn validate_one_card(card: &Card) -> Result<()> {
     if card.id().trim().is_empty() {
         return Err(anyhow!("card id is empty"));
@@ -213,6 +222,15 @@ fn validate_one_card(card: &Card) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn rejected_card(session: &Session, error: anyhow::Error) -> Card {
+    Card::Error(ErrorCard {
+        id: session.next_card_id("rejected"),
+        title: "Backend card rejected".into(),
+        message: error.to_string(),
+        actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+    })
 }
 
 fn card_summary(card: &Card) -> String {
@@ -264,7 +282,9 @@ mod tests {
         BackendAction, BackendAdapter, BackendMetadata, BackendRequest, BackendResponse,
         MockBackend,
     };
-    use pair_protocol::{BackendInfo, Cursor, FindingCard, HypothesisCard, Mode};
+    use pair_protocol::{
+        BackendInfo, Cursor, FilePatch, FindingCard, HypothesisCard, Mode, PatchCard,
+    };
 
     use super::*;
 
@@ -345,10 +365,33 @@ mod tests {
         assert!(matches!(next.card, Card::Finding(_)));
     }
 
+    #[tokio::test]
+    async fn converts_bad_patch_to_error_card() {
+        let backend = Arc::new(BadPatchBackend);
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+        let Card::Error(card) = result.card else {
+            panic!("expected error card");
+        };
+
+        assert!(card.message.contains("diff has no hunks"));
+
+        let retry = engine
+            .action(&start.session_id, Action::Retry)
+            .await
+            .unwrap();
+
+        assert!(matches!(retry.card, Card::Error(_)));
+    }
+
     #[derive(Default)]
     struct FlakyBackend {
         failed: AtomicBool,
     }
+
+    struct BadPatchBackend;
 
     #[async_trait]
     impl BackendAdapter for FlakyBackend {
@@ -393,6 +436,54 @@ mod tests {
                 name: "flaky".into(),
                 streaming: false,
                 patches: false,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BackendAdapter for BadPatchBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            let card = match req.action {
+                BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                    id: "c_1".into(),
+                    title: "Start".into(),
+                    claim: "Initial claim.".into(),
+                    evidence: None,
+                    next_move: None,
+                    actions: vec![Action::Fix, Action::Stop],
+                }),
+                _ => Card::Patch(PatchCard {
+                    id: "c_patch".into(),
+                    title: "Bad patch".into(),
+                    explanation: "Invalid patch.".into(),
+                    patches: vec![FilePatch {
+                        id: "p_1".into(),
+                        file: "src/work.ts".into(),
+                        diff: "not a unified diff".into(),
+                        explanation: "Broken.".into(),
+                    }],
+                    actions: vec![Action::Apply, Action::Retry, Action::Stop],
+                }),
+            };
+
+            Ok(BackendResponse {
+                card,
+                raw_output: None,
+                metadata: BackendMetadata {
+                    backend: "bad_patch".into(),
+                    token_usage: None,
+                },
+            })
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "bad_patch".into(),
+                streaming: false,
+                patches: true,
                 reasoning: false,
                 can_read_project: false,
                 can_use_tools: false,

@@ -29,6 +29,7 @@ impl SessionState {
             (Self::CardShown, Action::Follow | Action::Why | Action::OtherLead | Action::Open) => {
                 Ok(NextState::Card)
             }
+            (Self::CardShown, Action::Retry | Action::EditPrompt) => Ok(NextState::Any),
             (Self::CardShown, Action::Fix) => Ok(NextState::Patch),
             (Self::CardShown, Action::Stop) => Ok(NextState::Finished),
             (Self::PatchShown, Action::Apply | Action::ApplyPatch { .. }) => Ok(NextState::Summary),

@@ -167,7 +167,7 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
 
 fn agent_api() -> serde_json::Value {
     json!(
-        "Return one JSON Pair op only. Ops: hypothesis, finding, patch, choice, summary, error. Patch only for fix."
+        "Return one JSON Pair op only. Ops: hypothesis, finding, patch, choice, summary, error. Patch only for fix. patch.diff must be unified diff hunks starting with @@."
     )
 }
 
