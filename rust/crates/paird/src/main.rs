@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
-use pair_backends::{BackendAdapter, GenericCliBackend, MockBackend, OpenAiCompatBackend};
+use pair_backends::{BackendAdapter, GenericCliBackend, MockBackend};
 use pair_harness::Engine;
 use pair_protocol::{
     ActionParams, BackendInfo, JsonRpcRequest, JsonRpcResponse, PatchApplyResult,
@@ -50,7 +50,6 @@ async fn serve_stdio() -> Result<()> {
 fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
     match std::env::var("PAIR_BACKEND").as_deref() {
         Ok("generic") | Ok("generic_cli") => Ok(Arc::new(GenericCliBackend::from_env()?)),
-        Ok("api") | Ok("openai_compat") => Ok(Arc::new(OpenAiCompatBackend::from_env()?)),
         _ => Ok(Arc::new(MockBackend)),
     }
 }

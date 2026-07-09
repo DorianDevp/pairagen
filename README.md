@@ -80,15 +80,9 @@ require("pair").setup({
       args = {},
     },
     ["local"] = {
-      kind = "api",
-      base_url = "http://127.0.0.1:11434/v1",
-      model = "qwen2.5-coder:7b",
-    },
-    openai = {
-      kind = "api",
-      base_url = "https://api.openai.com/v1",
-      model = "gpt-4.1",
-      api_key_env = "OPENAI_API_KEY",
+      kind = "generic",
+      command = "ollama",
+      args = { "run", "qwen2.5-coder:7b" },
     },
   },
 })
@@ -100,7 +94,6 @@ Switch at runtime:
 :PairAgent codex
 :PairAgent claude
 :PairAgent local
-:PairAgent openai
 ```
 
 ## Flow

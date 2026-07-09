@@ -1,15 +1,12 @@
 pub mod generic;
 pub mod mock;
-pub mod openai_compat;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use pair_protocol::{Action, BackendInfo, Card, ContextBundle};
-use serde::Serialize;
 
 pub use generic::*;
 pub use mock::*;
-pub use openai_compat::*;
 
 #[async_trait]
 pub trait BackendAdapter: Send + Sync {
@@ -32,7 +29,7 @@ pub enum BackendAction {
     User(Action),
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct CardContract {
     pub one_card_only: bool,
     pub patch_only_on_fix: bool,
