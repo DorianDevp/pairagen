@@ -74,6 +74,11 @@ require("pair").setup({
         "-",
       },
     },
+    agent = {
+      kind = "agent",
+      command = "paird",
+      args = { "dev", "stdio-agent" },
+    },
     claude = {
       kind = "generic",
       command = "claude",
@@ -92,6 +97,7 @@ Switch at runtime:
 
 ```vim
 :PairAgent codex
+:PairAgent agent
 :PairAgent claude
 :PairAgent local
 ```

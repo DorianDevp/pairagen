@@ -26,6 +26,11 @@ M.values = {
         "-",
       },
     },
+    agent = {
+      kind = "agent",
+      command = "paird",
+      args = { "dev", "stdio-agent" },
+    },
     claude = {
       kind = "generic",
       command = "claude",
@@ -110,6 +115,14 @@ function M.backend_env()
   if agent.kind == "mock" then
     return {
       PAIR_BACKEND = "mock",
+    }
+  end
+
+  if agent.kind == "agent" then
+    return {
+      PAIR_BACKEND = "agent_stdio",
+      PAIR_AGENT_COMMAND = agent.command,
+      PAIR_AGENT_ARGS = table.concat(agent.args or {}, " "),
     }
   end
 

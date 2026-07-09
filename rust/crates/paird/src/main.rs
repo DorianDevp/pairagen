@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
-use pair_backends::{BackendAdapter, GenericCliBackend, MockBackend};
+use pair_backends::{BackendAdapter, GenericCliBackend, MockBackend, StdioAgentBackend};
 use pair_harness::Engine;
 use pair_protocol::{
     ActionParams, BackendInfo, JsonRpcRequest, JsonRpcResponse, PatchApplyResult,
@@ -21,6 +21,7 @@ async fn main() -> Result<()> {
         [cmd, sub] if cmd == "backend" && sub == "check" => check_backend(),
         [cmd, sub] if cmd == "schema" && sub == "card" => print_card_schema(),
         [cmd, sub] if cmd == "dev" && sub == "mock-session" => print_mock_session().await,
+        [cmd, sub] if cmd == "dev" && sub == "stdio-agent" => run_stdio_agent(),
         _ => print_help(),
     }
 }
@@ -49,6 +50,7 @@ async fn serve_stdio() -> Result<()> {
 
 fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
     match std::env::var("PAIR_BACKEND").as_deref() {
+        Ok("agent") | Ok("agent_stdio") => Ok(Arc::new(StdioAgentBackend::from_env()?)),
         Ok("generic") | Ok("generic_cli") => Ok(Arc::new(GenericCliBackend::from_env()?)),
         _ => Ok(Arc::new(MockBackend)),
     }
@@ -192,12 +194,51 @@ async fn print_mock_session() -> Result<()> {
     Ok(())
 }
 
+fn run_stdio_agent() -> Result<()> {
+    let stdin = io::stdin();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        let value = serde_json::from_str::<serde_json::Value>(&line)?;
+        let action = value
+            .get("action")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let op = if action.contains("Fix") {
+            json!({
+                "op": "patch",
+                "title": "Guard payload shape",
+                "explanation": "Keep body present for callers.",
+                "patches": [
+                    {
+                        "file": "src/work.ts",
+                        "diff": "@@ -1,1 +1,1 @@\n-placeholder\n+payload = payload or {}\n",
+                        "explanation": "Creates a payload fallback."
+                    }
+                ]
+            })
+        } else {
+            json!({
+                "op": "hypothesis",
+                "title": "Payload may be skipped",
+                "claim": "This path can return before the payload is built."
+            })
+        };
+
+        println!("{}", serde_json::to_string(&op)?);
+        io::stdout().flush()?;
+    }
+
+    Ok(())
+}
+
 fn print_help() -> Result<()> {
     eprintln!("paird --stdio");
     eprintln!("paird backend list");
     eprintln!("paird backend check");
     eprintln!("paird schema card");
     eprintln!("paird dev mock-session");
+    eprintln!("paird dev stdio-agent");
 
     Ok(())
 }
