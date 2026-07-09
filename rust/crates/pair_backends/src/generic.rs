@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use pair_protocol::{Action, BackendInfo, Card, ErrorCard};
+use pair_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -40,16 +40,65 @@ impl GenericCliBackend {
     fn prompt(&self, req: &BackendRequest) -> String {
         let value = json!({
             "contract": {
-                "role": "interactive pair-programming stepper",
+                "role": "Pair Agent API",
                 "one_card_only": req.card_contract.one_card_only,
                 "patch_only_on_fix": req.card_contract.patch_only_on_fix,
                 "max_body_chars": req.card_contract.max_body_chars,
                 "rules": [
-                    "Return exactly one JSON card.",
+                    "Return exactly one JSON object.",
+                    "Return one Pair op, not a card.",
                     "Do not return a full plan.",
                     "Do not write prose outside JSON.",
                     "Patch only when action asks for fix.",
                     "If uncertain, return hypothesis."
+                ],
+                "ops": {
+                    "hypothesis": {
+                        "required": ["op", "title", "claim"],
+                        "optional": ["evidence", "next"]
+                    },
+                    "finding": {
+                        "required": ["op", "title", "finding"],
+                        "optional": ["location", "annotation"]
+                    },
+                    "patch": {
+                        "required": ["op", "title", "explanation", "patches"],
+                        "patch": ["file", "diff", "explanation"]
+                    },
+                    "choice": {
+                        "required": ["op", "title", "question", "options"]
+                    },
+                    "summary": {
+                        "required": ["op", "title", "summary", "changed_files"]
+                    },
+                    "error": {
+                        "required": ["op", "title", "message"]
+                    }
+                },
+                "examples": [
+                    {
+                        "op": "hypothesis",
+                        "title": "Payload may be skipped",
+                        "claim": "This branch can return before payload construction.",
+                        "evidence": {
+                            "file": "src/work.ts",
+                            "line": 42,
+                            "column": 1,
+                            "annotation": "early return skips payload construction"
+                        }
+                    },
+                    {
+                        "op": "patch",
+                        "title": "Guard payload shape",
+                        "explanation": "Keep body present for callers.",
+                        "patches": [
+                            {
+                                "file": "src/work.ts",
+                                "diff": "@@ -1,1 +1,1 @@\n-placeholder\n+payload = payload || {}\n",
+                                "explanation": "Creates a payload fallback."
+                            }
+                        ]
+                    }
                 ]
             },
             "session": {
@@ -94,7 +143,9 @@ impl BackendAdapter for GenericCliBackend {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let raw_output = format!("{stdout}{stderr}");
-        let card = parse_card(&stdout).unwrap_or_else(|error| Self::error_card(error.to_string()));
+        let card = parse_card(&stdout).unwrap_or_else(|error| {
+            Self::error_card(format!("{}\n\n{}", error, excerpt(&raw_output)))
+        });
 
         Ok(BackendResponse {
             card,
@@ -118,15 +169,39 @@ impl BackendAdapter for GenericCliBackend {
 }
 
 fn parse_card(output: &str) -> Result<Card> {
+    if let Ok(op) = serde_json::from_str::<AgentOp>(output.trim()) {
+        return Ok(op.into_card("c_agent"));
+    }
+
     if let Ok(card) = serde_json::from_str(output.trim()) {
         return Ok(card);
     }
 
     let Some(json) = first_json_object(output) else {
-        return Err(anyhow!("backend returned no JSON card"));
+        return Err(anyhow!("backend returned no Pair op"));
     };
 
+    if let Ok(op) = serde_json::from_str::<AgentOp>(json) {
+        return Ok(op.into_card("c_agent"));
+    }
+
     Ok(serde_json::from_str(json)?)
+}
+
+fn excerpt(output: &str) -> String {
+    let output = output.trim();
+
+    if output.is_empty() {
+        return "Raw output was empty.".into();
+    }
+
+    let mut text = output.chars().take(800).collect::<String>();
+
+    if output.chars().count() > 800 {
+        text.push_str("\n...");
+    }
+
+    format!("Raw output:\n{text}")
 }
 
 fn first_json_object(output: &str) -> Option<&str> {
@@ -187,5 +262,14 @@ mod tests {
         let card = parse_card(output).unwrap();
 
         assert!(matches!(card, Card::Error(_)));
+    }
+
+    #[test]
+    fn extracts_agent_op() {
+        let output =
+            "text {\"op\":\"hypothesis\",\"title\":\"Maybe\",\"claim\":\"It may happen\"} tail";
+        let card = parse_card(output).unwrap();
+
+        assert!(matches!(card, Card::Hypothesis(_)));
     }
 }

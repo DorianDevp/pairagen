@@ -14,7 +14,17 @@ M.values = {
     codex = {
       kind = "generic",
       command = "codex",
-      args = {},
+      args = {
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--ask-for-approval",
+        "never",
+        "--color",
+        "never",
+        "--skip-git-repo-check",
+        "-",
+      },
     },
     claude = {
       kind = "generic",

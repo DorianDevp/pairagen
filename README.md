@@ -60,7 +60,19 @@ require("pair").setup({
     codex = {
       kind = "generic",
       command = "codex",
-      args = {},
+      args = {
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--ask-for-approval",
+        "never",
+        "--color",
+        "never",
+        "--skip-git-repo-check",
+        "--output-schema",
+        "/path/to/pairagen/schemas/pair-agent-op.schema.json",
+        "-",
+      },
     },
     claude = {
       kind = "generic",
