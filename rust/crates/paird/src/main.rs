@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
-use pair_backends::{BackendAdapter, MockBackend};
+use pair_backends::{BackendAdapter, GenericCliBackend, MockBackend};
 use pair_harness::Engine;
 use pair_protocol::{
     ActionParams, BackendInfo, JsonRpcRequest, JsonRpcResponse, PatchApplyResult,
@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
 }
 
 async fn serve_stdio() -> Result<()> {
-    let backend = Arc::new(MockBackend);
+    let backend = backend_from_env()?;
     let mut server = Server::new(backend);
     let stdin = io::stdin();
 
@@ -45,6 +45,13 @@ async fn serve_stdio() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
+    match std::env::var("PAIR_BACKEND").as_deref() {
+        Ok("generic") | Ok("generic_cli") => Ok(Arc::new(GenericCliBackend::from_env()?)),
+        _ => Ok(Arc::new(MockBackend)),
+    }
 }
 
 struct Server {

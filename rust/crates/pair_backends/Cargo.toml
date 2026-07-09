@@ -7,3 +7,5 @@ edition.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 pair_protocol = { path = "../pair_protocol" }
+serde_json.workspace = true
+tokio.workspace = true

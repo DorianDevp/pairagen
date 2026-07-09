@@ -135,6 +135,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "pair_protocol",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

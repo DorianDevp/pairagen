@@ -1,9 +1,11 @@
+pub mod generic;
 pub mod mock;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use pair_protocol::{Action, BackendInfo, Card, ContextBundle};
 
+pub use generic::*;
 pub use mock::*;
 
 #[async_trait]
