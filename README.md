@@ -13,7 +13,7 @@ The editor experience stays the same.
 
 MVP core is implemented:
 
-- Neovim textarea prompt, card, navigation, annotation, diff, apply and reject UI
+- Neovim labeled textarea prompt, card, navigation, annotation, diff, apply and reject UI
 - thinking spinner, resume and reset controls
 - session token usage and local error log
 - JSON-RPC over stdio

@@ -134,6 +134,7 @@ end
 function M.reset()
   thinking.stop(true)
   ui.close(state.prompt_win)
+  ui.close(state.prompt_frame_win)
   ui.close(state.card_win)
   ui.close(state.thinking_win)
   status.hide()
@@ -144,6 +145,8 @@ function M.reset()
   state.last_card = nil
   state.prompt_win = nil
   state.prompt_buf = nil
+  state.prompt_frame_win = nil
+  state.prompt_frame_buf = nil
   state.card_win = nil
   state.card_buf = nil
   state.status_win = nil

@@ -5,18 +5,53 @@ local ui = require("pair.ui")
 local M = {}
 
 function M.open(mode)
-  ui.close(state.prompt_win)
+  M.close()
 
-  local buf, win = ui.float({ "" }, {
-    width = M.width(),
-    height = config.values.prompt.height,
+  local size = M.size()
+  local row = math.floor((vim.o.lines - size.outer_height) * 0.28)
+  local col = math.floor((vim.o.columns - size.outer_width) / 2)
+  local frame_buf = vim.api.nvim_create_buf(false, true)
+  local frame_win = vim.api.nvim_open_win(frame_buf, false, {
+    relative = "editor",
+    row = row,
+    col = col,
+    width = size.outer_width,
+    height = size.outer_height,
+    style = "minimal",
     border = config.values.prompt.border,
-    row = math.floor(vim.o.lines * 0.3),
+    title = " Pair Prompt ",
+    title_pos = "left",
+    footer = " Ctrl-s submit  Esc normal  q close ",
+    footer_pos = "right",
+  })
+
+  state.prompt_frame_buf = frame_buf
+  state.prompt_frame_win = frame_win
+
+  vim.bo[frame_buf].bufhidden = "wipe"
+  vim.bo[frame_buf].modifiable = false
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    row = row + config.values.prompt.padding_y,
+    col = col + config.values.prompt.padding_x,
+    width = size.inner_width,
+    height = size.inner_height,
+    style = "minimal",
+    border = "none",
   })
 
   state.prompt_buf = buf
   state.prompt_win = win
 
+  M.prepare(buf, win)
+  M.bind(buf, win, mode)
+
+  vim.cmd("startinsert")
+end
+
+function M.prepare(buf, win)
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].swapfile = false
@@ -24,9 +59,12 @@ function M.open(mode)
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
   vim.wo[win].cursorline = true
+  vim.wo[win].number = false
+  vim.wo[win].relativenumber = false
+  vim.wo[win].signcolumn = "no"
+end
 
-  vim.cmd("startinsert")
-
+function M.bind(buf, win, mode)
   vim.keymap.set({ "i", "n" }, "<C-s>", function()
     M.submit(buf, win, mode)
   end, { buffer = buf, nowait = true, silent = true })
@@ -36,7 +74,7 @@ function M.open(mode)
   end, { buffer = buf, nowait = true, silent = true })
 
   vim.keymap.set("n", "q", function()
-    ui.close(win)
+    M.close()
   end, { buffer = buf, nowait = true, silent = true })
 end
 
@@ -51,8 +89,18 @@ function M.submit(buf, win, mode)
     vim.cmd("stopinsert")
   end
 
-  ui.close(win)
+  M.close()
   require("pair").start(text, mode)
+end
+
+function M.close()
+  ui.close(state.prompt_win)
+  ui.close(state.prompt_frame_win)
+
+  state.prompt_win = nil
+  state.prompt_buf = nil
+  state.prompt_frame_win = nil
+  state.prompt_frame_buf = nil
 end
 
 function M.text(buf)
@@ -61,8 +109,25 @@ function M.text(buf)
   return vim.trim(table.concat(lines, "\n"))
 end
 
+function M.size()
+  local outer_width = M.width()
+  local outer_height = math.min(
+    config.values.prompt.height,
+    math.max(vim.o.lines - 6, 5)
+  )
+  local inner_width = math.max(outer_width - config.values.prompt.padding_x * 2, 20)
+  local inner_height = math.max(outer_height - config.values.prompt.padding_y * 2, 1)
+
+  return {
+    outer_width = outer_width,
+    outer_height = outer_height,
+    inner_width = inner_width,
+    inner_height = inner_height,
+  }
+end
+
 function M.width()
-  local configured = config.values.prompt.width or 88
+  local configured = config.values.prompt.width or 96
   local limit = math.max(vim.o.columns - 8, 24)
 
   return math.min(configured, limit)

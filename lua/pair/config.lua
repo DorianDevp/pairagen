@@ -58,8 +58,10 @@ M.values = {
   },
   prompt = {
     border = "rounded",
-    width = 88,
-    height = 8,
+    width = 96,
+    height = 10,
+    padding_x = 4,
+    padding_y = 2,
   },
   card = {
     border = "rounded",
