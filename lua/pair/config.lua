@@ -52,6 +52,7 @@ M.values = {
     fix = "<leader>px",
     other_lead = "<leader>pn",
     stop = "<leader>pq",
+    hide = "<leader>ph",
     resume = "<leader>pr",
     reset = "<leader>pR",
   },

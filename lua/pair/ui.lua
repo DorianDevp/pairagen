@@ -24,7 +24,8 @@ function M.float(lines, opts)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].bufhidden = "wipe"
 
-  local win = vim.api.nvim_open_win(buf, true, {
+  local enter = opts.enter ~= false
+  local win = vim.api.nvim_open_win(buf, enter, {
     relative = "editor",
     row = row,
     col = col,

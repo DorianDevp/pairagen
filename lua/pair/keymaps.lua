@@ -17,6 +17,7 @@ function M.setup()
   M.action(keys.fix, "fix")
   M.action(keys.other_lead, "other_lead")
   M.action(keys.stop, "stop")
+  M.call(keys.hide, "hide")
   M.call(keys.resume, "resume")
   M.call(keys.reset, "reset")
 end

@@ -1,6 +1,7 @@
 local config = require("pair.config")
 local navigation = require("pair.navigation")
 local state = require("pair.state")
+local status = require("pair.status")
 local ui = require("pair.ui")
 
 local M = {}
@@ -11,6 +12,7 @@ local labels = {
   fix = { "x", "Fix" },
   other_lead = { "n", "Other" },
   apply = { "a", "Apply" },
+  apply_patch = { "a", "Apply" },
   retry = { "r", "Retry" },
   edit_prompt = { "e", "Edit" },
   open = { "o", "Open" },
@@ -22,6 +24,7 @@ local labels = {
 function M.show(card)
   state.card = card
   state.last_card = card
+  status.hide()
   navigation.from_card(card)
 
   local lines = M.lines(card)
@@ -46,6 +49,8 @@ function M.lines(card)
   local lines = {
     M.title(card.kind),
     string.rep("-", 32),
+    M.actions(card),
+    "",
   }
 
   if card.kind == "hypothesis" then
@@ -67,8 +72,6 @@ function M.lines(card)
   end
 
   M.tokens(lines)
-  table.insert(lines, "")
-  table.insert(lines, M.actions(card))
 
   return lines
 end
@@ -110,7 +113,7 @@ end
 
 function M.actions(card)
   local actions = card.actions or card.next_actions or {}
-  local parts = {}
+  local parts = { "[h] Hide" }
 
   for _, action in ipairs(actions) do
     local name = type(action) == "table" and "apply_patch" or action
@@ -126,6 +129,10 @@ end
 
 function M.bind(buf, card)
   local actions = card.actions or card.next_actions or {}
+
+  vim.keymap.set("n", "h", function()
+    require("pair").hide()
+  end, { buffer = buf, nowait = true, silent = true })
 
   for _, action in ipairs(actions) do
     local name = type(action) == "table" and "apply" or action

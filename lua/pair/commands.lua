@@ -29,6 +29,10 @@ function M.setup()
     require("pair").stop()
   end, { force = true })
 
+  vim.api.nvim_create_user_command("PairHide", function()
+    require("pair").hide()
+  end, { force = true })
+
   vim.api.nvim_create_user_command("PairResume", function()
     require("pair").resume()
   end, { force = true })

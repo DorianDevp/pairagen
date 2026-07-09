@@ -5,6 +5,7 @@ local log = require("pair.log")
 local prompt = require("pair.prompt")
 local rpc = require("pair.rpc")
 local state = require("pair.state")
+local status = require("pair.status")
 local thinking = require("pair.thinking")
 local ui = require("pair.ui")
 
@@ -25,6 +26,7 @@ function M.start(text, mode)
     return
   end
 
+  status.hide()
   local request_id = thinking.start("Thinking", nil)
 
   rpc.request("session/start", context.current(text, mode), function(message)
@@ -61,6 +63,7 @@ function M.action(action)
   end
 
   ui.notify("Pair: " .. action)
+  status.hide()
   local session_id = state.session_id
   local request_id = thinking.start("Thinking", session_id)
 
@@ -101,6 +104,8 @@ function M.stop()
 end
 
 function M.resume()
+  status.hide()
+
   if state.card then
     card.show(state.card)
 
@@ -116,11 +121,22 @@ function M.resume()
   ui.notify("No Pair card to restore", vim.log.levels.WARN)
 end
 
+function M.hide()
+  if not state.session_id then
+    return
+  end
+
+  ui.close(state.card_win)
+  state.card_win = nil
+  status.show()
+end
+
 function M.reset()
   thinking.stop(true)
   ui.close(state.prompt_win)
   ui.close(state.card_win)
   ui.close(state.thinking_win)
+  status.hide()
   rpc.stop()
 
   state.session_id = nil
@@ -130,6 +146,8 @@ function M.reset()
   state.prompt_buf = nil
   state.card_win = nil
   state.card_buf = nil
+  state.status_win = nil
+  state.status_buf = nil
   state.diff_tab = nil
   state.token_usage = nil
   state.thinking_request_id = nil

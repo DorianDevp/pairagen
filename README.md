@@ -124,6 +124,7 @@ Summary
 :PairOther
 :PairNext
 :PairStop
+:PairHide
 :PairResume
 :PairReset
 :PairLog
