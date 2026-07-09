@@ -5,5 +5,9 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+pair_backends = { path = "../pair_backends" }
+pair_harness = { path = "../pair_harness" }
 pair_protocol = { path = "../pair_protocol" }
+serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true

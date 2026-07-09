@@ -171,8 +171,12 @@ name = "paird"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "pair_backends",
+ "pair_harness",
  "pair_protocol",
+ "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
