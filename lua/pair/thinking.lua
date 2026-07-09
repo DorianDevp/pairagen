@@ -4,58 +4,24 @@ local ui = require("pair.ui")
 
 local M = {}
 local uv = vim.uv or vim.loop
+local frames = { "|", "/", "-", "\\" }
 
-local frames = {
-  {
-    "     .---.     ",
-    "   .'  |  '.   ",
-    "  /    |    \\  ",
-    " |     |     | ",
-    "  \\    |    /  ",
-    "   '.  |  .'   ",
-    "     '---'     ",
-  },
-  {
-    "     .---.     ",
-    "   .'  /  '.   ",
-    "  /   /     \\  ",
-    " |   /       | ",
-    "  \\ /       /  ",
-    "   '.___.'     ",
-    "     '---'     ",
-  },
-  {
-    "     .---.     ",
-    "   .'     '.   ",
-    "  /  .---.  \\  ",
-    " |  |     |  | ",
-    "  \\  '---'  /  ",
-    "   '.     .'   ",
-    "     '---'     ",
-  },
-  {
-    "     .---.     ",
-    "   .'  \\  '.   ",
-    "  /     \\   \\  ",
-    " |       \\   | ",
-    "  \\       \\ /  ",
-    "   '.___.'     ",
-    "     '---'     ",
-  },
-}
-
-function M.start(label)
+function M.start(label, session_id)
   if not config.values.thinking.enabled then
-    return
+    return nil
   end
 
   M.stop(false)
 
+  local request_id = tostring(uv.hrtime())
+
   state.thinking_frame = 1
+  state.thinking_request_id = request_id
+  state.thinking_session_id = session_id
 
   local lines = M.lines(label or "Thinking", state.thinking_frame)
   local buf, win = ui.render(state.card_buf, state.card_win, lines, {
-    width = 28,
+    width = 24,
     height = #lines,
     border = config.values.card.border,
     row = math.floor(vim.o.lines * 0.3),
@@ -72,11 +38,19 @@ function M.start(label)
 
   state.thinking_timer = uv.new_timer()
   state.thinking_timer:start(0, config.values.thinking.interval, vim.schedule_wrap(function()
-    M.tick(label or "Thinking")
+    M.tick(label or "Thinking", request_id)
   end))
+
+  return request_id
 end
 
-function M.tick(label)
+function M.tick(label, request_id)
+  if not M.current(request_id) then
+    M.stop(false)
+
+    return
+  end
+
   if not state.card_buf or not vim.api.nvim_buf_is_valid(state.card_buf) then
     M.stop(false)
 
@@ -92,27 +66,33 @@ function M.tick(label)
   state.thinking_frame = ((state.thinking_frame or 1) % #frames) + 1
 
   ui.render(state.card_buf, state.card_win, M.lines(label, state.thinking_frame), {
-    width = 28,
-    height = 11,
+    width = 24,
+    height = 5,
     border = config.values.card.border,
     row = math.floor(vim.o.lines * 0.3),
   })
 end
 
-function M.lines(label, index)
-  local lines = {
-    label,
-    string.rep("-", 18),
-  }
-
-  for _, line in ipairs(frames[index]) do
-    table.insert(lines, line)
+function M.current(request_id)
+  if request_id ~= state.thinking_request_id then
+    return false
   end
 
-  table.insert(lines, "")
-  table.insert(lines, "[q] Hide")
+  if state.thinking_session_id and state.session_id ~= state.thinking_session_id then
+    return false
+  end
 
-  return lines
+  return true
+end
+
+function M.lines(label, index)
+  return {
+    label,
+    string.rep("-", 18),
+    frames[index] .. " loading",
+    "",
+    "[q] Hide",
+  }
 end
 
 function M.stop(close)
@@ -126,6 +106,8 @@ function M.stop(close)
   state.thinking_timer = nil
   state.thinking_win = nil
   state.thinking_buf = nil
+  state.thinking_request_id = nil
+  state.thinking_session_id = nil
 
   if close then
     ui.close(state.card_win)

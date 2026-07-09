@@ -93,21 +93,32 @@ function M.reject()
 end
 
 function M.send(accepted, patch_ids, changed_files, error)
-  thinking.start("Applying")
+  local session_id = state.session_id
+  local request_id = thinking.start("Applying", session_id)
 
   rpc.request("patch/apply_result", {
-    session_id = state.session_id,
+    session_id = session_id,
     card_id = state.card and state.card.id or "",
     accepted = accepted,
     patch_ids = patch_ids,
     changed_files = changed_files,
     error = error,
   }, function(message)
+    if not thinking.current(request_id) then
+      return
+    end
+
     thinking.stop()
 
     if message.error then
       log.write("patch apply error", message.error)
       ui.notify(message.error.message, vim.log.levels.ERROR)
+
+      return
+    end
+
+    if message.result.session_id ~= state.session_id then
+      log.write("stale patch result", message.result)
 
       return
     end

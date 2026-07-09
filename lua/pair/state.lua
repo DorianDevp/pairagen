@@ -9,6 +9,8 @@ local M = {
   thinking_win = nil,
   thinking_buf = nil,
   thinking_timer = nil,
+  thinking_request_id = nil,
+  thinking_session_id = nil,
   last_card = nil,
   token_usage = nil,
 }

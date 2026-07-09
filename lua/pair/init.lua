@@ -25,9 +25,13 @@ function M.start(text, mode)
     return
   end
 
-  thinking.start("Thinking")
+  local request_id = thinking.start("Thinking", nil)
 
   rpc.request("session/start", context.current(text, mode), function(message)
+    if not thinking.current(request_id) then
+      return
+    end
+
     thinking.stop()
 
     if message.error then
@@ -57,17 +61,28 @@ function M.action(action)
   end
 
   ui.notify("Pair: " .. action)
-  thinking.start("Thinking")
+  local session_id = state.session_id
+  local request_id = thinking.start("Thinking", session_id)
 
   rpc.request("session/action", {
-    session_id = state.session_id,
+    session_id = session_id,
     action = action,
   }, function(message)
+    if not thinking.current(request_id) then
+      return
+    end
+
     thinking.stop()
 
     if message.error then
       log.write("session action error", message.error)
       ui.notify(message.error.message, vim.log.levels.ERROR)
+
+      return
+    end
+
+    if message.result.session_id ~= state.session_id then
+      log.write("stale session action result", message.result)
 
       return
     end
@@ -117,6 +132,8 @@ function M.reset()
   state.card_buf = nil
   state.diff_tab = nil
   state.token_usage = nil
+  state.thinking_request_id = nil
+  state.thinking_session_id = nil
 
   ui.notify("Pair reset")
 end
