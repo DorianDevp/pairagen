@@ -48,6 +48,8 @@ function M.action(action)
     return
   end
 
+  ui.notify("Pair: " .. action)
+
   rpc.request("session/action", {
     session_id = state.session_id,
     action = action,

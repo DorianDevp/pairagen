@@ -6,11 +6,23 @@ function M.setup()
   end, { force = true })
 
   vim.api.nvim_create_user_command("PairFix", function()
-    require("pair").prompt("fix")
+    M.action_or_prompt("fix", "fix")
   end, { force = true })
 
   vim.api.nvim_create_user_command("PairWhy", function()
-    require("pair").prompt("explain")
+    M.action_or_prompt("why", "explain")
+  end, { force = true })
+
+  vim.api.nvim_create_user_command("PairFollow", function()
+    require("pair").action("follow")
+  end, { force = true })
+
+  vim.api.nvim_create_user_command("PairOther", function()
+    require("pair").action("other_lead")
+  end, { force = true })
+
+  vim.api.nvim_create_user_command("PairNext", function()
+    require("pair").action("next")
   end, { force = true })
 
   vim.api.nvim_create_user_command("PairStop", function()
@@ -30,6 +42,16 @@ function M.setup()
     end,
     force = true,
   })
+end
+
+function M.action_or_prompt(action, mode)
+  if require("pair.state").session_id then
+    require("pair").action(action)
+
+    return
+  end
+
+  require("pair").prompt(mode)
 end
 
 return M

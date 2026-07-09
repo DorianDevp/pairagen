@@ -36,6 +36,7 @@ function M.show(card)
   state.card_win = win
 
   M.bind(buf, card)
+  ui.focus(win)
 
   if card.kind == "patch" then
     require("pair.diff").show(card)

@@ -34,6 +34,16 @@ function M.float(lines, opts)
   return buf, win
 end
 
+function M.focus(win)
+  if vim.fn.mode():match("^[iR]") then
+    vim.cmd("stopinsert")
+  end
+
+  if win and vim.api.nvim_win_is_valid(win) then
+    vim.api.nvim_set_current_win(win)
+  end
+end
+
 function M.lines(lines)
   local out = {}
 

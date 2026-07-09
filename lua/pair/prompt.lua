@@ -23,6 +23,7 @@ function M.open(mode)
 
   vim.keymap.set("i", "<CR>", function()
     local line = vim.api.nvim_get_current_line():gsub("^Pair>%s*", "")
+    vim.cmd("stopinsert")
     ui.close(win)
     require("pair").start(line, mode)
   end, { buffer = buf, nowait = true, silent = true })

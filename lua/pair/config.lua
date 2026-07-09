@@ -47,6 +47,11 @@ M.values = {
   },
   keymaps = {
     prompt = "<leader>a",
+    follow = "<leader>pf",
+    why = "<leader>pw",
+    fix = "<leader>px",
+    other_lead = "<leader>pn",
+    stop = "<leader>pq",
   },
   prompt = {
     border = "rounded",
