@@ -54,6 +54,9 @@ M.values = {
     hide = "<leader>ph",
     resume = "<leader>pr",
     reset = "<leader>pR",
+    draft_accept = "<leader>pa",
+    draft_reject = "<leader>pd",
+    draft_retry = "<leader>pr",
   },
   prompt = {
     border = "rounded",

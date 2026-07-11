@@ -37,8 +37,18 @@ function M.show(card)
   end
 
   local source_lines = vim.api.nvim_buf_get_lines(source_buf, 0, -1, false)
-  local ok, draft_lines = pcall(apply.apply_diff, source_lines, patch.diff)
-  if not ok then
+  local hunk_ok, hunk = pcall(apply.parse_hunk, patch.diff)
+  if not hunk_ok then
+    ui.notify(hunk, vim.log.levels.ERROR)
+    return
+  end
+  local start_ok, source_start = pcall(apply.resolve_start, source_lines, hunk)
+  if not start_ok then
+    ui.notify(source_start, vim.log.levels.ERROR)
+    return
+  end
+  local draft_ok, draft_lines = pcall(apply.apply_diff, source_lines, patch.diff)
+  if not draft_ok then
     ui.notify(draft_lines, vim.log.levels.ERROR)
     return
   end
@@ -52,41 +62,124 @@ function M.show(card)
   vim.api.nvim_buf_set_name(draft_buf, "Pair draft: " .. patch.file)
   vim.api.nvim_buf_set_lines(draft_buf, 0, -1, false, draft_lines)
 
-  ui.close(state.card_win)
-  state.card_win = nil
   vim.api.nvim_win_set_buf(source_win, draft_buf)
   vim.api.nvim_set_current_win(source_win)
-
-  local new_start, new_len = M.new_range(patch.diff)
-  local row = math.max(new_start - 1, 0)
-  local end_row = math.min(row + math.max(new_len, 1), #draft_lines)
-  vim.api.nvim_win_set_cursor(source_win, { math.min(new_start, #draft_lines), 0 })
-  local mark = {
-    end_row = end_row,
-    line_hl_group = "DiffChange",
-    virt_text = { { " Pair draft", "DiagnosticInfo" } },
-    virt_text_pos = "eol",
-  }
-  if card.warnings and card.warnings[1] then
-    mark.virt_lines = { { { "Warning: " .. card.warnings[1], "DiagnosticWarn" } } }
-    mark.virt_lines_above = true
-  end
-  vim.api.nvim_buf_set_extmark(draft_buf, namespace, row, 0, mark)
 
   state.diff_buf = draft_buf
   state.diff_win = source_win
   state.diff_source_buf = source_buf
   state.diff_source_tick = vim.api.nvim_buf_get_changedtick(source_buf)
 
-  vim.keymap.set("n", "a", M.accept, { buffer = draft_buf, nowait = true, silent = true })
-  vim.keymap.set("n", "q", M.reject, { buffer = draft_buf, nowait = true, silent = true })
-  vim.keymap.set("n", "r", M.retry, { buffer = draft_buf, nowait = true, silent = true })
+  local annotations = M.annotations(hunk, source_start)
+  M.decorate(draft_buf, draft_lines, annotations, card.warnings or {})
+  vim.api.nvim_win_set_cursor(source_win, {
+    math.min(annotations.first_row + 1, math.max(#draft_lines, 1)),
+    0,
+  })
+  M.controls(card)
+  vim.api.nvim_set_current_win(source_win)
+
+  local keymaps = require("pair.config").values.keymaps
+  vim.keymap.set("n", keymaps.draft_accept, M.accept, { buffer = draft_buf, nowait = true, silent = true })
+  vim.keymap.set("n", keymaps.draft_reject, M.reject, { buffer = draft_buf, nowait = true, silent = true })
+  vim.keymap.set("n", keymaps.draft_retry, M.retry, { buffer = draft_buf, nowait = true, silent = true })
 end
 
-function M.new_range(diff)
-  local new_start, new_len = diff:match("^@@ %-%d+,%d+ %+(%d+),(%d+) @@")
+function M.annotations(hunk, source_start)
+  local row = source_start
+  local annotations = {
+    first_row = source_start,
+    added = {},
+    removed = {},
+  }
 
-  return tonumber(new_start) or 1, tonumber(new_len) or 1
+  for _, line in ipairs(hunk.lines) do
+    if line.kind == "context" then
+      row = row + 1
+    elseif line.kind == "remove" then
+      annotations.removed[row] = annotations.removed[row] or {}
+      table.insert(annotations.removed[row], line.text)
+    elseif line.kind == "add" then
+      table.insert(annotations.added, row)
+      row = row + 1
+    end
+  end
+
+  return annotations
+end
+
+function M.decorate(buf, draft_lines, annotations, warnings)
+  for _, row in ipairs(annotations.added) do
+    if row < #draft_lines then
+      vim.api.nvim_buf_set_extmark(buf, namespace, row, 0, {
+        end_row = row + 1,
+        line_hl_group = "DiffAdd",
+        virt_text = { { " +", "DiffAdd" } },
+        virt_text_pos = "eol",
+      })
+    end
+  end
+
+  local virtual = {}
+  for row, removed in pairs(annotations.removed) do
+    virtual[row] = virtual[row] or {}
+    for _, text in ipairs(removed) do
+      table.insert(virtual[row], { { "- " .. text, "DiffDelete" } })
+    end
+  end
+
+  if warnings[1] then
+    local row = annotations.first_row
+    virtual[row] = virtual[row] or {}
+    table.insert(virtual[row], 1, { { "Warning: " .. warnings[1], "DiagnosticWarn" } })
+  end
+
+  for row, lines in pairs(virtual) do
+    local anchor = math.min(row, math.max(#draft_lines - 1, 0))
+    vim.api.nvim_buf_set_extmark(buf, namespace, anchor, 0, {
+      virt_lines = lines,
+      virt_lines_above = true,
+    })
+  end
+end
+
+function M.controls(card)
+  local lines = {
+    "Pair draft",
+    "<leader>pa  Accept",
+    "<leader>pd  Reject",
+    "<leader>pr  Retry",
+    "Edit code directly",
+  }
+  if card.warnings and card.warnings[1] then
+    table.insert(lines, "Warning shown at hunk")
+  end
+
+  local width = 24
+  local height = 0
+  for _, line in ipairs(lines) do
+    height = height + math.max(math.ceil(vim.fn.strdisplaywidth(line) / width), 1)
+  end
+  local buf, win = ui.render(state.card_buf, state.card_win, lines, {
+    width = width,
+    height = height,
+    row = 1,
+    col = math.max(vim.o.columns - width - 2, 0),
+    enter = false,
+  })
+  state.card_buf = buf
+  state.card_win = win
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
+
+  vim.keymap.set("n", "a", M.accept, { buffer = buf, nowait = true, silent = true })
+  vim.keymap.set("n", "q", M.reject, { buffer = buf, nowait = true, silent = true })
+  vim.keymap.set("n", "r", M.retry, { buffer = buf, nowait = true, silent = true })
+  vim.keymap.set("n", "e", function()
+    if M.valid_preview() then
+      vim.api.nvim_set_current_win(state.diff_win)
+    end
+  end, { buffer = buf, nowait = true, silent = true })
 end
 
 function M.accept()
@@ -157,6 +250,8 @@ function M.restore_source(cursor)
   if draft_buf and vim.api.nvim_buf_is_valid(draft_buf) then
     pcall(vim.api.nvim_buf_delete, draft_buf, { force = true })
   end
+  ui.close(state.card_win)
+  state.card_win = nil
 
   state.diff_buf = nil
   state.diff_win = nil

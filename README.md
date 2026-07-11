@@ -104,7 +104,8 @@ Prompt
 Hypothesis
 Follow, Why, Fix, Other, Stop
 Patch
-Apply or Reject
+Edit the inline draft
+<leader>pa Accept, <leader>pd Reject, <leader>pr Retry
 Summary
 ```
 
