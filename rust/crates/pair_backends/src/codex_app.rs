@@ -542,7 +542,9 @@ fn prompt(req: &BackendRequest) -> String {
              - Change one coherent local block in the supplied excerpt. Leave later blocks for later Pair cards.\n\
              - Explain why this draft is the useful next move, not merely what lines it changes.\n\
              - The step must be internally coherent: do not introduce undefined symbols or dangling references.\n\
-             - If a safe step needs unseen references, limit this hunk to self-contained preparation.\n\
+             - The code must remain type-correct after this hunk. Never change a field type while deferring its producer/initializer to a later card.\n\
+             - If a safe step needs unseen references or more changed lines, limit this hunk to self-contained preparation such as adding only the new struct definition.\n\
+             - Context and remove lines must be exact, contiguous source lines from the supplied buffer; never omit source lines between two context lines.\n\
              - Use only the supplied buffer excerpt. Do not inspect the project or use tools.",
             req.card_contract.max_changed_lines
         )

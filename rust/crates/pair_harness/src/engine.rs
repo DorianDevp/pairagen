@@ -309,7 +309,7 @@ impl Engine {
         let mut action = action;
         let mut token_usage = None;
 
-        for attempt in 0..2 {
+        for attempt in 0..3 {
             let request = self.request(session, action, context.clone(), expected);
             let mut response = match self
                 .backend
@@ -328,7 +328,7 @@ impl Engine {
 
             if let Some((key, reason)) = duplicate_observation(session, &response.card) {
                 activate_observation(session, &key);
-                if attempt == 0 {
+                if attempt < 2 {
                     if let Some(progress) = &progress {
                         progress(BackendProgress {
                             session_id: session.id.clone(),
@@ -348,6 +348,35 @@ impl Engine {
                 return rejected;
             }
 
+            let mut candidate = response.card.clone();
+            let validation =
+                PatchNormalizer::normalize_card(&mut candidate, &context).and_then(|()| {
+                    PatchCoherence::annotate(&mut candidate);
+                    validate_backend_card(&candidate, expected, &context)
+                });
+            if let Err(error) = validation {
+                if attempt < 2 {
+                    if let Some(progress) = &progress {
+                        progress(BackendProgress {
+                            session_id: session.id.clone(),
+                            phase: "repairing".into(),
+                            message: "Patch contract failed; Codex is repairing the local step"
+                                .into(),
+                        });
+                    }
+                    action = BackendAction::ContractRetry(format!(
+                        "The previous card failed the local patch contract: {error}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card."
+                    ));
+                    continue;
+                }
+
+                response.card =
+                    rejected_card(session, &candidate, error, response.raw_output.as_deref());
+                response.metadata.token_usage = token_usage;
+                return response;
+            }
+
+            response.card = candidate;
             response.metadata.token_usage = token_usage;
             return response;
         }
@@ -1132,6 +1161,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repairs_invalid_patch_before_showing_it_to_user() {
+        let backend = Arc::new(RepairingPatchBackend::default());
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+        let Card::Patch(card) = result.card else {
+            panic!("expected repaired patch card");
+        };
+        assert_eq!(
+            card.patches[0].diff,
+            "@@ -1,1 +1,1 @@\n-placeholder\n+repaired\n"
+        );
+    }
+
+    #[tokio::test]
     async fn preserves_wrong_card_type_and_raw_backend_output_for_fix() {
         let backend = Arc::new(WrongTypeBackend);
         let mut engine = Engine::new(backend);
@@ -1304,6 +1350,11 @@ mod tests {
     }
 
     struct BadPatchBackend;
+
+    #[derive(Default)]
+    struct RepairingPatchBackend {
+        failed_once: AtomicBool,
+    }
 
     struct WrongTypeBackend;
 
@@ -1479,6 +1530,76 @@ mod tests {
         fn capabilities(&self) -> BackendInfo {
             BackendInfo {
                 name: "bad_patch".into(),
+                streaming: false,
+                patches: true,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BackendAdapter for RepairingPatchBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            let card = match req.action {
+                BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                    id: "c_1".into(),
+                    title: "Start".into(),
+                    claim: "The local representation needs one change.".into(),
+                    evidence: None,
+                    next_move: None,
+                    actions: vec![Action::Fix, Action::Stop],
+                }),
+                BackendAction::User(Action::Fix)
+                    if !self.failed_once.swap(true, Ordering::SeqCst) =>
+                {
+                    Card::Patch(PatchCard {
+                        id: "c_invalid".into(),
+                        title: "Invalid first attempt".into(),
+                        explanation: "This attempt has stale context.".into(),
+                        warnings: vec![],
+                        patches: vec![FilePatch {
+                            id: "p_1".into(),
+                            file: "src/work.ts".into(),
+                            diff: "@@ -1,1 +1,1 @@\n-stale\n+new\n".into(),
+                            explanation: "Stale attempt.".into(),
+                        }],
+                        actions: vec![Action::Apply, Action::Retry, Action::Stop],
+                    })
+                }
+                BackendAction::ContractRetry(reason) => {
+                    assert!(reason.contains("patch context was not found"));
+                    Card::Patch(PatchCard {
+                        id: "c_repaired".into(),
+                        title: "Repaired local step".into(),
+                        explanation: "Use exact current context.".into(),
+                        warnings: vec![],
+                        patches: vec![FilePatch {
+                            id: "p_1".into(),
+                            file: "src/work.ts".into(),
+                            diff: "@@ -1,1 +1,1 @@\n-placeholder\n+repaired\n".into(),
+                            explanation: "Repair one line.".into(),
+                        }],
+                        actions: vec![Action::Apply, Action::Retry, Action::Stop],
+                    })
+                }
+                _ => panic!("unexpected repair backend request"),
+            };
+
+            Ok(BackendResponse {
+                card,
+                raw_output: None,
+                metadata: BackendMetadata {
+                    backend: "repairing_patch".into(),
+                    token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
+                },
+            })
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "repairing_patch".into(),
                 streaming: false,
                 patches: true,
                 reasoning: false,
