@@ -216,6 +216,8 @@ impl Engine {
         validate_apply_result(session, &result)?;
 
         if result.accepted {
+            let completed_steps = completed_patch_steps(session);
+            session.completed_steps.extend(completed_steps);
             session.accepted_patches.extend(result.patch_ids.clone());
         } else {
             session.rejected_patches.extend(result.patch_ids.clone());
@@ -264,6 +266,7 @@ impl Engine {
             session: SessionSnapshot {
                 id: session.id.clone(),
                 prompt: session.original_prompt.clone(),
+                completed_steps: session.completed_steps.clone(),
                 mode: session.mode.clone(),
                 card_count: session.cards.len(),
                 last_card: session.cards.last().cloned(),
@@ -500,6 +503,17 @@ fn validate_apply_result(session: &Session, result: &PatchApplyResult) -> Result
     Ok(())
 }
 
+fn completed_patch_steps(session: &Session) -> Vec<String> {
+    let Some(Card::Patch(card)) = session.cards.last() else {
+        return vec![];
+    };
+
+    card.patches
+        .iter()
+        .map(|patch| format!("{}: {}", patch.file.display(), patch.explanation))
+        .collect()
+}
+
 fn rejected_card(
     session: &Session,
     received: &Card,
@@ -709,6 +723,10 @@ mod tests {
         let summary = engine.apply_result(result).unwrap();
 
         assert!(matches!(summary.card, Card::Summary(_)));
+        assert_eq!(
+            engine.get(&summary.session_id).unwrap().completed_steps,
+            vec!["src/work.ts: Keeps body present for callers."]
+        );
     }
 
     #[tokio::test]

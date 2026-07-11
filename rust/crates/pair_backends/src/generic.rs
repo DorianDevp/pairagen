@@ -63,6 +63,7 @@ impl GenericCliBackend {
             "s": {
                 "id": req.session.id,
                 "p": req.session.prompt,
+                "completed_steps": req.session.completed_steps,
                 "mode": req.session.mode,
                 "n": req.session.card_count,
                 "last": req.session.last_summary

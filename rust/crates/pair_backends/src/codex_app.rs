@@ -546,6 +546,7 @@ Rules:
 {turn_rules}
 
 Session prompt: {prompt}
+Completed local steps: {completed_steps}
 Mode: {mode}
 Action: {action}
 Last card: {last}
@@ -557,6 +558,8 @@ Buffer excerpt:
 {buffer}
 ```"#,
         prompt = req.session.prompt,
+        completed_steps =
+            serde_json::to_string(&req.session.completed_steps).unwrap_or_else(|_| "[]".into()),
         mode = serde_json::to_string(&req.session.mode).unwrap_or_else(|_| "\"auto\"".into()),
         action = action_value(&req.action),
         expected_kind = req

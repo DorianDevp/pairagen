@@ -152,6 +152,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 pub struct SessionSnapshot {
     pub id: String,
     pub prompt: String,
+    pub completed_steps: Vec<String>,
     pub mode: Mode,
     pub card_count: usize,
     pub last_card: Option<Card>,
