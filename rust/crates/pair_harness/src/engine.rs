@@ -213,14 +213,14 @@ impl Engine {
         result: PatchApplyResult,
     ) -> Result<ActionResult> {
         session.state.require_patch()?;
+        validate_apply_result(session, &result)?;
 
         if result.accepted {
             session.accepted_patches.extend(result.patch_ids.clone());
-            session.state = SessionState::Summary;
         } else {
             session.rejected_patches.extend(result.patch_ids.clone());
-            session.state = SessionState::CardShown;
         }
+        session.state = SessionState::Summary;
 
         let card = session.apply_summary(&result);
         let token_usage = session.token_usage.clone();
@@ -374,6 +374,49 @@ fn validate_one_card(card: &Card) -> Result<()> {
     Ok(())
 }
 
+fn validate_apply_result(session: &Session, result: &PatchApplyResult) -> Result<()> {
+    let Some(Card::Patch(card)) = session.cards.last() else {
+        return Err(anyhow!("patch state has no current patch card"));
+    };
+
+    if result.card_id != card.id {
+        return Err(anyhow!(
+            "apply result targets card {}, but current patch card is {}",
+            result.card_id,
+            card.id
+        ));
+    }
+
+    let expected_patch_ids = card
+        .patches
+        .iter()
+        .map(|patch| patch.id.clone())
+        .collect::<Vec<_>>();
+    if result.patch_ids != expected_patch_ids {
+        return Err(anyhow!(
+            "apply result patch ids do not match the current patch card"
+        ));
+    }
+
+    let expected_files = card
+        .patches
+        .iter()
+        .map(|patch| patch.file.clone())
+        .collect::<Vec<_>>();
+    if result.accepted && result.changed_files != expected_files {
+        return Err(anyhow!(
+            "accepted apply result changed files do not match the current patch card"
+        ));
+    }
+    if !result.accepted && !result.changed_files.is_empty() {
+        return Err(anyhow!(
+            "rejected apply result cannot contain changed files"
+        ));
+    }
+
+    Ok(())
+}
+
 fn rejected_card(
     session: &Session,
     received: &Card,
@@ -492,6 +535,8 @@ impl Session {
     fn apply_summary(&self, result: &PatchApplyResult) -> Card {
         let summary = if result.accepted {
             "Patch accepted.".into()
+        } else if let Some(error) = result.error.as_deref() {
+            format!("Patch was not applied: {error}")
         } else {
             "Patch rejected.".into()
         };
@@ -581,6 +626,85 @@ mod tests {
         let summary = engine.apply_result(result).unwrap();
 
         assert!(matches!(summary.card, Card::Summary(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_apply_result_for_another_patch_card() {
+        let backend = Arc::new(MockBackend);
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+        let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        let result = PatchApplyResult {
+            session_id: start.session_id.clone(),
+            card_id: "c_stale".into(),
+            accepted: true,
+            patch_ids: vec!["p_1".into()],
+            changed_files: vec![PathBuf::from("src/work.ts")],
+            error: None,
+        };
+
+        let error = engine.apply_result(result).unwrap_err();
+
+        assert!(error.to_string().contains("current patch card"));
+        assert_eq!(
+            engine.get(&start.session_id).unwrap().state,
+            SessionState::PatchShown
+        );
+        assert_eq!(patch.card.id(), "c_patch");
+    }
+
+    #[tokio::test]
+    async fn rejected_apply_preserves_error_and_moves_to_summary() {
+        let backend = Arc::new(MockBackend);
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+        let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        let result = PatchApplyResult {
+            session_id: start.session_id.clone(),
+            card_id: patch.card.id().into(),
+            accepted: false,
+            patch_ids: vec!["p_1".into()],
+            changed_files: vec![],
+            error: Some("patch context is ambiguous".into()),
+        };
+
+        let summary = engine.apply_result(result).unwrap();
+        let Card::Summary(card) = summary.card else {
+            panic!("expected summary card");
+        };
+
+        assert!(card.summary.contains("patch context is ambiguous"));
+        assert_eq!(
+            engine.get(&start.session_id).unwrap().state,
+            SessionState::Summary
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_apply_result_with_unreported_target_file() {
+        let backend = Arc::new(MockBackend);
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+        let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        let result = PatchApplyResult {
+            session_id: start.session_id.clone(),
+            card_id: patch.card.id().into(),
+            accepted: true,
+            patch_ids: vec!["p_1".into()],
+            changed_files: vec![PathBuf::from("src/other.ts")],
+            error: None,
+        };
+
+        let error = engine.apply_result(result).unwrap_err();
+
+        assert!(error.to_string().contains("changed files"));
+        assert!(
+            engine
+                .get(&start.session_id)
+                .unwrap()
+                .accepted_patches
+                .is_empty()
+        );
     }
 
     #[tokio::test]
