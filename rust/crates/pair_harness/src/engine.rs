@@ -6,7 +6,7 @@ use pair_backends::{
     BackendAction, BackendAdapter, BackendRequest, BackendResponse, CardContract, ProgressReporter,
     SessionSnapshot,
 };
-use pair_patch::PatchValidator;
+use pair_patch::{PatchNormalizer, PatchValidator};
 use pair_protocol::{
     Action, ActionResult, Card, CardKind, ContextBundle, ErrorCard, Mode, PatchApplyResult,
     StartSessionParams, StartSessionResult, SummaryCard,
@@ -284,14 +284,12 @@ impl Engine {
         response: BackendResponse,
         next_state: NextState,
     ) -> Result<Card> {
-        let card = match validate_backend_card(&response.card, &next_state, &session.context) {
-            Ok(()) => response.card,
-            Err(error) => rejected_card(
-                session,
-                &response.card,
-                error,
-                response.raw_output.as_deref(),
-            ),
+        let mut received = response.card;
+        let validation = PatchNormalizer::normalize_card(&mut received, &session.context)
+            .and_then(|()| validate_backend_card(&received, &next_state, &session.context));
+        let card = match validation {
+            Ok(()) => received,
+            Err(error) => rejected_card(session, &received, error, response.raw_output.as_deref()),
         };
 
         session.state = state_after_card(&card, &next_state);
