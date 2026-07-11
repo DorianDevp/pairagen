@@ -69,6 +69,7 @@ function M.start(text, mode, source)
     end
 
     state.session_id = message.result.session_id
+    state.goal = message.result.goal
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
     card.show(message.result.card)
@@ -131,6 +132,7 @@ function M.action(action)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.goal = message.result.goal
     card.show(message.result.card)
   end)
 end
@@ -177,6 +179,7 @@ function M.reply(text)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.goal = message.result.goal
     card.show(message.result.card)
   end)
 end
@@ -231,6 +234,7 @@ function M.reset()
   state.source_buf = nil
   state.source_cursor = nil
   state.card = nil
+  state.goal = nil
   state.last_card = nil
   state.prompt_win = nil
   state.prompt_buf = nil

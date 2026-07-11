@@ -151,6 +151,13 @@ function M.controls(card)
     "<leader>pr  Retry",
     "Edit code directly",
   }
+  if state.goal and state.goal.statement then
+    table.insert(lines, 2, "Goal: " .. M.truncate(state.goal.statement, 72))
+    local completed = #(state.goal.completed_steps or {})
+    if completed > 0 then
+      table.insert(lines, 3, "Progress: " .. completed .. " accepted")
+    end
+  end
   if card.warnings and card.warnings[1] then
     table.insert(lines, "Warning shown at hunk")
   end
@@ -180,6 +187,15 @@ function M.controls(card)
       vim.api.nvim_set_current_win(state.diff_win)
     end
   end, { buffer = buf, nowait = true, silent = true })
+end
+
+function M.truncate(text, limit)
+  text = tostring(text or ""):gsub("%s+", " ")
+  if #text <= limit then
+    return text
+  end
+
+  return text:sub(1, limit - 3) .. "..."
 end
 
 function M.accept()
@@ -289,6 +305,7 @@ function M.send(accepted, patch_ids, changed_files, error)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.goal = message.result.goal
     require("pair.card").show(message.result.card)
   end)
 end

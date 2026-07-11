@@ -3,6 +3,7 @@ local M = {
   source_buf = nil,
   source_cursor = nil,
   card = nil,
+  goal = nil,
   prompt_win = nil,
   prompt_buf = nil,
   prompt_frame_win = nil,

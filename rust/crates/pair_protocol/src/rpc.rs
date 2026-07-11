@@ -88,6 +88,7 @@ pub struct JsonRpcNotification {
 pub struct StartSessionResult {
     pub session_id: String,
     pub card: Card,
+    pub goal: GoalProgress,
     pub token_usage: TokenUsage,
     pub turn_token_usage: TokenUsage,
 }
@@ -112,8 +113,15 @@ pub struct ReplyParams {
 pub struct ActionResult {
     pub session_id: String,
     pub card: Card,
+    pub goal: GoalProgress,
     pub token_usage: TokenUsage,
     pub turn_token_usage: TokenUsage,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GoalProgress {
+    pub statement: String,
+    pub completed_steps: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

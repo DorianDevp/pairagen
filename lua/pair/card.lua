@@ -52,6 +52,7 @@ function M.lines(card)
     M.actions(card),
     "",
   }
+  M.goal(lines)
 
   if card.kind == "hypothesis" then
     M.add(lines, card.claim or card.title)
@@ -83,6 +84,24 @@ function M.lines(card)
   M.tokens(lines)
 
   return lines
+end
+
+function M.goal(lines)
+  local goal = state.goal
+  if not goal or not goal.statement or goal.statement == "" then
+    return
+  end
+
+  table.insert(lines, "Goal: " .. M.one_line(goal.statement))
+  local completed = #(goal.completed_steps or {})
+  if completed > 0 then
+    table.insert(lines, string.format("Progress: %d accepted local step%s", completed, completed == 1 and "" or "s"))
+  end
+  table.insert(lines, "")
+end
+
+function M.one_line(text)
+  return tostring(text or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
 function M.location(card)

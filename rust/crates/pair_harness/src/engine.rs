@@ -8,8 +8,8 @@ use pair_backends::{
 };
 use pair_patch::{PatchCoherence, PatchNormalizer, PatchValidator};
 use pair_protocol::{
-    Action, ActionResult, Card, CardKind, ContextBundle, ErrorCard, Mode, PatchApplyResult,
-    StartSessionParams, StartSessionResult, SummaryCard,
+    Action, ActionResult, Card, CardKind, ContextBundle, ErrorCard, GoalProgress, Mode,
+    PatchApplyResult, StartSessionParams, StartSessionResult, SummaryCard,
 };
 
 use crate::session::Session;
@@ -54,6 +54,7 @@ impl Engine {
 
         let card = self.accept_response(&mut session, response, expected)?;
         let session_id = session.id.clone();
+        let goal = goal_progress(&session);
         let token_usage = session.token_usage.clone();
 
         self.sessions.insert(session_id.clone(), session);
@@ -61,6 +62,7 @@ impl Engine {
         Ok(StartSessionResult {
             session_id,
             card,
+            goal,
             token_usage,
             turn_token_usage,
         })
@@ -124,6 +126,7 @@ impl Engine {
             return Ok(ActionResult {
                 session_id: session_id.into(),
                 card,
+                goal: goal_progress(session),
                 token_usage,
                 turn_token_usage: Default::default(),
             });
@@ -152,6 +155,7 @@ impl Engine {
         Ok(ActionResult {
             session_id: session_id.into(),
             card,
+            goal: goal_progress(session),
             token_usage,
             turn_token_usage,
         })
@@ -192,6 +196,7 @@ impl Engine {
         Ok(ActionResult {
             session_id: session_id.into(),
             card,
+            goal: goal_progress(session),
             token_usage,
             turn_token_usage,
         })
@@ -234,6 +239,7 @@ impl Engine {
         Ok(ActionResult {
             session_id,
             card,
+            goal: goal_progress(session),
             token_usage,
             turn_token_usage: Default::default(),
         })
@@ -314,6 +320,13 @@ impl Engine {
         if let Some(usage) = usage {
             session.token_usage.add(usage);
         }
+    }
+}
+
+fn goal_progress(session: &Session) -> GoalProgress {
+    GoalProgress {
+        statement: session.original_prompt.clone(),
+        completed_steps: session.completed_steps.clone(),
     }
 }
 
