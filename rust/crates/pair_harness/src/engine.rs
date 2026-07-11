@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use pair_backends::{
-    BackendAction, BackendAdapter, BackendRequest, BackendResponse, CardContract, ProgressReporter,
-    SessionSnapshot,
+    BackendAction, BackendAdapter, BackendProgress, BackendRequest, BackendResponse, CardContract,
+    ProgressReporter, SessionSnapshot,
 };
 use pair_patch::{PatchCoherence, PatchNormalizer, PatchValidator};
 use pair_protocol::{
@@ -329,6 +329,14 @@ impl Engine {
             if let Some((key, reason)) = duplicate_observation(session, &response.card) {
                 activate_observation(session, &key);
                 if attempt == 0 {
+                    if let Some(progress) = &progress {
+                        progress(BackendProgress {
+                            session_id: session.id.clone(),
+                            phase: "deduplicating".into(),
+                            message: "Retaining repeated context and requesting a distinct step"
+                                .into(),
+                        });
+                    }
                     action = BackendAction::ContractRetry(format!(
                         "{reason}. Return a distinct next observation; do not repeat known findings or signals."
                     ));

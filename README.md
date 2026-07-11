@@ -49,6 +49,8 @@ require("pair").setup({
 })
 ```
 
+When using a built `target/debug/paird`, run `cargo build -p paird` after protocol changes. `cargo test` only refreshes test executables under `target/debug/deps`. The client rejects stale `paird` protocol versions before starting a session.
+
 ## Agents
 
 ```lua
@@ -134,10 +136,12 @@ The goal and accepted-step count stay visible on cards and editable drafts. `Nex
 :PairModel
 ```
 
-`PairLog` prints the log path. The default path is:
+`:PairLog` prints the current JSONL session trace. It records the backend command and protocol handshake, complete RPC requests/responses, progress events, cards, goals, token usage, and backend errors.
+
+The default trace location is:
 
 ```text
-~/.local/state/nvim/pairagen.log
+~/.local/state/nvim/pairagen/sessions/<timestamp>-<pid>.jsonl
 ```
 
 ## paird

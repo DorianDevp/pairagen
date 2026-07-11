@@ -95,6 +95,7 @@ impl Server {
             "initialize" => json!({
                 "server": "paird",
                 "version": env!("CARGO_PKG_VERSION"),
+                "protocol_version": pair_protocol::PROTOCOL_VERSION,
                 "backend": self.backend.capabilities(),
             }),
             "backend/list" => json!([self.backend.capabilities()]),

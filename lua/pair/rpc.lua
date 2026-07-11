@@ -4,11 +4,15 @@ local ui = require("pair.ui")
 
 local M = {
   job = nil,
+  ready = false,
+  incompatible = false,
+  queue = {},
   next_id = 1,
   pending = {},
   notifications = {},
   buffer = "",
 }
+local protocol_version = 3
 
 function M.ensure()
   if M.job and vim.fn.jobwait({ M.job }, 0)[1] == -1 then
@@ -33,17 +37,60 @@ function M.ensure()
       M.on_stderr(data)
     end,
     on_exit = function(_, code)
+      log.event("backend_exit", { code = code })
       if code ~= 0 and code ~= 143 then
         log.write("backend exited", { code = code })
         ui.notify("Backend exited with code " .. code, vim.log.levels.ERROR)
       end
       M.job = nil
+      M.ready = false
+      M.fail_all("Pair backend exited with code " .. code)
     end,
   })
 
   if M.job <= 0 then
     error("Could not start pair backend")
   end
+
+  log.event("backend_start", {
+    command = command,
+    protocol_version = protocol_version,
+  })
+
+  M.ready = false
+  M.incompatible = false
+  M.send("initialize", {
+    client = {
+      name = "pairagen.nvim",
+      protocol_version = protocol_version,
+    },
+  }, function(message)
+    local actual = message.result and message.result.protocol_version
+    if message.error or actual ~= protocol_version then
+      local label = actual == nil and "legacy" or tostring(actual)
+      local error_message = string.format(
+        "Pair backend protocol mismatch: client requires %d, backend reports %s. Rebuild paird and run :PairReset.",
+        protocol_version,
+        label
+      )
+      M.incompatible = true
+      log.event("protocol_mismatch", {
+        expected = protocol_version,
+        actual = actual,
+      })
+      M.fail_all(error_message)
+      ui.notify(error_message, vim.log.levels.ERROR)
+      return
+    end
+
+    M.ready = true
+    log.event("protocol_ready", message.result)
+    local queued = M.queue
+    M.queue = {}
+    for _, request in ipairs(queued) do
+      M.send(request.method, request.params, request.callback)
+    end
+  end)
 end
 
 function M.stop()
@@ -52,12 +99,39 @@ function M.stop()
   end
 
   M.job = nil
+  M.ready = false
+  M.incompatible = false
+  M.queue = {}
   M.pending = {}
   M.buffer = ""
 end
 
 function M.request(method, params, callback)
   M.ensure()
+
+  if M.incompatible then
+    callback({
+      error = {
+        code = -32099,
+        message = "Pair backend protocol is incompatible. Rebuild paird and run :PairReset.",
+      },
+    })
+    return
+  end
+
+  if not M.ready then
+    table.insert(M.queue, {
+      method = method,
+      params = params,
+      callback = callback,
+    })
+    return
+  end
+
+  M.send(method, params, callback)
+end
+
+function M.send(method, params, callback)
 
   local id = M.next_id
   M.next_id = M.next_id + 1
@@ -70,7 +144,33 @@ function M.request(method, params, callback)
     params = params or {},
   })
 
+  log.event("rpc_request", {
+    id = id,
+    method = method,
+    params = params or {},
+  })
   vim.fn.chansend(M.job, payload .. "\n")
+end
+
+function M.fail_all(message)
+  local response = {
+    error = {
+      code = -32098,
+      message = message,
+    },
+  }
+
+  local queued = M.queue
+  M.queue = {}
+  for _, request in ipairs(queued) do
+    request.callback(response)
+  end
+
+  local pending = M.pending
+  M.pending = {}
+  for _, callback in pairs(pending) do
+    callback(response)
+  end
 end
 
 function M.on(method, callback)
@@ -103,6 +203,8 @@ function M.handle(line)
     return
   end
 
+  log.event(message.method and not message.id and "rpc_notification" or "rpc_response", message)
+
   if message.method and not message.id then
     local callback = M.notifications[message.method]
 
@@ -132,6 +234,7 @@ function M.on_stderr(data)
     local message = table.concat(lines, "\n")
 
     log.write("backend stderr", message)
+    log.event("backend_stderr", { message = message })
     ui.notify(message, vim.log.levels.WARN)
   end
 end
