@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::{Result, anyhow};
 use pair_protocol::{
     Card, ContextBundle, FilePatch, MAX_CHANGED_LINES, MAX_HUNKS_PER_PATCH, MAX_PATCH_FILES,
@@ -7,6 +9,53 @@ use crate::unified_diff::{DiffLine, UnifiedDiff};
 
 pub struct PatchValidator;
 pub struct PatchNormalizer;
+pub struct PatchCoherence;
+
+impl PatchCoherence {
+    pub fn annotate(card: &mut Card) {
+        let Card::Patch(card) = card else {
+            return;
+        };
+        let description = format!(
+            "{} {} {}",
+            card.title,
+            card.explanation,
+            card.patches
+                .iter()
+                .map(|patch| patch.explanation.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .to_ascii_lowercase();
+        if !description.contains("renam") {
+            return;
+        }
+
+        for patch in &card.patches {
+            let Ok(diff) = UnifiedDiff::parse(&patch.diff) else {
+                continue;
+            };
+            for hunk in &diff.hunks {
+                let removed =
+                    identifiers_for_lines(&hunk.lines, |line| matches!(line, DiffLine::Remove(_)));
+                let added =
+                    identifiers_for_lines(&hunk.lines, |line| matches!(line, DiffLine::Add(_)));
+                let context =
+                    identifiers_for_lines(&hunk.lines, |line| matches!(line, DiffLine::Context(_)));
+                let old = removed.difference(&added).collect::<Vec<_>>();
+                let new = added.difference(&removed).collect::<Vec<_>>();
+
+                if let ([old], [new]) = (old.as_slice(), new.as_slice())
+                    && context.contains(*old)
+                {
+                    card.warnings.push(format!(
+                        "Possible incomplete rename: {old} was changed to {new}, but unchanged hunk context still references {old}."
+                    ));
+                }
+            }
+        }
+    }
+}
 
 impl PatchNormalizer {
     pub fn normalize_card(card: &mut Card, context: &ContextBundle) -> Result<()> {
@@ -225,6 +274,44 @@ fn render_diff(diff: &UnifiedDiff) -> String {
     output
 }
 
+fn identifiers_for_lines(
+    lines: &[DiffLine],
+    include: impl Fn(&DiffLine) -> bool,
+) -> BTreeSet<String> {
+    lines
+        .iter()
+        .filter(|line| include(line))
+        .flat_map(|line| match line {
+            DiffLine::Context(text) | DiffLine::Remove(text) | DiffLine::Add(text) => {
+                identifiers(text)
+            }
+        })
+        .collect()
+}
+
+fn identifiers(text: &str) -> Vec<String> {
+    let mut identifiers = Vec::new();
+    let mut current = String::new();
+
+    for character in text.chars().chain(std::iter::once(' ')) {
+        if character == '_' || character.is_ascii_alphanumeric() {
+            current.push(character);
+        } else if !current.is_empty() {
+            if current
+                .chars()
+                .next()
+                .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            {
+                identifiers.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+        }
+    }
+
+    identifiers
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -306,6 +393,7 @@ mod tests {
             id: "c_1".into(),
             title: "Rename".into(),
             explanation: "Rename the value.".into(),
+            warnings: vec![],
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -336,6 +424,7 @@ mod tests {
             id: "c_1".into(),
             title: "Rename".into(),
             explanation: "Rename the value.".into(),
+            warnings: vec![],
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -365,6 +454,7 @@ mod tests {
             id: "c_1".into(),
             title: "Rename".into(),
             explanation: "Rename the value.".into(),
+            warnings: vec![],
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -401,6 +491,7 @@ mod tests {
             id: "c_1".into(),
             title: "Rename".into(),
             explanation: "Rename the value.".into(),
+            warnings: vec![],
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -422,5 +513,57 @@ mod tests {
         let error = PatchNormalizer::normalize_card(&mut card, &context).unwrap_err();
 
         assert!(error.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn warns_about_an_incomplete_local_rename() {
+        let mut card = Card::Patch(pair_protocol::PatchCard {
+            id: "c_1".into(),
+            title: "Rename response binding".into(),
+            explanation: "Rename response to rpc_response.".into(),
+            warnings: vec![],
+            patches: vec![FilePatch {
+                id: "p_1".into(),
+                file: PathBuf::from("src/work.rs"),
+                diff: "@@ -1,2 +1,2 @@\n-let response = call();\n+let rpc_response = call();\n use_value(response);\n"
+                    .into(),
+                explanation: "Rename the local binding.".into(),
+            }],
+            actions: vec![pair_protocol::Action::Apply],
+        });
+
+        PatchCoherence::annotate(&mut card);
+
+        let Card::Patch(card) = card else {
+            unreachable!();
+        };
+        assert_eq!(card.warnings.len(), 1);
+        assert!(card.warnings[0].contains("response"));
+        assert!(card.warnings[0].contains("rpc_response"));
+    }
+
+    #[test]
+    fn complete_local_rename_has_no_warning() {
+        let mut card = Card::Patch(pair_protocol::PatchCard {
+            id: "c_1".into(),
+            title: "Rename response binding".into(),
+            explanation: "Rename response to rpc_response.".into(),
+            warnings: vec![],
+            patches: vec![FilePatch {
+                id: "p_1".into(),
+                file: PathBuf::from("src/work.rs"),
+                diff: "@@ -1,2 +1,2 @@\n-let response = call();\n-use_value(response);\n+let rpc_response = call();\n+use_value(rpc_response);\n"
+                    .into(),
+                explanation: "Rename the binding and its use.".into(),
+            }],
+            actions: vec![pair_protocol::Action::Apply],
+        });
+
+        PatchCoherence::annotate(&mut card);
+
+        let Card::Patch(card) = card else {
+            unreachable!();
+        };
+        assert!(card.warnings.is_empty());
     }
 }

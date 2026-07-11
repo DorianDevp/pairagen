@@ -618,6 +618,7 @@ fn parse_structured_patch(output: &str) -> Result<Card> {
         id: "c_agent".into(),
         title: op.title,
         explanation: op.explanation,
+        warnings: vec![],
         patches,
         actions: vec![
             Action::Apply,

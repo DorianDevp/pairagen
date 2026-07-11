@@ -121,6 +121,7 @@ impl AgentOp {
                 id,
                 title,
                 explanation,
+                warnings: vec![],
                 patches: patches
                     .into_iter()
                     .enumerate()

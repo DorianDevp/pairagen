@@ -6,7 +6,7 @@ use pair_backends::{
     BackendAction, BackendAdapter, BackendRequest, BackendResponse, CardContract, ProgressReporter,
     SessionSnapshot,
 };
-use pair_patch::{PatchNormalizer, PatchValidator};
+use pair_patch::{PatchCoherence, PatchNormalizer, PatchValidator};
 use pair_protocol::{
     Action, ActionResult, Card, CardKind, ContextBundle, ErrorCard, Mode, PatchApplyResult,
     StartSessionParams, StartSessionResult, SummaryCard,
@@ -285,8 +285,11 @@ impl Engine {
         next_state: NextState,
     ) -> Result<Card> {
         let mut received = response.card;
-        let validation = PatchNormalizer::normalize_card(&mut received, &session.context)
-            .and_then(|()| validate_backend_card(&received, &next_state, &session.context));
+        let validation =
+            PatchNormalizer::normalize_card(&mut received, &session.context).and_then(|()| {
+                PatchCoherence::annotate(&mut received);
+                validate_backend_card(&received, &next_state, &session.context)
+            });
         let card = match validation {
             Ok(()) => received,
             Err(error) => rejected_card(session, &received, error, response.raw_output.as_deref()),
@@ -1064,6 +1067,7 @@ mod tests {
                     id: "c_patch".into(),
                     title: "Bad patch".into(),
                     explanation: "Invalid patch.".into(),
+                    warnings: vec![],
                     patches: vec![FilePatch {
                         id: "p_1".into(),
                         file: "src/work.ts".into(),

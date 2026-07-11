@@ -61,6 +61,9 @@ function M.lines(card)
     M.signal(lines, card.annotation)
   elseif card.kind == "patch" then
     M.add(lines, card.explanation or card.title)
+    for _, warning in ipairs(card.warnings or {}) do
+      M.signal(lines, warning)
+    end
     table.insert(lines, "")
     table.insert(lines, tostring(#(card.patches or {})) .. " file patch pending")
   elseif card.kind == "summary" then

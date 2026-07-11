@@ -112,6 +112,8 @@ pub struct PatchCard {
     pub id: CardId,
     pub title: String,
     pub explanation: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub patches: Vec<FilePatch>,
     pub actions: Vec<Action>,
 }

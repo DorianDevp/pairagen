@@ -61,12 +61,17 @@ function M.show(card)
   local row = math.max(new_start - 1, 0)
   local end_row = math.min(row + math.max(new_len, 1), #draft_lines)
   vim.api.nvim_win_set_cursor(source_win, { math.min(new_start, #draft_lines), 0 })
-  vim.api.nvim_buf_set_extmark(draft_buf, namespace, row, 0, {
+  local mark = {
     end_row = end_row,
     line_hl_group = "DiffChange",
     virt_text = { { " Pair draft", "DiagnosticInfo" } },
     virt_text_pos = "eol",
-  })
+  }
+  if card.warnings and card.warnings[1] then
+    mark.virt_lines = { { { "Warning: " .. card.warnings[1], "DiagnosticWarn" } } }
+    mark.virt_lines_above = true
+  end
+  vim.api.nvim_buf_set_extmark(draft_buf, namespace, row, 0, mark)
 
   state.diff_buf = draft_buf
   state.diff_win = source_win
