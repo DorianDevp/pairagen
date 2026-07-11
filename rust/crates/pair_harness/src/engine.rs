@@ -327,6 +327,7 @@ fn validate_backend_card(
     validate_one_card(card)?;
     PatchValidator::validate_card(card)?;
     validate_patch_target(card, context)?;
+    PatchValidator::validate_card_against_context(card, context)?;
     next_state.validate(card)?;
 
     Ok(())

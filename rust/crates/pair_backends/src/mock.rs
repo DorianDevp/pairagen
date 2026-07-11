@@ -21,9 +21,9 @@ impl BackendAdapter for MockBackend {
             BackendAction::Start => first_card(),
             BackendAction::User(Action::Follow) => finding_card(),
             BackendAction::User(Action::Why) => why_card(),
-            BackendAction::User(Action::Fix) => patch_card(relative_file(&req)),
+            BackendAction::User(Action::Fix) => patch_card(&req),
             BackendAction::User(Action::OtherLead) => other_card(),
-            BackendAction::User(Action::Retry) => patch_card(relative_file(&req)),
+            BackendAction::User(Action::Retry) => patch_card(&req),
             BackendAction::User(Action::RunCheck) => check_card(),
             BackendAction::User(Action::Next) => other_card(),
             BackendAction::User(Action::Stop) => stop_card(),
@@ -133,15 +133,24 @@ fn reply_card(text: String) -> Card {
     })
 }
 
-fn patch_card(file: String) -> Card {
+fn patch_card(req: &BackendRequest) -> Card {
+    let old_line = req.context.buffer_text.lines().next().unwrap_or_default();
+    let replacement = if old_line == "payload = payload or {}" {
+        "payload = payload or { data = {} }"
+    } else {
+        "payload = payload or {}"
+    };
     Card::Patch(PatchCard {
         id: "c_patch".into(),
         title: "Guard payload shape".into(),
         explanation: "Ensure the empty branch returns the same payload shape.".into(),
         patches: vec![FilePatch {
             id: "p_1".into(),
-            file: file.into(),
-            diff: "@@ -1,1 +1,1 @@\n-placeholder\n+payload = payload or {}\n".into(),
+            file: relative_file(req).into(),
+            diff: format!(
+                "@@ -{0},1 +{0},1 @@\n-{old_line}\n+{replacement}\n",
+                req.context.buffer_start_line
+            ),
             explanation: "Keeps body present for callers.".into(),
         }],
         actions: vec![
