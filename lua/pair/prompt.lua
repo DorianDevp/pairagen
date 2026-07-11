@@ -30,8 +30,9 @@ function M.open_for(opts)
   M.close()
 
   local size = M.size()
-  local row = math.floor((vim.o.lines - size.outer_height) * 0.28)
-  local col = math.floor((vim.o.columns - size.outer_width) / 2)
+  local position = M.position(size)
+  local row = position.row
+  local col = position.col
   local frame_buf = vim.api.nvim_create_buf(false, true)
   local frame_win = vim.api.nvim_open_win(frame_buf, false, {
     relative = "editor",
@@ -56,8 +57,8 @@ function M.open_for(opts)
   local buf = vim.api.nvim_create_buf(false, true)
   local win = vim.api.nvim_open_win(buf, true, {
     relative = "editor",
-    row = row + config.values.prompt.padding_y,
-    col = col + config.values.prompt.padding_x,
+    row = row + size.padding_y,
+    col = col + size.padding_x,
     width = size.inner_width,
     height = size.inner_height,
     style = "minimal",
@@ -133,24 +134,70 @@ end
 
 function M.size()
   local outer_width = M.width()
-  local outer_height = math.min(
-    config.values.prompt.height,
-    math.max(vim.o.lines - 6, 5)
-  )
-  local inner_width = math.max(outer_width - config.values.prompt.padding_x * 2, 20)
-  local inner_height = math.max(outer_height - config.values.prompt.padding_y * 2, 1)
+  local viewport = ui.viewport()
+  local outer_height = math.min(config.values.prompt.height, math.max(viewport.height - 2, 1))
+  local padding_x = math.min(config.values.prompt.padding_x, math.floor((outer_width - 1) / 2))
+  local padding_y = math.min(config.values.prompt.padding_y, math.floor((outer_height - 1) / 2))
+  local inner_width = math.max(outer_width - padding_x * 2, 1)
+  local inner_height = math.max(outer_height - padding_y * 2, 1)
 
   return {
     outer_width = outer_width,
     outer_height = outer_height,
     inner_width = inner_width,
     inner_height = inner_height,
+    padding_x = padding_x,
+    padding_y = padding_y,
+  }
+end
+
+function M.position(size)
+  local viewport = ui.viewport()
+  local cursor = M.cursor_screen_position()
+  local total_width = size.outer_width + 2
+  local total_height = size.outer_height + 2
+  local max_row = math.max(viewport.height - total_height, 0)
+  local max_col = math.max(viewport.width - total_width, 0)
+  local below = cursor.row + 1
+  local above = cursor.row - total_height
+  local row
+
+  if below <= max_row then
+    row = below
+  elseif above >= 0 then
+    row = above
+  else
+    row = ui.clamp(below, 0, max_row)
+  end
+
+  return {
+    row = ui.clamp(row, 0, max_row),
+    col = ui.clamp(cursor.col - math.floor(total_width / 2), 0, max_col),
+  }
+end
+
+function M.cursor_screen_position()
+  local win = vim.api.nvim_get_current_win()
+  local cursor = vim.api.nvim_win_get_cursor(win)
+  local position = vim.fn.screenpos(win, cursor[1], cursor[2] + 1)
+
+  if position.row == 0 or position.col == 0 then
+    local viewport = ui.viewport()
+    return {
+      row = math.floor(viewport.height / 2),
+      col = math.floor(viewport.width / 2),
+    }
+  end
+
+  return {
+    row = position.row - 1,
+    col = position.col - 1,
   }
 end
 
 function M.width()
   local configured = config.values.prompt.width or 96
-  local limit = math.max(vim.o.columns - 8, 24)
+  local limit = math.max(ui.viewport().width - 2, 1)
 
   return math.min(configured, limit)
 end
