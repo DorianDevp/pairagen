@@ -78,8 +78,9 @@ function M.ensure()
         expected = protocol_version,
         actual = actual,
       })
-      M.fail_all(error_message)
-      ui.notify(error_message, vim.log.levels.ERROR)
+      if M.fail_all(error_message) == 0 then
+        ui.notify(error_message, vim.log.levels.ERROR)
+      end
       return
     end
 
@@ -162,6 +163,7 @@ function M.fail_all(message)
 
   local queued = M.queue
   M.queue = {}
+  local failed = #queued
   for _, request in ipairs(queued) do
     request.callback(response)
   end
@@ -169,8 +171,10 @@ function M.fail_all(message)
   local pending = M.pending
   M.pending = {}
   for _, callback in pairs(pending) do
+    failed = failed + 1
     callback(response)
   end
+  return failed
 end
 
 function M.on(method, callback)
