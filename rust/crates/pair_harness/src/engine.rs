@@ -41,10 +41,14 @@ impl Engine {
         let context = ContextBundle::from_start(params);
         let expected = expected_start_state(&session.mode);
         let request = self.request(&session, BackendAction::Start, context, &expected);
-        let response = self
+        let response = match self
             .backend
             .next_card_with_progress(request, progress)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => backend_failure_response(&session, error),
+        };
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         self.add_usage(&mut session, &response.metadata.token_usage);
 
@@ -110,8 +114,6 @@ impl Engine {
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         let state = session.state.next(&action)?;
-        let previous_state = session.state.clone();
-
         if action == Action::Stop {
             session.state = SessionState::Finished;
             let card = session.stop_card();
@@ -138,11 +140,7 @@ impl Engine {
             .await
         {
             Ok(response) => response,
-            Err(error) => {
-                session.state = previous_state;
-
-                return Err(error);
-            }
+            Err(error) => backend_failure_response(session, error),
         };
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
@@ -170,7 +168,6 @@ impl Engine {
             return Err(anyhow!("reply is empty"));
         }
 
-        let previous_state = session.state.clone();
         let context = session.context.clone();
         let expected = NextState::Any;
         let request = self.request(session, BackendAction::Reply(text), context, &expected);
@@ -183,11 +180,7 @@ impl Engine {
             .await
         {
             Ok(response) => response,
-            Err(error) => {
-                session.state = previous_state;
-
-                return Err(error);
-            }
+            Err(error) => backend_failure_response(session, error),
         };
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
@@ -406,6 +399,22 @@ fn rejected_card(
     })
 }
 
+fn backend_failure_response(session: &Session, error: anyhow::Error) -> BackendResponse {
+    BackendResponse {
+        card: Card::Error(ErrorCard {
+            id: session.next_card_id("backend_error"),
+            title: "Backend request failed".into(),
+            message: format!("{error:#}"),
+            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+        }),
+        raw_output: None,
+        metadata: pair_backends::BackendMetadata {
+            backend: "harness".into(),
+            token_usage: None,
+        },
+    }
+}
+
 fn expected_start_state(mode: &Mode) -> NextState {
     if *mode == Mode::Fix {
         NextState::Patch
@@ -452,8 +461,7 @@ fn expected_card_kind(
 
 fn state_after_card(card: &Card, next_state: &NextState) -> SessionState {
     if matches!(card, Card::Error(_)) && matches!(next_state, NextState::Patch) {
-        // Retry/Edit after a failed fix must remain bound to the patch contract.
-        return SessionState::PatchShown;
+        return SessionState::PatchFailed;
     }
 
     SessionState::from_card(card)
@@ -576,16 +584,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeps_session_after_backend_error() {
+    async fn returns_typed_card_and_keeps_session_after_backend_error() {
         let backend = Arc::new(FlakyBackend::default());
         let mut engine = Engine::new(backend);
         let start = engine.start(params()).await.unwrap();
-        let error = engine
+        let failed = engine
             .action(&start.session_id, Action::Follow)
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(error.to_string().contains("backend failed"));
+        let Card::Error(error) = failed.card else {
+            panic!("expected error card");
+        };
+        assert!(error.message.contains("backend failed"));
 
         let next = engine.action(&start.session_id, Action::Why).await.unwrap();
 
@@ -648,6 +659,30 @@ mod tests {
         };
 
         assert!(card.message.contains("expected patch card"));
+        assert_eq!(
+            engine.get(&result.session_id).unwrap().state,
+            SessionState::PatchFailed
+        );
+        let apply_error = engine
+            .action(&result.session_id, Action::Apply)
+            .await
+            .unwrap_err();
+        assert!(apply_error.to_string().contains("invalid action"));
+    }
+
+    #[tokio::test]
+    async fn start_returns_typed_card_when_backend_fails() {
+        let backend = Arc::new(AlwaysFailBackend);
+        let mut engine = Engine::new(backend);
+
+        let result = engine.start(params()).await.unwrap();
+        let Card::Error(card) = result.card else {
+            panic!("expected error card");
+        };
+
+        assert!(card.message.contains("backend unavailable"));
+        assert_eq!(result.turn_token_usage, Default::default());
+        assert!(engine.get(&result.session_id).is_some());
     }
 
     #[tokio::test]
@@ -702,6 +737,26 @@ mod tests {
     struct BadPatchBackend;
 
     struct WrongTypeBackend;
+
+    struct AlwaysFailBackend;
+
+    #[async_trait]
+    impl BackendAdapter for AlwaysFailBackend {
+        async fn next_card(&self, _req: BackendRequest) -> Result<BackendResponse> {
+            Err(anyhow!("backend unavailable: token limit reached"))
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "always_fail".into(),
+                streaming: false,
+                patches: false,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
+    }
 
     #[async_trait]
     impl BackendAdapter for FlakyBackend {
