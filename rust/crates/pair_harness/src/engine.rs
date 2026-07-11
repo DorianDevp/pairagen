@@ -363,12 +363,93 @@ fn validate_one_card(card: &Card) -> Result<()> {
         return Err(anyhow!("card id is empty"));
     }
 
-    if matches!(card, Card::Choice(_)) {
-        return Ok(());
+    match card {
+        Card::Hypothesis(card) => {
+            require_text("card title", &card.title)?;
+            require_text("hypothesis claim", &card.claim)?;
+            if let Some(location) = &card.evidence {
+                validate_location(
+                    &location.file,
+                    location.line,
+                    location.column,
+                    "hypothesis evidence",
+                )?;
+            }
+            if let Some(pair_protocol::NextMove::OpenLocation(location)) = &card.next_move {
+                validate_location(
+                    &location.file,
+                    location.line,
+                    location.column,
+                    "hypothesis next move",
+                )?;
+            }
+        }
+        Card::Finding(card) => {
+            require_text("card title", &card.title)?;
+            require_text("finding", &card.finding)?;
+            if let Some(location) = &card.location {
+                validate_location(
+                    &location.file,
+                    location.line,
+                    location.column,
+                    "finding location",
+                )?;
+            }
+        }
+        Card::Patch(card) => {
+            require_text("card title", &card.title)?;
+            require_text("patch explanation", &card.explanation)?;
+            for patch in &card.patches {
+                require_text("file patch explanation", &patch.explanation)?;
+            }
+        }
+        Card::Choice(card) => {
+            require_text("card title", &card.title)?;
+            require_text("choice question", &card.question)?;
+            if card.options.is_empty() {
+                return Err(anyhow!("choice card has no options"));
+            }
+            for option in &card.options {
+                require_text("choice option id", &option.id)?;
+                require_text("choice option label", &option.label)?;
+            }
+        }
+        Card::Summary(card) => {
+            require_text("card title", &card.title)?;
+            require_text("summary", &card.summary)?;
+        }
+        Card::Error(card) => {
+            require_text("card title", &card.title)?;
+            require_text("error message", &card.message)?;
+        }
     }
 
-    if card.actions().is_empty() {
+    if !matches!(card, Card::Choice(_) | Card::Summary(_)) && card.actions().is_empty() {
         return Err(anyhow!("card has no actions"));
+    }
+
+    Ok(())
+}
+
+fn require_text(field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(anyhow!("{field} is empty"));
+    }
+
+    Ok(())
+}
+
+fn validate_location(
+    file: &std::path::Path,
+    line: usize,
+    column: usize,
+    label: &str,
+) -> Result<()> {
+    if file.as_os_str().is_empty() {
+        return Err(anyhow!("{label} file is empty"));
+    }
+    if line == 0 || column == 0 {
+        return Err(anyhow!("{label} line and column must start at 1"));
     }
 
     Ok(())
@@ -807,6 +888,42 @@ mod tests {
         assert!(card.message.contains("backend unavailable"));
         assert_eq!(result.turn_token_usage, Default::default());
         assert!(engine.get(&result.session_id).is_some());
+    }
+
+    #[test]
+    fn rejects_card_with_invalid_location_coordinates() {
+        let card = Card::Finding(FindingCard {
+            id: "c_bad_location".into(),
+            title: "Target".into(),
+            finding: "The target is here.".into(),
+            location: Some(pair_protocol::Location {
+                file: "src/main.rs".into(),
+                line: 0,
+                column: 1,
+            }),
+            annotation: None,
+            actions: vec![Action::Open, Action::Stop],
+        });
+
+        let error = validate_one_card(&card).unwrap_err();
+
+        assert!(error.to_string().contains("must start at 1"));
+    }
+
+    #[test]
+    fn rejects_card_with_empty_semantic_body() {
+        let card = Card::Finding(FindingCard {
+            id: "c_empty".into(),
+            title: "Target".into(),
+            finding: "   ".into(),
+            location: None,
+            annotation: None,
+            actions: vec![Action::Stop],
+        });
+
+        let error = validate_one_card(&card).unwrap_err();
+
+        assert!(error.to_string().contains("finding is empty"));
     }
 
     #[tokio::test]
