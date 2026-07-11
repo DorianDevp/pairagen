@@ -146,6 +146,7 @@ end
 function M.controls(card)
   local lines = {
     "Pair draft",
+    "Active step: " .. M.truncate(card.explanation or card.title or "Local change", 96),
     "<leader>pa  Accept",
     "<leader>pd  Reject",
     "<leader>pr  Retry",
