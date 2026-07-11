@@ -203,47 +203,51 @@ impl Engine {
         })
     }
 
-    pub fn apply_result(&mut self, result: PatchApplyResult) -> Result<ActionResult> {
+    pub async fn apply_result(&mut self, result: PatchApplyResult) -> Result<ActionResult> {
+        self.apply_result_with_progress(result, None).await
+    }
+
+    pub async fn apply_result_with_progress(
+        &mut self,
+        result: PatchApplyResult,
+        progress: Option<ProgressReporter>,
+    ) -> Result<ActionResult> {
         let mut session = self.take_session(&result.session_id)?;
         let session_id = result.session_id.clone();
-        let output = self.apply_result_taken(&mut session, result);
+        let output = self
+            .apply_result_taken(&mut session, result, progress)
+            .await;
 
         self.sessions.insert(session_id, session);
 
         output
     }
 
-    fn apply_result_taken(
+    async fn apply_result_taken(
         &self,
         session: &mut Session,
         result: PatchApplyResult,
+        progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         session.state.require_patch()?;
         validate_apply_result(session, &result)?;
+        session.context = result.context.clone();
+        let session_id = result.session_id.clone();
 
-        if result.accepted {
+        let next_action = if result.accepted {
             let completed_steps = completed_patch_steps(session);
             session.completed_steps.extend(completed_steps);
             session.accepted_patches.extend(result.patch_ids.clone());
+            session.state = SessionState::Summary;
+            Action::Next
         } else {
             session.rejected_patches.extend(result.patch_ids.clone());
-        }
-        session.state = SessionState::Summary;
+            session.state = SessionState::PatchShown;
+            Action::Retry
+        };
 
-        let card = session.apply_summary(&result);
-        let token_usage = session.token_usage.clone();
-
-        session.cards.push(card.clone());
-
-        let session_id = result.session_id;
-
-        Ok(ActionResult {
-            session_id,
-            card,
-            goal: goal_progress(session),
-            token_usage,
-            turn_token_usage: Default::default(),
-        })
+        self.action_taken(&session_id, session, next_action, progress)
+            .await
     }
 
     pub fn get(&self, session_id: &str) -> Option<&Session> {
@@ -903,24 +907,6 @@ impl Session {
             next_actions: vec![],
         })
     }
-
-    fn apply_summary(&self, result: &PatchApplyResult) -> Card {
-        let summary = if result.accepted {
-            "Patch accepted.".into()
-        } else if let Some(error) = result.error.as_deref() {
-            format!("Patch was not applied: {error}")
-        } else {
-            "Patch rejected.".into()
-        };
-
-        Card::Summary(SummaryCard {
-            id: self.next_card_id("summary"),
-            title: "Summary".into(),
-            summary,
-            changed_files: result.changed_files.clone(),
-            next_actions: vec![Action::Next, Action::RunCheck, Action::Stop],
-        })
-    }
 }
 
 #[cfg(test)]
@@ -953,6 +939,18 @@ mod tests {
         }
     }
 
+    fn editor_context(buffer_text: &str) -> ContextBundle {
+        ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from("src/work.ts"),
+            cursor: Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: buffer_text.into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+        }
+    }
+
     #[tokio::test]
     async fn starts_with_hypothesis() {
         let backend = Arc::new(MockBackend);
@@ -978,7 +976,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fix_shows_patch_then_apply_summarizes() {
+    async fn accepted_patch_continues_directly_without_intermediate_summary() {
         let backend = Arc::new(MockBackend);
         let mut engine = Engine::new(backend);
         let start = engine.start(params()).await.unwrap();
@@ -993,13 +991,14 @@ mod tests {
             patch_ids: vec!["p_1".into()],
             changed_files: vec![PathBuf::from("src/work.ts")],
             error: None,
+            context: editor_context("payload = payload or {}"),
         };
 
-        let summary = engine.apply_result(result).unwrap();
+        let next = engine.apply_result(result).await.unwrap();
 
-        assert!(matches!(summary.card, Card::Summary(_)));
+        assert!(matches!(next.card, Card::Patch(_)));
         assert_eq!(
-            engine.get(&summary.session_id).unwrap().completed_steps,
+            engine.get(&next.session_id).unwrap().completed_steps,
             vec!["src/work.ts: Keeps body present for callers."]
         );
     }
@@ -1017,9 +1016,10 @@ mod tests {
             patch_ids: vec!["p_1".into()],
             changed_files: vec![PathBuf::from("src/work.ts")],
             error: None,
+            context: editor_context("payload = payload or {}"),
         };
 
-        let error = engine.apply_result(result).unwrap_err();
+        let error = engine.apply_result(result).await.unwrap_err();
 
         assert!(error.to_string().contains("current patch card"));
         assert_eq!(
@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_apply_preserves_error_and_moves_to_summary() {
+    async fn rejected_apply_returns_reworked_patch_without_summary() {
         let backend = Arc::new(MockBackend);
         let mut engine = Engine::new(backend);
         let start = engine.start(params()).await.unwrap();
@@ -1042,57 +1042,16 @@ mod tests {
             patch_ids: vec!["p_1".into()],
             changed_files: vec![],
             error: Some("patch context is ambiguous".into()),
+            context: editor_context("placeholder"),
         };
 
-        let summary = engine.apply_result(result).unwrap();
-        let Card::Summary(card) = summary.card else {
-            panic!("expected summary card");
-        };
+        let reworked = engine.apply_result(result).await.unwrap();
 
-        assert!(card.summary.contains("patch context is ambiguous"));
+        assert!(matches!(reworked.card, Card::Patch(_)));
         assert_eq!(
             engine.get(&start.session_id).unwrap().state,
-            SessionState::Summary
+            SessionState::PatchShown
         );
-    }
-
-    #[tokio::test]
-    async fn next_after_accepted_step_returns_direct_patch_continuation() {
-        let backend = Arc::new(MockBackend);
-        let mut engine = Engine::new(backend);
-        let start = engine.start(params()).await.unwrap();
-        let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
-        let result = PatchApplyResult {
-            session_id: start.session_id.clone(),
-            card_id: patch.card.id().into(),
-            accepted: true,
-            patch_ids: vec!["p_1".into()],
-            changed_files: vec![PathBuf::from("src/work.ts")],
-            error: None,
-        };
-        engine.apply_result(result).unwrap();
-        engine
-            .update_context(
-                &start.session_id,
-                ContextBundle {
-                    cwd: PathBuf::from("/tmp/project"),
-                    file: PathBuf::from("src/work.ts"),
-                    cursor: Cursor { line: 1, column: 1 },
-                    selection: None,
-                    buffer_text: "payload = payload or {}".into(),
-                    buffer_start_line: 1,
-                    diagnostics: vec![],
-                },
-            )
-            .unwrap();
-
-        let next = engine
-            .action(&start.session_id, Action::Next)
-            .await
-            .unwrap();
-
-        assert!(matches!(next.card, Card::Patch(_)));
-        assert_eq!(next.goal.completed_steps.len(), 1);
     }
 
     #[tokio::test]
@@ -1108,9 +1067,10 @@ mod tests {
             patch_ids: vec!["p_1".into()],
             changed_files: vec![PathBuf::from("src/other.ts")],
             error: None,
+            context: editor_context("payload = payload or {}"),
         };
 
-        let error = engine.apply_result(result).unwrap_err();
+        let error = engine.apply_result(result).await.unwrap_err();
 
         assert!(error.to_string().contains("changed files"));
         assert!(

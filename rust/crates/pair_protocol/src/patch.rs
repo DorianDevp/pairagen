@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::context::ContextBundle;
+
 pub type PatchId = String;
 
 pub const MAX_PATCH_FILES: usize = 1;
@@ -24,4 +26,5 @@ pub struct PatchApplyResult {
     pub patch_ids: Vec<PatchId>,
     pub changed_files: Vec<PathBuf>,
     pub error: Option<String>,
+    pub context: ContextBundle,
 }

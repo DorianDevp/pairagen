@@ -150,7 +150,8 @@ impl Server {
                 let params = parse::<PatchApplyResult>(&id, request.params)?;
                 let result = self
                     .engine
-                    .apply_result(params)
+                    .apply_result_with_progress(params, Some(self.progress.clone()))
+                    .await
                     .map_err(server_error(&id))?;
 
                 json!(result)

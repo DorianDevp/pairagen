@@ -293,7 +293,7 @@ end
 
 function M.send(accepted, patch_ids, changed_files, error)
   local session_id = state.session_id
-  local request_id = thinking.start("Applying", session_id)
+  local request_id = thinking.start(accepted and "Continuing" or "Reworking", session_id)
 
   rpc.request("patch/apply_result", {
     session_id = session_id,
@@ -302,6 +302,7 @@ function M.send(accepted, patch_ids, changed_files, error)
     patch_ids = patch_ids,
     changed_files = changed_files,
     error = error,
+    context = context.session(),
   }, function(message)
     if not thinking.current(request_id) then
       return
