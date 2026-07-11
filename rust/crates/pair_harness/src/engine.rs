@@ -9,7 +9,8 @@ use pair_backends::{
 use pair_patch::{PatchCoherence, PatchNormalizer, PatchValidator};
 use pair_protocol::{
     Action, ActionResult, Card, CardKind, ContextBundle, ErrorCard, GoalProgress, Mode,
-    PatchApplyResult, StartSessionParams, StartSessionResult, SummaryCard,
+    ObservationKind, ObservationProgress, PatchApplyResult, StartSessionParams, StartSessionResult,
+    SummaryCard,
 };
 
 use crate::session::Session;
@@ -40,15 +41,15 @@ impl Engine {
         let mut session = Session::new(params.clone());
         let context = ContextBundle::from_start(params);
         let expected = expected_start_state(&session.mode);
-        let request = self.request(&session, BackendAction::Start, context, &expected);
-        let response = match self
-            .backend
-            .next_card_with_progress(request, progress)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => backend_failure_response(&session, error),
-        };
+        let response = self
+            .next_distinct_response(
+                &mut session,
+                BackendAction::Start,
+                context,
+                &expected,
+                progress,
+            )
+            .await;
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         self.add_usage(&mut session, &response.metadata.token_usage);
 
@@ -133,18 +134,18 @@ impl Engine {
         }
 
         let context = session.context.clone();
-        let request = self.request(&session, BackendAction::User(action), context, &state);
 
         session.state = SessionState::Thinking;
 
-        let response = match self
-            .backend
-            .next_card_with_progress(request, progress)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => backend_failure_response(session, error),
-        };
+        let response = self
+            .next_distinct_response(
+                session,
+                BackendAction::User(action),
+                context,
+                &state,
+                progress,
+            )
+            .await;
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         self.add_usage(session, &response.metadata.token_usage);
@@ -174,18 +175,18 @@ impl Engine {
 
         let context = session.context.clone();
         let expected = NextState::Any;
-        let request = self.request(session, BackendAction::Reply(text), context, &expected);
 
         session.state = SessionState::Thinking;
 
-        let response = match self
-            .backend
-            .next_card_with_progress(request, progress)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => backend_failure_response(session, error),
-        };
+        let response = self
+            .next_distinct_response(
+                session,
+                BackendAction::Reply(text),
+                context,
+                &expected,
+                progress,
+            )
+            .await;
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         self.add_usage(session, &response.metadata.token_usage);
@@ -273,6 +274,11 @@ impl Engine {
                 id: session.id.clone(),
                 prompt: session.original_prompt.clone(),
                 completed_steps: session.completed_steps.clone(),
+                known_observations: session
+                    .known_observations
+                    .iter()
+                    .map(observation_prompt_line)
+                    .collect(),
                 mode: session.mode.clone(),
                 card_count: session.cards.len(),
                 last_card: session.cards.last().cloned(),
@@ -288,6 +294,55 @@ impl Engine {
         }
     }
 
+    async fn next_distinct_response(
+        &self,
+        session: &mut Session,
+        action: BackendAction,
+        context: ContextBundle,
+        expected: &NextState,
+        progress: Option<ProgressReporter>,
+    ) -> BackendResponse {
+        let mut action = action;
+        let mut token_usage = None;
+
+        for attempt in 0..2 {
+            let request = self.request(session, action, context.clone(), expected);
+            let mut response = match self
+                .backend
+                .next_card_with_progress(request, progress.clone())
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    let mut response = backend_failure_response(session, error);
+                    merge_usage(&mut token_usage, &response.metadata.token_usage);
+                    response.metadata.token_usage = token_usage;
+                    return response;
+                }
+            };
+            merge_usage(&mut token_usage, &response.metadata.token_usage);
+
+            if let Some((key, reason)) = duplicate_observation(session, &response.card) {
+                activate_observation(session, &key);
+                if attempt == 0 {
+                    action = BackendAction::ContractRetry(format!(
+                        "{reason}. Return a distinct next observation; do not repeat known findings or signals."
+                    ));
+                    continue;
+                }
+
+                let mut rejected = duplicate_failure_response(session, reason);
+                rejected.metadata.token_usage = token_usage;
+                return rejected;
+            }
+
+            response.metadata.token_usage = token_usage;
+            return response;
+        }
+
+        unreachable!()
+    }
+
     fn accept_response(
         &self,
         session: &mut Session,
@@ -295,13 +350,17 @@ impl Engine {
         next_state: NextState,
     ) -> Result<Card> {
         let mut received = response.card;
+        prepare_observation_card(session, &mut received);
         let validation =
             PatchNormalizer::normalize_card(&mut received, &session.context).and_then(|()| {
                 PatchCoherence::annotate(&mut received);
                 validate_backend_card(&received, &next_state, &session.context)
             });
         let card = match validation {
-            Ok(()) => received,
+            Ok(()) => {
+                record_observations(session, &received);
+                received
+            }
             Err(error) => rejected_card(session, &received, error, response.raw_output.as_deref()),
         };
 
@@ -328,7 +387,186 @@ fn goal_progress(session: &Session) -> GoalProgress {
     GoalProgress {
         statement: session.original_prompt.clone(),
         completed_steps: session.completed_steps.clone(),
+        known_observations: session.known_observations.clone(),
     }
+}
+
+fn merge_usage(
+    total: &mut Option<pair_protocol::TokenUsage>,
+    turn: &Option<pair_protocol::TokenUsage>,
+) {
+    let Some(turn) = turn else {
+        return;
+    };
+
+    if let Some(total) = total {
+        total.add(turn);
+    } else {
+        *total = Some(turn.clone());
+    }
+}
+
+fn duplicate_observation(session: &Session, card: &Card) -> Option<(String, String)> {
+    let (key, _, _) = core_observation(card)?;
+    session
+        .observation_index
+        .contains_key(&key)
+        .then(|| (key, "backend repeated a retained observation".into()))
+}
+
+fn prepare_observation_card(session: &mut Session, card: &mut Card) {
+    if core_observation(card).is_some() {
+        for observation in &mut session.known_observations {
+            observation.active = false;
+        }
+    }
+
+    match card {
+        Card::Hypothesis(card) => {
+            if let Some(evidence) = &mut card.evidence
+                && !evidence.annotation.trim().is_empty()
+            {
+                let key = observation_key(ObservationKind::Signal, &evidence.annotation);
+                if session.observation_index.contains_key(&key) {
+                    activate_observation(session, &key);
+                    evidence.annotation.clear();
+                }
+            }
+        }
+        Card::Finding(card) => {
+            if let Some(annotation) = card
+                .annotation
+                .clone()
+                .filter(|text| !text.trim().is_empty())
+            {
+                let key = observation_key(ObservationKind::Signal, &annotation);
+                if session.observation_index.contains_key(&key) {
+                    activate_observation(session, &key);
+                    card.annotation = None;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn record_observations(session: &mut Session, card: &Card) {
+    if let Some((key, kind, label)) = core_observation(card) {
+        record_observation(session, key, kind, label);
+    }
+
+    match card {
+        Card::Hypothesis(card) => {
+            if let Some(evidence) = &card.evidence
+                && !evidence.annotation.trim().is_empty()
+            {
+                let label = evidence.annotation.clone();
+                record_observation(
+                    session,
+                    observation_key(ObservationKind::Signal, &label),
+                    ObservationKind::Signal,
+                    label,
+                );
+            }
+        }
+        Card::Finding(card) => {
+            if let Some(label) = card
+                .annotation
+                .clone()
+                .filter(|text| !text.trim().is_empty())
+            {
+                record_observation(
+                    session,
+                    observation_key(ObservationKind::Signal, &label),
+                    ObservationKind::Signal,
+                    label,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn core_observation(card: &Card) -> Option<(String, ObservationKind, String)> {
+    let (kind, label) = match card {
+        Card::Hypothesis(card) => (ObservationKind::Hypothesis, card.claim.clone()),
+        Card::Finding(card) => (ObservationKind::Finding, card.finding.clone()),
+        _ => return None,
+    };
+
+    Some((observation_key(kind, &label), kind, label))
+}
+
+fn record_observation(session: &mut Session, key: String, kind: ObservationKind, label: String) {
+    if let Some(index) = session.observation_index.get(&key).copied() {
+        if let Some(observation) = session.known_observations.get_mut(index) {
+            observation.occurrences += 1;
+            observation.active = true;
+        }
+        return;
+    }
+
+    let index = session.known_observations.len();
+    session.observation_index.insert(key, index);
+    session.known_observations.push(ObservationProgress {
+        id: format!("o_{}", index + 1),
+        kind,
+        label,
+        occurrences: 1,
+        active: true,
+    });
+}
+
+fn activate_observation(session: &mut Session, key: &str) {
+    let Some(index) = session.observation_index.get(key).copied() else {
+        return;
+    };
+    if let Some(observation) = session.known_observations.get_mut(index) {
+        observation.occurrences += 1;
+        observation.active = true;
+    }
+}
+
+fn observation_key(kind: ObservationKind, label: &str) -> String {
+    format!(
+        "{}:{}",
+        observation_kind_name(kind),
+        normalize_observation(label)
+    )
+}
+
+fn normalize_observation(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn observation_kind_name(kind: ObservationKind) -> &'static str {
+    match kind {
+        ObservationKind::Hypothesis => "hypothesis",
+        ObservationKind::Finding => "finding",
+        ObservationKind::Signal => "signal",
+    }
+}
+
+fn observation_prompt_line(observation: &ObservationProgress) -> String {
+    format!(
+        "{} {} (seen {}x): {}",
+        observation.id,
+        observation_kind_name(observation.kind),
+        observation.occurrences,
+        observation.label
+    )
 }
 
 fn validate_backend_card(
@@ -569,6 +807,24 @@ fn backend_failure_response(session: &Session, error: anyhow::Error) -> BackendR
     }
 }
 
+fn duplicate_failure_response(session: &Session, reason: String) -> BackendResponse {
+    BackendResponse {
+        card: Card::Error(ErrorCard {
+            id: session.next_card_id("duplicate_error"),
+            title: "Backend repeated retained context".into(),
+            message: format!(
+                "{reason}. The duplicate was retained in session memory but was not shown again."
+            ),
+            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+        }),
+        raw_output: None,
+        metadata: pair_backends::BackendMetadata {
+            backend: "harness".into(),
+            token_usage: None,
+        },
+    }
+}
+
 fn expected_start_state(mode: &Mode) -> NextState {
     if *mode == Mode::Fix {
         NextState::Patch
@@ -596,6 +852,7 @@ fn expected_card_kind(
             Mode::Auto | Mode::Investigate => CardKind::Hypothesis,
         },
         BackendAction::Reply(_) => CardKind::Finding,
+        BackendAction::ContractRetry(_) => CardKind::Finding,
         BackendAction::User(action) => match action {
             Action::Fix => CardKind::Patch,
             Action::OtherLead => CardKind::Hypothesis,
@@ -967,6 +1224,32 @@ mod tests {
         assert!(engine.get(&result.session_id).is_some());
     }
 
+    #[tokio::test]
+    async fn retains_duplicate_observations_without_showing_them_again() {
+        let backend = Arc::new(RepeatingObservationBackend::default());
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+
+        let result = engine
+            .action(&start.session_id, Action::Follow)
+            .await
+            .unwrap();
+
+        let Card::Finding(card) = result.card else {
+            panic!("expected distinct finding after automatic contract retry");
+        };
+        assert_eq!(card.finding, "The caller still consumes the old shape.");
+        assert_eq!(card.annotation, None);
+
+        let observations = &engine.get(&start.session_id).unwrap().known_observations;
+        assert_eq!(observations.len(), 3);
+        assert_eq!(observations[0].occurrences, 2);
+        assert_eq!(observations[1].occurrences, 2);
+        assert!(!observations[0].active);
+        assert!(observations[1].active);
+        assert!(observations[2].active);
+    }
+
     #[test]
     fn rejects_card_with_invalid_location_coordinates() {
         let card = Card::Finding(FindingCard {
@@ -1057,6 +1340,68 @@ mod tests {
     struct WrongTypeBackend;
 
     struct AlwaysFailBackend;
+
+    #[derive(Default)]
+    struct RepeatingObservationBackend {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl BackendAdapter for RepeatingObservationBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let card = match (call, req.action) {
+                (0, BackendAction::Start) | (1, BackendAction::User(Action::Follow)) => {
+                    Card::Hypothesis(HypothesisCard {
+                        id: format!("c_repeat_{call}"),
+                        title: "Repeated branch".into(),
+                        claim: "The branch returns before building the preview.".into(),
+                        evidence: Some(pair_protocol::LocationEvidence {
+                            file: "src/work.ts".into(),
+                            line: 1,
+                            column: 1,
+                            annotation: "The preview is skipped here.".into(),
+                        }),
+                        next_move: None,
+                        actions: vec![Action::Follow, Action::Fix, Action::Stop],
+                    })
+                }
+                (2, BackendAction::ContractRetry(_)) => Card::Finding(FindingCard {
+                    id: "c_distinct".into(),
+                    title: "Consumer remains".into(),
+                    finding: "The caller still consumes the old shape.".into(),
+                    location: Some(pair_protocol::Location {
+                        file: "src/work.ts".into(),
+                        line: 1,
+                        column: 1,
+                    }),
+                    annotation: Some("The preview is skipped here.".into()),
+                    actions: vec![Action::Fix, Action::Stop],
+                }),
+                _ => panic!("unexpected observation backend request"),
+            };
+
+            Ok(BackendResponse {
+                card,
+                raw_output: None,
+                metadata: BackendMetadata {
+                    backend: "repeating_observation".into(),
+                    token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
+                },
+            })
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "repeating_observation".into(),
+                streaming: false,
+                patches: true,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
+    }
 
     #[async_trait]
     impl BackendAdapter for AlwaysFailBackend {

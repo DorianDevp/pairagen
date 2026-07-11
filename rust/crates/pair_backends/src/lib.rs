@@ -57,6 +57,7 @@ pub enum BackendAction {
     Start,
     User(Action),
     Reply(String),
+    ContractRetry(String),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -158,6 +159,7 @@ pub struct SessionSnapshot {
     pub id: String,
     pub prompt: String,
     pub completed_steps: Vec<String>,
+    pub known_observations: Vec<String>,
     pub mode: Mode,
     pub card_count: usize,
     pub last_card: Option<Card>,

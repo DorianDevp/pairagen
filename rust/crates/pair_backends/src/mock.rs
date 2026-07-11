@@ -29,6 +29,7 @@ impl BackendAdapter for MockBackend {
             BackendAction::User(Action::Stop) => stop_card(),
             BackendAction::User(action) => unsupported_card(action),
             BackendAction::Reply(text) => reply_card(text),
+            BackendAction::ContractRetry(_) => finding_card(),
         };
 
         Ok(BackendResponse {

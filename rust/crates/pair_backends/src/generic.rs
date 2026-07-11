@@ -66,6 +66,7 @@ impl GenericCliBackend {
                 "id": req.session.id,
                 "p": req.session.prompt,
                 "completed_steps": req.session.completed_steps,
+                "known_observations": req.session.known_observations,
                 "mode": req.session.mode,
                 "n": req.session.card_count,
                 "last": req.session.last_summary
@@ -94,6 +95,9 @@ fn action_value(action: &crate::BackendAction) -> serde_json::Value {
             json!({"kind": "user", "action": serde_json::to_value(action).unwrap_or_default()})
         }
         crate::BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
+        crate::BackendAction::ContractRetry(reason) => {
+            json!({"kind": "contract_retry", "reason": reason})
+        }
     }
 }
 

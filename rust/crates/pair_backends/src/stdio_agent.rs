@@ -211,6 +211,7 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
             "id": req.session.id,
             "p": req.session.prompt,
             "completed_steps": req.session.completed_steps,
+            "known_observations": req.session.known_observations,
             "mode": req.session.mode,
             "n": req.session.card_count,
             "last": req.session.last_summary
@@ -228,6 +229,9 @@ fn action_value(action: &BackendAction) -> serde_json::Value {
             json!({"kind": "user", "action": serde_json::to_value(action).unwrap_or_default()})
         }
         BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
+        BackendAction::ContractRetry(reason) => {
+            json!({"kind": "contract_retry", "reason": reason})
+        }
     }
 }
 

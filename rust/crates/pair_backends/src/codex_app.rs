@@ -578,6 +578,7 @@ Rules:
 
 Session prompt: {prompt}
 Completed local steps: {completed_steps}
+Known findings and signals (do not repeat): {known_observations}
 Mode: {mode}
 Action: {action}
 Last card: {last}
@@ -591,6 +592,8 @@ Buffer excerpt:
         prompt = req.session.prompt,
         completed_steps =
             serde_json::to_string(&req.session.completed_steps).unwrap_or_else(|_| "[]".into()),
+        known_observations =
+            serde_json::to_string(&req.session.known_observations).unwrap_or_else(|_| "[]".into()),
         mode = serde_json::to_string(&req.session.mode).unwrap_or_else(|_| "\"auto\"".into()),
         action = action_value(&req.action),
         expected_kind = req
@@ -616,6 +619,9 @@ fn action_value(action: &BackendAction) -> Value {
             json!({"kind": "user", "action": serde_json::to_value(action).unwrap_or_default()})
         }
         BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
+        BackendAction::ContractRetry(reason) => {
+            json!({"kind": "contract_retry", "reason": reason})
+        }
     }
 }
 

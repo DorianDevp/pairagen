@@ -122,6 +122,24 @@ pub struct ActionResult {
 pub struct GoalProgress {
     pub statement: String,
     pub completed_steps: Vec<String>,
+    pub known_observations: Vec<ObservationProgress>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationKind {
+    Hypothesis,
+    Finding,
+    Signal,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ObservationProgress {
+    pub id: String,
+    pub kind: ObservationKind,
+    pub label: String,
+    pub occurrences: usize,
+    pub active: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
