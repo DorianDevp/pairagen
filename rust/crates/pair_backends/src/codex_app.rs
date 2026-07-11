@@ -172,7 +172,7 @@ impl CodexAppBackend {
             if patch_turn { "patch" } else { "discover" }
         );
 
-        if !patch_turn && let Some(thread_id) = state.threads.get(&thread_key) {
+        if let Some(thread_id) = state.threads.get(&thread_key) {
             return Ok(thread_id.clone());
         }
 
@@ -210,9 +210,7 @@ impl CodexAppBackend {
             .ok_or_else(|| anyhow!("codex app-server thread/start returned no thread id"))?
             .to_string();
 
-        if !patch_turn {
-            state.threads.insert(thread_key, thread_id.clone());
-        }
+        state.threads.insert(thread_key, thread_id.clone());
         debug("codex thread started");
 
         Ok(thread_id)
