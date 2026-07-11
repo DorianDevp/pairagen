@@ -3,7 +3,7 @@ use std::process::Stdio;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use pair_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard, TokenUsage};
+use pair_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard, SummaryCard, TokenUsage};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -47,6 +47,23 @@ struct StructuredPatchOp {
     title: String,
     explanation: String,
     patches: Vec<StructuredFilePatch>,
+}
+
+#[derive(Deserialize)]
+struct StructuredGoalStep {
+    op: String,
+    status: GoalStepStatus,
+    title: String,
+    explanation: String,
+    patches: Vec<StructuredFilePatch>,
+    summary: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GoalStepStatus {
+    Continue,
+    Complete,
 }
 
 #[derive(Deserialize)]
@@ -476,7 +493,7 @@ impl BackendAdapter for CodexAppBackend {
         progress: Option<ProgressReporter>,
     ) -> Result<BackendResponse> {
         let output = self.ask(&req, progress.as_ref()).await?;
-        let card = parse_card(&output.text, req.card_contract.expected_kind)
+        let card = parse_card(&output.text, &req.card_contract)
             .unwrap_or_else(|error| Self::error_card(format!("{}\n\n{}", error, output.text)));
         let card = enforce_card_contract(card, &req.card_contract, "Codex", &output.text);
 
@@ -509,7 +526,17 @@ impl BackendAdapter for CodexAppBackend {
 
 fn prompt(req: &BackendRequest) -> String {
     let patch_turn = req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch);
-    let turn_rules = if patch_turn {
+    let continuation = req.card_contract.allow_goal_completion;
+    let turn_rules = if continuation {
+        format!(
+            "- Continue the original session goal; do not rediscover it or repeat any completed local step.\n\
+             - If the goal is unresolved, return status continue with exactly one file and one hunk changing at most {} added/removed lines.\n\
+             - If the goal is fully resolved, return status complete with no patches and a concise summary.\n\
+             - A continue step must be internally coherent and must not introduce undefined symbols or leave stale references in the supplied block.\n\
+             - Use only the supplied buffer excerpt. Do not inspect the project or use tools.",
+            req.card_contract.max_changed_lines
+        )
+    } else if patch_turn {
         format!(
             "- Return exactly one file and exactly one hunk changing at most {} added/removed lines.\n\
              - Change one coherent local block in the supplied excerpt. Leave later blocks for later Pair cards.\n\
@@ -529,14 +556,20 @@ fn prompt(req: &BackendRequest) -> String {
             .into()
     };
 
+    let output_contract = if continuation {
+        "- goal_step: {\"op\":\"goal_step\",\"status\":\"continue\"|\"complete\",\"title\":string,\"explanation\":string,\"patches\":array,\"summary\":string}"
+    } else {
+        "- hypothesis: {\"op\":\"hypothesis\",\"title\":string,\"claim\":string,\"evidence\":object|null,\"next\":object|null}\n\
+- finding: {\"op\":\"finding\",\"title\":string,\"finding\":string,\"location\":object|null,\"annotation\":string|null}\n\
+- patch: use the exact structured patch schema supplied by the API. Each hunk has old_start, new_start, and lines with kind context/remove/add plus line text without a diff prefix.\n\
+- error: {\"op\":\"error\",\"title\":string,\"message\":string}"
+    };
+
     format!(
         r#"Return exactly one JSON Pair op. No markdown. No prose.
 
 Allowed ops:
-- hypothesis: {{"op":"hypothesis","title":string,"claim":string,"evidence":object|null,"next":object|null}}
-- finding: {{"op":"finding","title":string,"finding":string,"location":object|null,"annotation":string|null}}
-- patch: use the exact structured patch schema supplied by the API. Each hunk has old_start, new_start, and lines with kind context/remove/add plus line text without a diff prefix.
-- error: {{"op":"error","title":string,"message":string}}
+{output_contract}
 
 Rules:
 - Required card kind: {expected_kind}. Return that exact kind.
@@ -566,6 +599,7 @@ Buffer excerpt:
             .map(|kind| format!("{kind:?}").to_lowercase())
             .unwrap_or_else(|| "any allowed kind".into()),
         turn_rules = turn_rules,
+        output_contract = output_contract,
         last = req.session.last_summary.as_deref().unwrap_or("none"),
         file = req.context.file.display(),
         line = req.context.cursor.line,
@@ -585,8 +619,11 @@ fn action_value(action: &BackendAction) -> Value {
     }
 }
 
-fn parse_card(output: &str, expected_kind: Option<pair_protocol::CardKind>) -> Result<Card> {
-    if expected_kind == Some(pair_protocol::CardKind::Patch) {
+fn parse_card(output: &str, contract: &crate::CardContract) -> Result<Card> {
+    if contract.allow_goal_completion {
+        return parse_goal_step(output);
+    }
+    if contract.expected_kind == Some(pair_protocol::CardKind::Patch) {
         return parse_structured_patch(output);
     }
 
@@ -628,6 +665,74 @@ fn parse_structured_patch(output: &str) -> Result<Card> {
             Action::Stop,
         ],
     }))
+}
+
+fn parse_goal_step(output: &str) -> Result<Card> {
+    let step = serde_json::from_str::<StructuredGoalStep>(output.trim())?;
+    if step.op != "goal_step" {
+        return Err(anyhow!(
+            "codex returned op {:?}, expected goal_step",
+            step.op
+        ));
+    }
+
+    match step.status {
+        GoalStepStatus::Continue => {
+            if step.patches.len() != 1 {
+                return Err(anyhow!(
+                    "continuing goal step must contain exactly one patch"
+                ));
+            }
+            let patches = structured_file_patches(step.patches)?;
+
+            Ok(Card::Patch(pair_protocol::PatchCard {
+                id: "c_agent".into(),
+                title: step.title,
+                explanation: step.explanation,
+                warnings: vec![],
+                patches,
+                actions: vec![
+                    Action::Apply,
+                    Action::Retry,
+                    Action::EditPrompt,
+                    Action::Stop,
+                ],
+            }))
+        }
+        GoalStepStatus::Complete => {
+            if !step.patches.is_empty() {
+                return Err(anyhow!("completed goal step cannot contain patches"));
+            }
+            if step.summary.trim().is_empty() {
+                return Err(anyhow!("completed goal step has an empty summary"));
+            }
+
+            Ok(Card::Summary(SummaryCard {
+                id: "c_agent".into(),
+                title: step.title,
+                summary: step.summary,
+                changed_files: vec![],
+                next_actions: vec![Action::RunCheck, Action::Stop],
+            }))
+        }
+    }
+}
+
+fn structured_file_patches(
+    patches: Vec<StructuredFilePatch>,
+) -> Result<Vec<pair_protocol::FilePatch>> {
+    patches
+        .into_iter()
+        .enumerate()
+        .map(|(index, patch)| {
+            Ok(pair_protocol::FilePatch {
+                id: patch.id.unwrap_or_else(|| format!("p_{}", index + 1)),
+                file: patch.file,
+                diff: render_structured_diff(&patch.hunks)?,
+                explanation: patch.explanation,
+            })
+        })
+        .collect()
 }
 
 fn render_structured_diff(hunks: &[StructuredHunk]) -> Result<String> {
@@ -677,6 +782,10 @@ fn render_structured_diff(hunks: &[StructuredHunk]) -> Result<String> {
 }
 
 fn output_schema(req: &BackendRequest) -> Value {
+    if req.card_contract.allow_goal_completion {
+        return goal_step_schema(&req.card_contract);
+    }
+
     match req.card_contract.expected_kind {
         Some(pair_protocol::CardKind::Patch) => patch_schema(&req.card_contract),
         Some(pair_protocol::CardKind::Hypothesis) => hypothesis_schema(),
@@ -686,6 +795,23 @@ fn output_schema(req: &BackendRequest) -> Value {
         Some(pair_protocol::CardKind::Error) => error_schema(),
         None => error_schema(),
     }
+}
+
+fn goal_step_schema(contract: &crate::CardContract) -> Value {
+    let mut patches = patch_schema(contract)["properties"]["patches"].clone();
+    patches["minItems"] = json!(0);
+
+    object_schema(
+        &["op", "status", "title", "explanation", "patches", "summary"],
+        json!({
+            "op": {"type": "string", "enum": ["goal_step"]},
+            "status": {"type": "string", "enum": ["continue", "complete"]},
+            "title": {"type": "string"},
+            "explanation": {"type": "string"},
+            "patches": patches,
+            "summary": {"type": "string"}
+        }),
+    )
 }
 
 fn object_schema(required: &[&str], properties: Value) -> Value {
@@ -985,8 +1111,12 @@ mod tests {
     #[test]
     fn strict_parser_rejects_prose_around_json() {
         let output = r#"Here is the result: {"op":"finding","title":"T","finding":"F","location":null,"annotation":null}"#;
+        let contract = crate::CardContract {
+            expected_kind: Some(pair_protocol::CardKind::Finding),
+            ..crate::CardContract::default()
+        };
 
-        assert!(parse_card(output, Some(pair_protocol::CardKind::Finding)).is_err());
+        assert!(parse_card(output, &contract).is_err());
     }
 
     #[test]
@@ -998,6 +1128,62 @@ mod tests {
         assert_eq!(patch["properties"]["hunks"]["type"], "array");
         assert_eq!(schema["properties"]["patches"]["maxItems"], 1);
         assert_eq!(patch["properties"]["hunks"]["maxItems"], 1);
+    }
+
+    #[test]
+    fn parses_continuing_goal_step_as_patch() {
+        let output = json!({
+            "op": "goal_step",
+            "status": "continue",
+            "title": "Update the consumer",
+            "explanation": "The producer is ready; update one consumer now.",
+            "patches": [{
+                "id": null,
+                "file": "templates/layout.html",
+                "explanation": "Render the concrete preview.",
+                "hunks": [{
+                    "old_start": 10,
+                    "new_start": 10,
+                    "lines": [
+                        {"kind": "remove", "text": "{{ block.preview_html|safe }}"},
+                        {"kind": "add", "text": "{{ block.preview }}"}
+                    ]
+                }]
+            }],
+            "summary": ""
+        });
+
+        assert!(matches!(
+            parse_goal_step(&output.to_string()).unwrap(),
+            Card::Patch(_)
+        ));
+    }
+
+    #[test]
+    fn parses_completed_goal_step_as_summary() {
+        let output = json!({
+            "op": "goal_step",
+            "status": "complete",
+            "title": "Goal complete",
+            "explanation": "No further local changes are needed.",
+            "patches": [],
+            "summary": "The concrete preview now flows into the template."
+        });
+
+        let Card::Summary(card) = parse_goal_step(&output.to_string()).unwrap() else {
+            panic!("expected summary card");
+        };
+        assert!(!card.next_actions.contains(&Action::Next));
+    }
+
+    #[test]
+    fn goal_step_schema_has_one_concrete_root_shape() {
+        let schema = goal_step_schema(&crate::CardContract::default());
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["op"]["enum"][0], "goal_step");
+        assert_eq!(schema["properties"]["patches"]["minItems"], 0);
+        assert_eq!(schema["properties"]["patches"]["maxItems"], 1);
     }
 
     #[test]

@@ -25,7 +25,7 @@ impl BackendAdapter for MockBackend {
             BackendAction::User(Action::OtherLead) => other_card(),
             BackendAction::User(Action::Retry) => patch_card(&req),
             BackendAction::User(Action::RunCheck) => check_card(),
-            BackendAction::User(Action::Next) => other_card(),
+            BackendAction::User(Action::Next) => patch_card(&req),
             BackendAction::User(Action::Stop) => stop_card(),
             BackendAction::User(action) => unsupported_card(action),
             BackendAction::Reply(text) => reply_card(text),

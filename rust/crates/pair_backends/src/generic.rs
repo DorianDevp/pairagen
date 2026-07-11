@@ -49,6 +49,7 @@ impl GenericCliBackend {
                 "If a.kind is user and a.action is fix, return a patch op unless a patch is impossible.",
                 "If s.mode is fix and a.kind is start, return a patch op unless a patch is impossible.",
                 "For non-fix actions, do not return a patch op.",
+                "If limits.goal_completion is true, return one patch when the original goal is unresolved or one summary when it is complete; never restart discovery.",
                 "A patch is one small local pair-programming step: one file, one hunk, and no more changed lines than the supplied limit.",
                 "Do not complete or plan a whole refactor in one response.",
                 "Explain why the next coherent block matters and return control to the user after that step."
@@ -58,7 +59,8 @@ impl GenericCliBackend {
                 "max": req.card_contract.max_body_chars,
                 "patch_files": req.card_contract.max_patch_files,
                 "hunks_per_patch": req.card_contract.max_hunks_per_patch,
-                "changed_lines": req.card_contract.max_changed_lines
+                "changed_lines": req.card_contract.max_changed_lines,
+                "goal_completion": req.card_contract.allow_goal_completion
             },
             "s": {
                 "id": req.session.id,

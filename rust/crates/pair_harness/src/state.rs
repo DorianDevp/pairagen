@@ -8,6 +8,7 @@ pub enum SessionState {
     CardShown,
     PatchShown,
     PatchFailed,
+    ContinuationFailed,
     Applying,
     Applied,
     Summary,
@@ -20,6 +21,7 @@ pub enum NextState {
     Any,
     Card,
     Patch,
+    Continuation,
     Summary,
     Finished,
 }
@@ -38,7 +40,11 @@ impl SessionState {
             (Self::PatchShown, Action::Stop) => Ok(NextState::Finished),
             (Self::PatchFailed, Action::Retry | Action::EditPrompt) => Ok(NextState::Patch),
             (Self::PatchFailed, Action::Stop) => Ok(NextState::Finished),
-            (Self::Summary, Action::Next) => Ok(NextState::Card),
+            (Self::ContinuationFailed, Action::Retry | Action::EditPrompt) => {
+                Ok(NextState::Continuation)
+            }
+            (Self::ContinuationFailed, Action::Stop) => Ok(NextState::Finished),
+            (Self::Summary, Action::Next) => Ok(NextState::Continuation),
             (Self::Summary, Action::RunCheck) => Ok(NextState::Card),
             (Self::Summary, Action::Stop) => Ok(NextState::Finished),
             (Self::Finished, _) => Err(anyhow!("session is finished")),
@@ -73,6 +79,10 @@ impl NextState {
             (Self::Card, _) => Ok(()),
             (Self::Patch, Card::Patch(_)) => Ok(()),
             (Self::Patch, _) => Err(anyhow!("expected patch card")),
+            (Self::Continuation, Card::Patch(_) | Card::Summary(_)) => Ok(()),
+            (Self::Continuation, _) => Err(anyhow!(
+                "expected a continuation patch or completed goal summary"
+            )),
             (Self::Summary, Card::Summary(_)) => Ok(()),
             (Self::Summary, _) => Err(anyhow!("expected summary card")),
             (Self::Finished, Card::Summary(_)) => Ok(()),

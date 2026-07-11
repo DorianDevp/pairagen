@@ -282,6 +282,7 @@ impl Engine {
             context,
             card_contract: CardContract {
                 expected_kind: Some(expected_kind),
+                allow_goal_completion: matches!(expected, NextState::Continuation),
                 ..CardContract::default()
             },
         }
@@ -583,6 +584,7 @@ fn expected_card_kind(
 ) -> CardKind {
     match next_state {
         NextState::Patch => return CardKind::Patch,
+        NextState::Continuation => return CardKind::Patch,
         NextState::Summary | NextState::Finished => return CardKind::Summary,
         NextState::Any | NextState::Card => {}
     }
@@ -615,6 +617,9 @@ fn expected_card_kind(
 fn state_after_card(card: &Card, next_state: &NextState) -> SessionState {
     if matches!(card, Card::Error(_)) && matches!(next_state, NextState::Patch) {
         return SessionState::PatchFailed;
+    }
+    if matches!(card, Card::Error(_)) && matches!(next_state, NextState::Continuation) {
+        return SessionState::ContinuationFailed;
     }
 
     SessionState::from_card(card)
@@ -792,6 +797,45 @@ mod tests {
             engine.get(&start.session_id).unwrap().state,
             SessionState::Summary
         );
+    }
+
+    #[tokio::test]
+    async fn next_after_accepted_step_returns_direct_patch_continuation() {
+        let backend = Arc::new(MockBackend);
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+        let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        let result = PatchApplyResult {
+            session_id: start.session_id.clone(),
+            card_id: patch.card.id().into(),
+            accepted: true,
+            patch_ids: vec!["p_1".into()],
+            changed_files: vec![PathBuf::from("src/work.ts")],
+            error: None,
+        };
+        engine.apply_result(result).unwrap();
+        engine
+            .update_context(
+                &start.session_id,
+                ContextBundle {
+                    cwd: PathBuf::from("/tmp/project"),
+                    file: PathBuf::from("src/work.ts"),
+                    cursor: Cursor { line: 1, column: 1 },
+                    selection: None,
+                    buffer_text: "payload = payload or {}".into(),
+                    buffer_start_line: 1,
+                    diagnostics: vec![],
+                },
+            )
+            .unwrap();
+
+        let next = engine
+            .action(&start.session_id, Action::Next)
+            .await
+            .unwrap();
+
+        assert!(matches!(next.card, Card::Patch(_)));
+        assert_eq!(next.goal.completed_steps.len(), 1);
     }
 
     #[tokio::test]

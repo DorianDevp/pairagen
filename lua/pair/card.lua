@@ -18,7 +18,7 @@ local labels = {
   edit_prompt = { "e", "Edit" },
   open = { "o", "Open" },
   run_check = { "t", "Check" },
-  next = { "n", "Next" },
+  next = { "n", "Next patch" },
   stop = { "q", "Stop" },
 }
 

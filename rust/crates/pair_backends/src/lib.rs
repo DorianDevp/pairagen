@@ -64,6 +64,7 @@ pub struct CardContract {
     pub one_card_only: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_kind: Option<CardKind>,
+    pub allow_goal_completion: bool,
     pub max_body_chars: usize,
     pub max_patch_files: usize,
     pub max_hunks_per_patch: usize,
@@ -75,6 +76,7 @@ impl Default for CardContract {
         Self {
             one_card_only: true,
             expected_kind: None,
+            allow_goal_completion: false,
             max_body_chars: 1_200,
             max_patch_files: MAX_PATCH_FILES,
             max_hunks_per_patch: MAX_HUNKS_PER_PATCH,
@@ -93,7 +95,10 @@ pub fn enforce_card_contract(
         return card;
     };
 
-    if matches!(card, Card::Error(_)) || card.kind() == expected_kind {
+    if matches!(card, Card::Error(_))
+        || card.kind() == expected_kind
+        || (contract.allow_goal_completion && matches!(card, Card::Summary(_)))
+    {
         return card;
     }
 
@@ -162,7 +167,7 @@ pub struct SessionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pair_protocol::HypothesisCard;
+    use pair_protocol::{HypothesisCard, SummaryCard};
 
     fn hypothesis() -> Card {
         Card::Hypothesis(HypothesisCard {
@@ -203,6 +208,27 @@ mod tests {
         assert!(matches!(
             enforce_card_contract(hypothesis(), &contract, "Codex", "{}"),
             Card::Hypothesis(_)
+        ));
+    }
+
+    #[test]
+    fn allows_summary_for_goal_completion_contract() {
+        let contract = CardContract {
+            expected_kind: Some(CardKind::Patch),
+            allow_goal_completion: true,
+            ..CardContract::default()
+        };
+        let summary = Card::Summary(SummaryCard {
+            id: "c_done".into(),
+            title: "Goal complete".into(),
+            summary: "The goal is resolved.".into(),
+            changed_files: vec![],
+            next_actions: vec![Action::Stop],
+        });
+
+        assert!(matches!(
+            enforce_card_contract(summary, &contract, "test", "{}"),
+            Card::Summary(_)
         ));
     }
 }
