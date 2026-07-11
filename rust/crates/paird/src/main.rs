@@ -1,13 +1,17 @@
 use std::io::{self, BufRead, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use pair_backends::{BackendAdapter, GenericCliBackend, MockBackend, StdioAgentBackend};
+use pair_backends::{
+    BackendAdapter, CodexAppBackend, GenericCliBackend, MockBackend, ProgressReporter,
+    StdioAgentBackend,
+};
 use pair_harness::Engine;
 use pair_protocol::{
-    ActionParams, BackendInfo, JsonRpcRequest, JsonRpcResponse, PatchApplyResult, ReplyParams,
-    StartSessionParams,
+    ActionParams, BackendInfo, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+    PatchApplyResult, ReplyParams, StartSessionParams,
 };
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 #[tokio::main]
@@ -28,7 +32,8 @@ async fn main() -> Result<()> {
 
 async fn serve_stdio() -> Result<()> {
     let backend = backend_from_env()?;
-    let mut server = Server::new(backend);
+    let stdout = Arc::new(Mutex::new(io::stdout()));
+    let mut server = Server::new(backend, progress_reporter(stdout.clone()));
     let stdin = io::stdin();
 
     for line in stdin.lock().lines() {
@@ -39,10 +44,7 @@ async fn serve_stdio() -> Result<()> {
         }
 
         let response = server.handle_line(&line).await;
-        let json = serde_json::to_string(&response)?;
-
-        println!("{json}");
-        io::stdout().flush()?;
+        write_json(&stdout, &response)?;
     }
 
     Ok(())
@@ -50,6 +52,7 @@ async fn serve_stdio() -> Result<()> {
 
 fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
     match std::env::var("PAIR_BACKEND").as_deref() {
+        Ok("codex_app") | Ok("codex") => Ok(Arc::new(CodexAppBackend::from_env()?)),
         Ok("agent") | Ok("agent_stdio") => Ok(Arc::new(StdioAgentBackend::from_env()?)),
         Ok("generic") | Ok("generic_cli") => Ok(Arc::new(GenericCliBackend::from_env()?)),
         _ => Ok(Arc::new(MockBackend)),
@@ -59,13 +62,15 @@ fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
 struct Server {
     backend: Arc<dyn BackendAdapter>,
     engine: Engine,
+    progress: ProgressReporter,
 }
 
 impl Server {
-    fn new(backend: Arc<dyn BackendAdapter>) -> Self {
+    fn new(backend: Arc<dyn BackendAdapter>, progress: ProgressReporter) -> Self {
         Self {
             engine: Engine::new(backend.clone()),
             backend,
+            progress,
         }
     }
 
@@ -95,15 +100,28 @@ impl Server {
             "backend/list" => json!([self.backend.capabilities()]),
             "session/start" => {
                 let params = parse::<StartSessionParams>(&id, request.params)?;
-                let result = self.engine.start(params).await.map_err(server_error(&id))?;
+                let result = self
+                    .engine
+                    .start_with_progress(params, Some(self.progress.clone()))
+                    .await
+                    .map_err(server_error(&id))?;
 
                 json!(result)
             }
             "session/action" => {
                 let params = parse::<ActionParams>(&id, request.params)?;
+                if let Some(context) = params.context {
+                    self.engine
+                        .update_context(&params.session_id, context)
+                        .map_err(server_error(&id))?;
+                }
                 let result = self
                     .engine
-                    .action(&params.session_id, params.action)
+                    .action_with_progress(
+                        &params.session_id,
+                        params.action,
+                        Some(self.progress.clone()),
+                    )
                     .await
                     .map_err(server_error(&id))?;
 
@@ -111,9 +129,18 @@ impl Server {
             }
             "session/reply" => {
                 let params = parse::<ReplyParams>(&id, request.params)?;
+                if let Some(context) = params.context {
+                    self.engine
+                        .update_context(&params.session_id, context)
+                        .map_err(server_error(&id))?;
+                }
                 let result = self
                     .engine
-                    .reply(&params.session_id, params.text)
+                    .reply_with_progress(
+                        &params.session_id,
+                        params.text,
+                        Some(self.progress.clone()),
+                    )
                     .await
                     .map_err(server_error(&id))?;
 
@@ -132,7 +159,11 @@ impl Server {
                 let params = parse::<ActionParams>(&id, request.params)?;
                 let result = self
                     .engine
-                    .action(&params.session_id, pair_protocol::Action::Stop)
+                    .action_with_progress(
+                        &params.session_id,
+                        pair_protocol::Action::Stop,
+                        Some(self.progress.clone()),
+                    )
                     .await
                     .map_err(server_error(&id))?;
 
@@ -148,9 +179,38 @@ impl Server {
 
 fn parse<T>(id: &Value, value: Value) -> Result<T, (Value, String)>
 where
-    T: serde::de::DeserializeOwned,
+    T: DeserializeOwned,
 {
     serde_json::from_value(value).map_err(|error| (id.clone(), error.to_string()))
+}
+
+fn progress_reporter(stdout: Arc<Mutex<io::Stdout>>) -> ProgressReporter {
+    Arc::new(move |progress| {
+        let notification = JsonRpcNotification {
+            jsonrpc: "2.0".into(),
+            method: "agent/progress".into(),
+            params: serde_json::to_value(progress).unwrap_or(Value::Null),
+        };
+
+        if let Err(error) = write_json(&stdout, &notification) {
+            eprintln!("paird: failed to write progress notification: {error}");
+        }
+    })
+}
+
+fn write_json<T>(stdout: &Arc<Mutex<io::Stdout>>, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let json = serde_json::to_string(value)?;
+    let mut stdout = stdout
+        .lock()
+        .map_err(|_| anyhow::anyhow!("stdout lock poisoned"))?;
+
+    writeln!(stdout, "{json}")?;
+    stdout.flush()?;
+
+    Ok(())
 }
 
 fn server_error(id: &Value) -> impl FnOnce(anyhow::Error) -> (Value, String) + '_ {
@@ -191,6 +251,7 @@ async fn print_mock_session() -> Result<()> {
         prompt: "payload is empty".into(),
         mode: pair_protocol::Mode::Auto,
         buffer_text: String::new(),
+        buffer_start_line: 1,
         diagnostics: vec![],
     };
     let start = engine.start(params).await?;
@@ -246,7 +307,29 @@ fn run_stdio_agent() -> Result<()> {
             })
         };
 
-        println!("{}", serde_json::to_string(&op)?);
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "t": "pair_progress",
+                "phase": "reviewing",
+                "message": "Reviewing the supplied context"
+            }))?
+        );
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "t": "pair_progress",
+                "phase": "drafting",
+                "message": "Drafting the next Pair card"
+            }))?
+        );
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "t": "pair_result",
+                "result": op
+            }))?
+        );
         io::stdout().flush()?;
     }
 

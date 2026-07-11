@@ -11,6 +11,10 @@ local ui = require("pair.ui")
 
 local M = {}
 
+rpc.on("agent/progress", function(progress)
+  thinking.progress(progress)
+end)
+
 function M.setup(opts)
   config.setup(opts)
   require("pair.commands").setup()
@@ -31,15 +35,26 @@ function M.reply_prompt()
   prompt.reply()
 end
 
-function M.start(text, mode)
+function M.start(text, mode, source)
   if not text or text == "" then
     return
   end
 
   status.hide()
   local request_id = thinking.start("Thinking", nil)
+  local params, captured = context.current(text, mode)
 
-  rpc.request("session/start", context.current(text, mode), function(message)
+  if source then
+    captured = source
+    params = vim.deepcopy(source.value)
+    params.prompt = text
+    params.mode = mode or config.values.backend.mode
+  end
+
+  state.source_buf = captured.buf
+  state.source_cursor = { params.cursor.line, math.max(params.cursor.column - 1, 0) }
+
+  rpc.request("session/start", params, function(message)
     if not thinking.current(request_id) then
       return
     end
@@ -55,6 +70,7 @@ function M.start(text, mode)
 
     state.session_id = message.result.session_id
     state.token_usage = message.result.token_usage
+    state.turn_token_usage = message.result.turn_token_usage
     card.show(message.result.card)
   end)
 end
@@ -72,6 +88,18 @@ function M.action(action)
     return
   end
 
+  if action == "open" then
+    if navigation.from_card(state.card or {}) then
+      ui.close(state.card_win)
+      state.card_win = nil
+      status.show()
+    else
+      ui.notify("No location on this card", vim.log.levels.WARN)
+    end
+
+    return
+  end
+
   ui.notify("Pair: " .. action)
   status.hide()
   local session_id = state.session_id
@@ -80,6 +108,7 @@ function M.action(action)
   rpc.request("session/action", {
     session_id = session_id,
     action = action,
+    context = context.session(),
   }, function(message)
     if not thinking.current(request_id) then
       return
@@ -101,6 +130,7 @@ function M.action(action)
     end
 
     state.token_usage = message.result.token_usage
+    state.turn_token_usage = message.result.turn_token_usage
     card.show(message.result.card)
   end)
 end
@@ -124,6 +154,7 @@ function M.reply(text)
   rpc.request("session/reply", {
     session_id = session_id,
     text = text,
+    context = context.session(),
   }, function(message)
     if not thinking.current(request_id) then
       return
@@ -145,6 +176,7 @@ function M.reply(text)
     end
 
     state.token_usage = message.result.token_usage
+    state.turn_token_usage = message.result.turn_token_usage
     card.show(message.result.card)
   end)
 end
@@ -186,6 +218,7 @@ function M.hide()
 end
 
 function M.reset()
+  require("pair.diff").restore_source()
   thinking.stop(true)
   ui.close(state.prompt_win)
   ui.close(state.prompt_frame_win)
@@ -195,6 +228,8 @@ function M.reset()
   rpc.stop()
 
   state.session_id = nil
+  state.source_buf = nil
+  state.source_cursor = nil
   state.card = nil
   state.last_card = nil
   state.prompt_win = nil
@@ -206,7 +241,12 @@ function M.reset()
   state.status_win = nil
   state.status_buf = nil
   state.diff_tab = nil
+  state.diff_buf = nil
+  state.diff_win = nil
+  state.diff_source_buf = nil
+  state.diff_source_tick = nil
   state.token_usage = nil
+  state.turn_token_usage = nil
   state.thinking_request_id = nil
   state.thinking_session_id = nil
 
@@ -242,6 +282,34 @@ end
 
 function M.agents()
   return config.agent_names()
+end
+
+function M.model(name)
+  if not name or name == "" then
+    local model = config.model()
+
+    ui.notify("Pair model: " .. (model or "default"))
+
+    return model
+  end
+
+  if name == "default" or name == "none" then
+    config.model("")
+    rpc.stop()
+    ui.notify("Pair model: default")
+
+    return nil
+  end
+
+  config.model(name)
+  rpc.stop()
+  ui.notify("Pair model: " .. name)
+
+  return name
+end
+
+function M.models()
+  return config.model_names()
 end
 
 return M

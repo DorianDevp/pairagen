@@ -2,11 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use pair_backends::{BackendAction, BackendAdapter, BackendRequest, CardContract, SessionSnapshot};
+use pair_backends::{
+    BackendAction, BackendAdapter, BackendRequest, BackendResponse, CardContract, ProgressReporter,
+    SessionSnapshot,
+};
 use pair_patch::PatchValidator;
 use pair_protocol::{
-    Action, ActionResult, Card, ContextBundle, ErrorCard, PatchApplyResult, StartSessionParams,
-    StartSessionResult, SummaryCard,
+    Action, ActionResult, Card, CardKind, ContextBundle, ErrorCard, Mode, PatchApplyResult,
+    StartSessionParams, StartSessionResult, SummaryCard,
 };
 
 use crate::session::Session;
@@ -26,13 +29,26 @@ impl Engine {
     }
 
     pub async fn start(&mut self, params: StartSessionParams) -> Result<StartSessionResult> {
+        self.start_with_progress(params, None).await
+    }
+
+    pub async fn start_with_progress(
+        &mut self,
+        params: StartSessionParams,
+        progress: Option<ProgressReporter>,
+    ) -> Result<StartSessionResult> {
         let mut session = Session::new(params.clone());
         let context = ContextBundle::from_start(params);
-        let request = self.request(&session, BackendAction::Start, context);
-        let response = self.backend.next_card(request).await?;
+        let expected = expected_start_state(&session.mode);
+        let request = self.request(&session, BackendAction::Start, context, &expected);
+        let response = self
+            .backend
+            .next_card_with_progress(request, progress)
+            .await?;
+        let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         self.add_usage(&mut session, &response.metadata.token_usage);
 
-        let card = self.accept_card(&mut session, response.card)?;
+        let card = self.accept_response(&mut session, response, expected)?;
         let session_id = session.id.clone();
         let token_usage = session.token_usage.clone();
 
@@ -42,12 +58,24 @@ impl Engine {
             session_id,
             card,
             token_usage,
+            turn_token_usage,
         })
     }
 
     pub async fn action(&mut self, session_id: &str, action: Action) -> Result<ActionResult> {
+        self.action_with_progress(session_id, action, None).await
+    }
+
+    pub async fn action_with_progress(
+        &mut self,
+        session_id: &str,
+        action: Action,
+        progress: Option<ProgressReporter>,
+    ) -> Result<ActionResult> {
         let mut session = self.take_session(session_id)?;
-        let result = self.action_taken(session_id, &mut session, action).await;
+        let result = self
+            .action_taken(session_id, &mut session, action, progress)
+            .await;
 
         self.sessions.insert(session_id.into(), session);
 
@@ -55,8 +83,19 @@ impl Engine {
     }
 
     pub async fn reply(&mut self, session_id: &str, text: String) -> Result<ActionResult> {
+        self.reply_with_progress(session_id, text, None).await
+    }
+
+    pub async fn reply_with_progress(
+        &mut self,
+        session_id: &str,
+        text: String,
+        progress: Option<ProgressReporter>,
+    ) -> Result<ActionResult> {
         let mut session = self.take_session(session_id)?;
-        let result = self.reply_taken(session_id, &mut session, text).await;
+        let result = self
+            .reply_taken(session_id, &mut session, text, progress)
+            .await;
 
         self.sessions.insert(session_id.into(), session);
 
@@ -68,6 +107,7 @@ impl Engine {
         session_id: &str,
         session: &mut Session,
         action: Action,
+        progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         let state = session.state.next(&action)?;
         let previous_state = session.state.clone();
@@ -83,15 +123,20 @@ impl Engine {
                 session_id: session_id.into(),
                 card,
                 token_usage,
+                turn_token_usage: Default::default(),
             });
         }
 
         let context = session.context.clone();
-        let request = self.request(&session, BackendAction::User(action), context);
+        let request = self.request(&session, BackendAction::User(action), context, &state);
 
         session.state = SessionState::Thinking;
 
-        let response = match self.backend.next_card(request).await {
+        let response = match self
+            .backend
+            .next_card_with_progress(request, progress)
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 session.state = previous_state;
@@ -100,15 +145,17 @@ impl Engine {
             }
         };
 
+        let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         self.add_usage(session, &response.metadata.token_usage);
 
-        let card = self.accept_card_with_state(session, response.card, state)?;
+        let card = self.accept_response(session, response, state)?;
         let token_usage = session.token_usage.clone();
 
         Ok(ActionResult {
             session_id: session_id.into(),
             card,
             token_usage,
+            turn_token_usage,
         })
     }
 
@@ -117,6 +164,7 @@ impl Engine {
         session_id: &str,
         session: &mut Session,
         text: String,
+        progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         if text.trim().is_empty() {
             return Err(anyhow!("reply is empty"));
@@ -124,11 +172,16 @@ impl Engine {
 
         let previous_state = session.state.clone();
         let context = session.context.clone();
-        let request = self.request(session, BackendAction::Reply(text), context);
+        let expected = NextState::Any;
+        let request = self.request(session, BackendAction::Reply(text), context, &expected);
 
         session.state = SessionState::Thinking;
 
-        let response = match self.backend.next_card(request).await {
+        let response = match self
+            .backend
+            .next_card_with_progress(request, progress)
+            .await
+        {
             Ok(response) => response,
             Err(error) => {
                 session.state = previous_state;
@@ -137,15 +190,17 @@ impl Engine {
             }
         };
 
+        let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         self.add_usage(session, &response.metadata.token_usage);
 
-        let card = self.accept_card_with_state(session, response.card, NextState::Any)?;
+        let card = self.accept_response(session, response, expected)?;
         let token_usage = session.token_usage.clone();
 
         Ok(ActionResult {
             session_id: session_id.into(),
             card,
             token_usage,
+            turn_token_usage,
         })
     }
 
@@ -185,6 +240,7 @@ impl Engine {
             session_id,
             card,
             token_usage,
+            turn_token_usage: Default::default(),
         })
     }
 
@@ -192,42 +248,60 @@ impl Engine {
         self.sessions.get(session_id)
     }
 
+    pub fn update_context(&mut self, session_id: &str, context: ContextBundle) -> Result<()> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        session.context = context;
+
+        Ok(())
+    }
+
     fn request(
         &self,
         session: &Session,
         action: BackendAction,
         context: ContextBundle,
+        expected: &NextState,
     ) -> BackendRequest {
+        let expected_kind = expected_card_kind(session, &action, expected);
+
         BackendRequest {
             session: SessionSnapshot {
                 id: session.id.clone(),
                 prompt: session.original_prompt.clone(),
+                mode: session.mode.clone(),
                 card_count: session.cards.len(),
                 last_card: session.cards.last().cloned(),
                 last_summary: session.cards.last().map(card_summary),
             },
             action,
             context,
-            card_contract: CardContract::default(),
+            card_contract: CardContract {
+                expected_kind: Some(expected_kind),
+                ..CardContract::default()
+            },
         }
     }
 
-    fn accept_card(&self, session: &mut Session, card: Card) -> Result<Card> {
-        self.accept_card_with_state(session, card, NextState::Any)
-    }
-
-    fn accept_card_with_state(
+    fn accept_response(
         &self,
         session: &mut Session,
-        card: Card,
+        response: BackendResponse,
         next_state: NextState,
     ) -> Result<Card> {
-        let card = match validate_backend_card(&card, &next_state) {
-            Ok(()) => card,
-            Err(error) => rejected_card(session, error),
+        let card = match validate_backend_card(&response.card, &next_state, &session.context) {
+            Ok(()) => response.card,
+            Err(error) => rejected_card(
+                session,
+                &response.card,
+                error,
+                response.raw_output.as_deref(),
+            ),
         };
 
-        session.state = SessionState::from_card(&card);
+        session.state = state_after_card(&card, &next_state);
         session.cards.push(card.clone());
 
         Ok(card)
@@ -246,10 +320,47 @@ impl Engine {
     }
 }
 
-fn validate_backend_card(card: &Card, next_state: &NextState) -> Result<()> {
+fn validate_backend_card(
+    card: &Card,
+    next_state: &NextState,
+    context: &ContextBundle,
+) -> Result<()> {
+    // Backend errors must reach the editor unchanged instead of being replaced by
+    // a generic state-machine error such as "expected patch card".
+    if matches!(card, Card::Error(_)) {
+        return Ok(());
+    }
+
     validate_one_card(card)?;
     PatchValidator::validate_card(card)?;
+    validate_patch_target(card, context)?;
     next_state.validate(card)?;
+
+    Ok(())
+}
+
+fn validate_patch_target(card: &Card, context: &ContextBundle) -> Result<()> {
+    let Card::Patch(card) = card else {
+        return Ok(());
+    };
+    let expected = if context.file.is_absolute() {
+        context
+            .file
+            .strip_prefix(&context.cwd)
+            .unwrap_or(&context.file)
+    } else {
+        &context.file
+    };
+
+    if let Some(patch) = card.patches.first()
+        && patch.file != expected
+    {
+        return Err(anyhow!(
+            "patch targets {}, but the accepted source location is {}; open that location before Fix",
+            patch.file.display(),
+            expected.display()
+        ));
+    }
 
     Ok(())
 }
@@ -270,13 +381,82 @@ fn validate_one_card(card: &Card) -> Result<()> {
     Ok(())
 }
 
-fn rejected_card(session: &Session, error: anyhow::Error) -> Card {
+fn rejected_card(
+    session: &Session,
+    received: &Card,
+    error: anyhow::Error,
+    raw_output: Option<&str>,
+) -> Card {
+    let mut message = format!("{error}\nReceived card kind: {:?}.", received.kind());
+
+    if let Some(raw_output) = raw_output
+        .map(str::trim)
+        .filter(|output| !output.is_empty())
+    {
+        let raw_output = raw_output.chars().take(1_200).collect::<String>();
+        message.push_str("\n\nRaw backend response:\n");
+        message.push_str(&raw_output);
+    }
+
     Card::Error(ErrorCard {
         id: session.next_card_id("rejected"),
         title: "Backend card rejected".into(),
-        message: error.to_string(),
+        message,
         actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
     })
+}
+
+fn expected_start_state(mode: &Mode) -> NextState {
+    if *mode == Mode::Fix {
+        NextState::Patch
+    } else {
+        NextState::Any
+    }
+}
+
+fn expected_card_kind(
+    session: &Session,
+    action: &BackendAction,
+    next_state: &NextState,
+) -> CardKind {
+    match next_state {
+        NextState::Patch => return CardKind::Patch,
+        NextState::Summary | NextState::Finished => return CardKind::Summary,
+        NextState::Any | NextState::Card => {}
+    }
+
+    match action {
+        BackendAction::Start => match session.mode {
+            Mode::Fix | Mode::Propose => CardKind::Patch,
+            Mode::Explain | Mode::Review => CardKind::Finding,
+            Mode::Auto | Mode::Investigate => CardKind::Hypothesis,
+        },
+        BackendAction::Reply(_) => CardKind::Finding,
+        BackendAction::User(action) => match action {
+            Action::Fix => CardKind::Patch,
+            Action::OtherLead => CardKind::Hypothesis,
+            Action::Follow | Action::Why | Action::Open | Action::RunCheck | Action::Next => {
+                CardKind::Finding
+            }
+            Action::Retry | Action::EditPrompt => session
+                .cards
+                .iter()
+                .rev()
+                .find(|card| !matches!(card, Card::Error(_)))
+                .map(Card::kind)
+                .unwrap_or(CardKind::Hypothesis),
+            Action::Apply | Action::ApplyPatch { .. } | Action::Stop => CardKind::Summary,
+        },
+    }
+}
+
+fn state_after_card(card: &Card, next_state: &NextState) -> SessionState {
+    if matches!(card, Card::Error(_)) && matches!(next_state, NextState::Patch) {
+        // Retry/Edit after a failed fix must remain bound to the patch contract.
+        return SessionState::PatchShown;
+    }
+
+    SessionState::from_card(card)
 }
 
 fn card_summary(card: &Card) -> String {
@@ -343,6 +523,7 @@ mod tests {
             prompt: "payload is empty".into(),
             mode: Mode::Auto,
             buffer_text: "placeholder".into(),
+            buffer_start_line: 1,
             diagnostics: vec![],
         }
     }
@@ -433,6 +614,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preserves_wrong_card_type_and_raw_backend_output_for_fix() {
+        let backend = Arc::new(WrongTypeBackend);
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+        let Card::Error(card) = result.card else {
+            panic!("expected error card");
+        };
+
+        assert!(card.message.contains("expected patch card"));
+        assert!(card.message.contains("Received card kind: Finding"));
+        assert!(card.message.contains("raw finding from backend"));
+
+        let retry = engine
+            .action(&start.session_id, Action::Retry)
+            .await
+            .unwrap();
+        assert!(matches!(retry.card, Card::Error(_)));
+    }
+
+    #[tokio::test]
+    async fn start_in_fix_mode_requires_a_patch_card() {
+        let backend = Arc::new(WrongTypeBackend);
+        let mut engine = Engine::new(backend);
+        let mut fix_params = params();
+        fix_params.mode = Mode::Fix;
+
+        let result = engine.start(fix_params).await.unwrap();
+        let Card::Error(card) = result.card else {
+            panic!("expected error card");
+        };
+
+        assert!(card.message.contains("expected patch card"));
+    }
+
+    #[tokio::test]
     async fn replies_inside_session() {
         let backend = Arc::new(MockBackend);
         let mut engine = Engine::new(backend);
@@ -449,12 +667,41 @@ mod tests {
         assert!(card.finding.contains("that is not it"));
     }
 
+    #[tokio::test]
+    async fn action_uses_refreshed_editor_context() {
+        let backend = Arc::new(MockBackend);
+        let mut engine = Engine::new(backend);
+        let start = engine.start(params()).await.unwrap();
+        let context = ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from("templates/layout.html"),
+            cursor: Cursor {
+                line: 12,
+                column: 1,
+            },
+            selection: None,
+            buffer_text: "{{ block.preview_html|safe }}".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+        };
+
+        engine.update_context(&start.session_id, context).unwrap();
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        let Card::Patch(card) = result.card else {
+            panic!("expected patch card");
+        };
+
+        assert_eq!(card.patches[0].file, PathBuf::from("templates/layout.html"));
+    }
+
     #[derive(Default)]
     struct FlakyBackend {
         failed: AtomicBool,
     }
 
     struct BadPatchBackend;
+
+    struct WrongTypeBackend;
 
     #[async_trait]
     impl BackendAdapter for FlakyBackend {
@@ -547,6 +794,50 @@ mod tests {
                 name: "bad_patch".into(),
                 streaming: false,
                 patches: true,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BackendAdapter for WrongTypeBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            let card = match req.action {
+                BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                    id: "c_1".into(),
+                    title: "Start".into(),
+                    claim: "Wrong type for this test.".into(),
+                    evidence: None,
+                    next_move: None,
+                    actions: vec![Action::Fix, Action::Stop],
+                }),
+                _ => Card::Finding(FindingCard {
+                    id: "c_finding".into(),
+                    title: "Wrong type".into(),
+                    finding: "This is deliberately not a patch.".into(),
+                    location: None,
+                    annotation: None,
+                    actions: vec![Action::Fix, Action::Stop],
+                }),
+            };
+
+            Ok(BackendResponse {
+                card,
+                raw_output: Some("raw finding from backend".into()),
+                metadata: BackendMetadata {
+                    backend: "wrong_type".into(),
+                    token_usage: None,
+                },
+            })
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "wrong_type".into(),
+                streaming: false,
+                patches: false,
                 reasoning: false,
                 can_read_project: false,
                 can_use_tools: false,

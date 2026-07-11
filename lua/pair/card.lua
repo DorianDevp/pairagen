@@ -26,7 +26,6 @@ function M.show(card)
   state.card = card
   state.last_card = card
   status.hide()
-  navigation.from_card(card)
 
   local lines = M.lines(card)
   local width = M.width(lines)
@@ -72,9 +71,29 @@ function M.lines(card)
     M.add(lines, card.question or card.title)
   end
 
+  local location = M.location(card)
+  if location then
+    table.insert(lines, "")
+    table.insert(lines, string.format("Location: %s:%s", location.file or "", location.line or 1))
+  end
+
   M.tokens(lines)
 
   return lines
+end
+
+function M.location(card)
+  if type(card.next_move) == "table" and card.next_move.kind == "open_location" then
+    return card.next_move
+  end
+  if type(card.evidence) == "table" then
+    return card.evidence
+  end
+  if type(card.location) == "table" then
+    return card.location
+  end
+
+  return nil
 end
 
 function M.add(lines, text)
@@ -86,7 +105,7 @@ function M.add(lines, text)
 end
 
 function M.tokens(lines)
-  local usage = state.token_usage
+  local usage = state.turn_token_usage
 
   if not usage then
     return
@@ -94,12 +113,17 @@ function M.tokens(lines)
 
   table.insert(lines, "")
   table.insert(lines, string.format(
-    "Tokens: in %s / out %s / total %s%s",
+    "Turn: in %s / out %s / total %s%s",
     usage.input_tokens or 0,
     usage.output_tokens or 0,
     usage.total_tokens or 0,
     usage.estimated and " est" or ""
   ))
+
+  local total = state.token_usage
+  if total and total.total_tokens ~= usage.total_tokens then
+    table.insert(lines, string.format("Session total: %s", total.total_tokens or 0))
+  end
 end
 
 function M.signal(lines, text)

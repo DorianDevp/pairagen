@@ -1,11 +1,12 @@
 local config = require("pair.config")
 local extmarks = require("pair.extmarks")
+local state = require("pair.state")
 
 local M = {}
 
 function M.open_location(location)
   if type(location) ~= "table" then
-    return
+    return false
   end
 
   local file = location.file
@@ -25,17 +26,23 @@ function M.open_location(location)
   local column = location.column or 1
 
   vim.api.nvim_win_set_cursor(0, { line, math.max(column - 1, 0) })
+  state.source_buf = vim.api.nvim_get_current_buf()
+  state.source_cursor = { line, math.max(column - 1, 0) }
   extmarks.annotate(0, line, location.annotation)
+
+  return true
 end
 
 function M.from_card(card)
   if type(card.next_move) == "table" and card.next_move.kind == "open_location" then
-    M.open_location(card.next_move)
+    return M.open_location(card.next_move)
   elseif type(card.evidence) == "table" then
-    M.open_location(card.evidence)
+    return M.open_location(card.evidence)
   elseif type(card.location) == "table" then
-    M.open_location(card.location)
+    return M.open_location(card.location)
   end
+
+  return false
 end
 
 return M

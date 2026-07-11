@@ -6,6 +6,17 @@ use crate::patch::{FilePatch, PatchId};
 
 pub type CardId = String;
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardKind {
+    Hypothesis,
+    Finding,
+    Patch,
+    Choice,
+    Summary,
+    Error,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -35,6 +46,17 @@ pub enum Card {
 }
 
 impl Card {
+    pub fn kind(&self) -> CardKind {
+        match self {
+            Card::Hypothesis(_) => CardKind::Hypothesis,
+            Card::Finding(_) => CardKind::Finding,
+            Card::Patch(_) => CardKind::Patch,
+            Card::Choice(_) => CardKind::Choice,
+            Card::Summary(_) => CardKind::Summary,
+            Card::Error(_) => CardKind::Error,
+        }
+    }
+
     pub fn id(&self) -> &str {
         match self {
             Card::Hypothesis(card) => &card.id,

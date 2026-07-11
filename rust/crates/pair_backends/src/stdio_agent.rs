@@ -9,8 +9,9 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 use crate::{
-    BackendAction, BackendAdapter, BackendMetadata, BackendRequest, BackendResponse,
-    estimate_tokens,
+    BackendAction, BackendAdapter, BackendMetadata, BackendProgress, BackendRequest,
+    BackendResponse, PairStreamEvent, ProgressReporter, enforce_card_contract, estimate_tokens,
+    parse_pair_stream_event, result_text,
 };
 
 pub struct StdioAgentBackend {
@@ -29,11 +30,7 @@ impl StdioAgentBackend {
     pub fn from_env() -> Result<Self> {
         let command = std::env::var("PAIR_AGENT_COMMAND")
             .map_err(|_| anyhow!("PAIR_AGENT_COMMAND is required"))?;
-        let args = std::env::var("PAIR_AGENT_ARGS")
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+        let args = args_from_env("PAIR_AGENT_ARGS_JSON", "PAIR_AGENT_ARGS")?;
 
         Ok(Self::new(command, args))
     }
@@ -78,7 +75,17 @@ impl StdioAgentBackend {
         Ok(())
     }
 
-    async fn ask(&self, req: &BackendRequest) -> Result<AgentAnswer> {
+    async fn ask(
+        &self,
+        req: &BackendRequest,
+        progress: Option<&ProgressReporter>,
+    ) -> Result<AgentAnswer> {
+        report_progress(
+            progress,
+            &req.session.id,
+            "starting",
+            "Starting agent process",
+        );
         self.ensure().await?;
 
         let mut process = self.process.lock().await;
@@ -93,11 +100,31 @@ impl StdioAgentBackend {
         process.stdin.write_all(b"\n").await?;
         process.stdin.flush().await?;
 
-        let Some(line) = process.stdout.next_line().await? else {
-            return Err(anyhow!("agent closed stdout"));
-        };
+        report_progress(
+            progress,
+            &req.session.id,
+            "working",
+            "Agent is processing the request",
+        );
 
-        Ok(AgentAnswer { line, input_tokens })
+        loop {
+            let Some(line) = process.stdout.next_line().await? else {
+                return Err(anyhow!("agent closed stdout"));
+            };
+
+            match parse_pair_stream_event(&line) {
+                Some(PairStreamEvent::Progress { phase, message }) => {
+                    report_progress(progress, &req.session.id, &phase, &message);
+                }
+                Some(PairStreamEvent::Result(result)) => {
+                    return Ok(AgentAnswer {
+                        line: result_text(result),
+                        input_tokens,
+                    });
+                }
+                None => return Ok(AgentAnswer { line, input_tokens }),
+            }
+        }
     }
 
     fn error_card(message: impl Into<String>) -> Card {
@@ -119,11 +146,20 @@ impl Drop for AgentProcess {
 #[async_trait]
 impl BackendAdapter for StdioAgentBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
-        let answer = self.ask(&req).await?;
+        self.next_card_with_progress(req, None).await
+    }
+
+    async fn next_card_with_progress(
+        &self,
+        req: BackendRequest,
+        progress: Option<ProgressReporter>,
+    ) -> Result<BackendResponse> {
+        let answer = self.ask(&req, progress.as_ref()).await?;
         let raw_output = answer.line;
         let output_tokens = estimate_tokens(&raw_output);
         let card = parse_agent_output(&raw_output)
             .unwrap_or_else(|error| Self::error_card(format!("{}\n\n{}", error, raw_output)));
+        let card = enforce_card_contract(card, &req.card_contract, "Agent", &raw_output);
 
         Ok(BackendResponse {
             card,
@@ -138,12 +174,27 @@ impl BackendAdapter for StdioAgentBackend {
     fn capabilities(&self) -> BackendInfo {
         BackendInfo {
             name: "agent_stdio".into(),
-            streaming: false,
+            streaming: true,
             patches: true,
             reasoning: true,
             can_read_project: false,
             can_use_tools: false,
         }
+    }
+}
+
+fn report_progress(
+    progress: Option<&ProgressReporter>,
+    session_id: &str,
+    phase: &str,
+    message: &str,
+) {
+    if let Some(progress) = progress {
+        progress(BackendProgress {
+            session_id: session_id.into(),
+            phase: phase.into(),
+            message: message.into(),
+        });
     }
 }
 
@@ -159,6 +210,7 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
         "s": {
             "id": req.session.id,
             "p": req.session.prompt,
+            "mode": req.session.mode,
             "n": req.session.card_count,
             "last": req.session.last_summary
         },
@@ -171,15 +223,31 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
 fn action_value(action: &BackendAction) -> serde_json::Value {
     match action {
         BackendAction::Start => json!({"kind": "start"}),
-        BackendAction::User(action) => json!({"kind": "user", "action": format!("{action:?}")}),
+        BackendAction::User(action) => {
+            json!({"kind": "user", "action": serde_json::to_value(action).unwrap_or_default()})
+        }
         BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
     }
 }
 
 fn agent_api() -> serde_json::Value {
     json!(
-        "Return one JSON Pair op only. Ops: hypothesis, finding, patch, choice, summary, error. Patch only for fix. patch.diff must be unified diff hunks starting with @@."
+        "Return one JSON Pair op only. Ops: hypothesis, finding, patch, choice, summary, error. Behave as an equal pair-programming partner: explain what you noticed and why the next coherent block matters, then return control to the user. Never plan or complete a whole refactor in one response. Return patch for user action fix or start mode fix unless impossible. A patch is one local step: exactly one file and one hunk within the supplied changed-line limit. patch.diff must be a unified diff hunk starting with @@. You may first emit newline-delimited {\"t\":\"pair_progress\",\"phase\":string,\"message\":string} records with concise user-visible activity summaries. Never emit hidden reasoning or private chain-of-thought. End with either a raw Pair op or {\"t\":\"pair_result\",\"result\":<Pair op>}."
     )
+}
+
+fn args_from_env(json_name: &str, plain_name: &str) -> Result<Vec<String>> {
+    if let Ok(value) = std::env::var(json_name)
+        && !value.trim().is_empty()
+    {
+        return Ok(serde_json::from_str(&value)?);
+    }
+
+    Ok(std::env::var(plain_name)
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect())
 }
 
 fn parse_agent_output(output: &str) -> Result<Card> {
@@ -197,5 +265,12 @@ mod tests {
         let card = parse_agent_output(r#"{"op":"hypothesis","title":"T","claim":"C"}"#).unwrap();
 
         assert!(matches!(card, Card::Hypothesis(_)));
+    }
+
+    #[test]
+    fn serializes_user_action_as_protocol_value() {
+        let value = action_value(&BackendAction::User(Action::Fix));
+
+        assert_eq!(value["action"], "fix");
     }
 }

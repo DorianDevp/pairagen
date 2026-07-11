@@ -6,6 +6,7 @@ local M = {
   job = nil,
   next_id = 1,
   pending = {},
+  notifications = {},
   buffer = "",
 }
 
@@ -72,39 +73,20 @@ function M.request(method, params, callback)
   vim.fn.chansend(M.job, payload .. "\n")
 end
 
-function M.on_data(data)
-  for _, chunk in ipairs(data or {}) do
-    if chunk ~= "" then
-      M.read_chunk(chunk)
-    end
-  end
+function M.on(method, callback)
+  M.notifications[method] = callback
 end
 
-function M.read_chunk(chunk)
-  local line = M.buffer .. chunk
-  local ok = pcall(vim.json.decode, line)
-
-  if ok then
-    M.buffer = ""
-    M.handle(line)
-
+function M.on_data(data)
+  if not data or #data == 0 then
     return
   end
 
-  M.buffer = line
-end
+  local lines = vim.deepcopy(data)
+  lines[1] = M.buffer .. (lines[1] or "")
+  M.buffer = table.remove(lines) or ""
 
-function M.flush()
-  while true do
-    local index = M.buffer:find("\n", 1, true)
-
-    if not index then
-      return
-    end
-
-    local line = M.buffer:sub(1, index - 1)
-    M.buffer = M.buffer:sub(index + 1)
-
+  for _, line in ipairs(lines) do
     if line ~= "" then
       M.handle(line)
     end
@@ -117,6 +99,16 @@ function M.handle(line)
   if not ok then
     log.write("invalid backend JSON", line)
     ui.notify("Invalid backend JSON", vim.log.levels.ERROR)
+
+    return
+  end
+
+  if message.method and not message.id then
+    local callback = M.notifications[message.method]
+
+    if callback then
+      callback(message.params or {})
+    end
 
     return
   end

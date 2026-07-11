@@ -5,11 +5,13 @@ local ui = require("pair.ui")
 local M = {}
 
 function M.open(mode)
+  local source = require("pair.context").capture()
+
   M.open_for({
     title = " Pair Prompt ",
     footer = " Ctrl-s submit  Esc normal  q close ",
     submit = function(text)
-      require("pair").start(text, mode)
+      require("pair").start(text, mode, source)
     end,
   })
 end

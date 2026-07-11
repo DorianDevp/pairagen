@@ -62,6 +62,16 @@ function M.setup()
     end,
     force = true,
   })
+
+  vim.api.nvim_create_user_command("PairModel", function(opts)
+    require("pair").model(opts.args)
+  end, {
+    nargs = "?",
+    complete = function()
+      return require("pair").models()
+    end,
+    force = true,
+  })
 end
 
 function M.action_or_prompt(action, mode)

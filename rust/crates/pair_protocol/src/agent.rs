@@ -86,6 +86,7 @@ impl AgentOp {
                 evidence: evidence.map(AgentLocation::evidence),
                 next_move: next.map(|location| NextMove::OpenLocation(location.evidence())),
                 actions: vec![
+                    Action::Open,
                     Action::Follow,
                     Action::Why,
                     Action::Fix,

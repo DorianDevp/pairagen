@@ -60,18 +60,11 @@ require("pair").setup({
   },
   agents = {
     codex = {
-      kind = "generic",
+      kind = "codex_app",
       command = "codex",
       args = {
-        "exec",
-        "--sandbox",
-        "read-only",
-        "--color",
-        "never",
-        "--skip-git-repo-check",
-        "--output-schema",
-        "/path/to/pairagen/schemas/pair-agent-op.schema.json",
-        "-",
+        "app-server",
+        "--stdio",
       },
     },
     agent = {
@@ -100,6 +93,7 @@ Switch at runtime:
 :PairAgent agent
 :PairAgent claude
 :PairAgent local
+:PairModel <model>
 ```
 
 ## Flow
@@ -131,6 +125,7 @@ Summary
 :PairLog
 :PairBackend
 :PairAgent
+:PairModel
 ```
 
 `PairLog` prints the log path. The default path is:
@@ -159,4 +154,11 @@ paird --stdio
 
 `PAIR_GENERIC_ARGS` is split on whitespace.
 
-The generic backend sends a strict JSON card contract to stdin and expects one JSON card on stdout.
+The generic backend sends a strict JSON card contract to stdin. It accepts a raw final JSON card for backwards compatibility, or an NDJSON stream:
+
+```json
+{"t":"pair_progress","phase":"reviewing","message":"Reviewing the supplied context"}
+{"t":"pair_result","result":{"op":"hypothesis","title":"...","claim":"..."}}
+```
+
+`pair_progress.message` is user-visible feedback. It must be a concise status summary, never raw model reasoning. Claude and local agents that do not emit this protocol still show lifecycle feedback from Pair while their process is running.

@@ -1,21 +1,47 @@
+pub mod codex_app;
 pub mod generic;
 pub mod mock;
 pub mod stdio_agent;
+pub mod stream;
+
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use pair_protocol::{Action, BackendInfo, Card, ContextBundle, TokenUsage};
+use pair_protocol::{
+    Action, BackendInfo, Card, CardKind, ContextBundle, ErrorCard, MAX_CHANGED_LINES,
+    MAX_HUNKS_PER_PATCH, MAX_PATCH_FILES, Mode, TokenUsage,
+};
 use serde::Serialize;
 
+pub use codex_app::*;
 pub use generic::*;
 pub use mock::*;
 pub use stdio_agent::*;
+pub use stream::*;
 
 #[async_trait]
 pub trait BackendAdapter: Send + Sync {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse>;
 
+    async fn next_card_with_progress(
+        &self,
+        req: BackendRequest,
+        _progress: Option<ProgressReporter>,
+    ) -> Result<BackendResponse> {
+        self.next_card(req).await
+    }
+
     fn capabilities(&self) -> BackendInfo;
+}
+
+pub type ProgressReporter = Arc<dyn Fn(BackendProgress) + Send + Sync>;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BackendProgress {
+    pub session_id: String,
+    pub phase: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug)]
@@ -36,18 +62,69 @@ pub enum BackendAction {
 #[derive(Clone, Debug, Serialize)]
 pub struct CardContract {
     pub one_card_only: bool,
-    pub patch_only_on_fix: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_kind: Option<CardKind>,
     pub max_body_chars: usize,
+    pub max_patch_files: usize,
+    pub max_hunks_per_patch: usize,
+    pub max_changed_lines: usize,
 }
 
 impl Default for CardContract {
     fn default() -> Self {
         Self {
             one_card_only: true,
-            patch_only_on_fix: true,
+            expected_kind: None,
             max_body_chars: 1_200,
+            max_patch_files: MAX_PATCH_FILES,
+            max_hunks_per_patch: MAX_HUNKS_PER_PATCH,
+            max_changed_lines: MAX_CHANGED_LINES,
         }
     }
+}
+
+pub fn enforce_card_contract(
+    card: Card,
+    contract: &CardContract,
+    backend: &str,
+    raw_output: &str,
+) -> Card {
+    let Some(expected_kind) = contract.expected_kind else {
+        return card;
+    };
+
+    if matches!(card, Card::Error(_)) || card.kind() == expected_kind {
+        return card;
+    }
+
+    let received_kind = card.kind();
+    let raw_output = excerpt(raw_output, contract.max_body_chars);
+    let mut message = format!(
+        "{backend} returned a {received_kind:?} card, but this request requires a {expected_kind:?} card."
+    );
+
+    if !raw_output.is_empty() {
+        message.push_str("\n\nRaw backend response:\n");
+        message.push_str(&raw_output);
+    }
+
+    Card::Error(ErrorCard {
+        id: "c_backend_contract_error".into(),
+        title: "Backend returned the wrong card type".into(),
+        message,
+        actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+    })
+}
+
+pub fn excerpt(text: &str, max_chars: usize) -> String {
+    let text = text.trim();
+    let mut result = text.chars().take(max_chars).collect::<String>();
+
+    if text.chars().count() > max_chars {
+        result.push_str("\n...");
+    }
+
+    result
 }
 
 #[derive(Clone, Debug)]
@@ -75,7 +152,56 @@ pub fn estimate_tokens(text: &str) -> usize {
 pub struct SessionSnapshot {
     pub id: String,
     pub prompt: String,
+    pub mode: Mode,
     pub card_count: usize,
     pub last_card: Option<Card>,
     pub last_summary: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pair_protocol::HypothesisCard;
+
+    fn hypothesis() -> Card {
+        Card::Hypothesis(HypothesisCard {
+            id: "c_hypothesis".into(),
+            title: "Hypothesis".into(),
+            claim: "The response has the wrong type.".into(),
+            evidence: None,
+            next_move: None,
+            actions: vec![Action::Fix],
+        })
+    }
+
+    #[test]
+    fn rejects_non_patch_when_patch_is_required() {
+        let contract = CardContract {
+            expected_kind: Some(CardKind::Patch),
+            ..CardContract::default()
+        };
+        let card =
+            enforce_card_contract(hypothesis(), &contract, "Codex", "{\"op\":\"hypothesis\"}");
+
+        let Card::Error(error) = card else {
+            panic!("expected contract error card");
+        };
+
+        assert!(error.message.contains("Hypothesis card"));
+        assert!(error.message.contains("Patch card"));
+        assert!(error.message.contains("Raw backend response"));
+    }
+
+    #[test]
+    fn allows_the_required_card_type() {
+        let contract = CardContract {
+            expected_kind: Some(CardKind::Hypothesis),
+            ..CardContract::default()
+        };
+
+        assert!(matches!(
+            enforce_card_contract(hypothesis(), &contract, "Codex", "{}"),
+            Card::Hypothesis(_)
+        ));
+    }
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Action, Card};
+use crate::{Action, Card, ContextBundle};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TokenUsage {
@@ -89,18 +89,23 @@ pub struct StartSessionResult {
     pub session_id: String,
     pub card: Card,
     pub token_usage: TokenUsage,
+    pub turn_token_usage: TokenUsage,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActionParams {
     pub session_id: String,
     pub action: Action,
+    #[serde(default)]
+    pub context: Option<ContextBundle>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReplyParams {
     pub session_id: String,
     pub text: String,
+    #[serde(default)]
+    pub context: Option<ContextBundle>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -108,6 +113,7 @@ pub struct ActionResult {
     pub session_id: String,
     pub card: Card,
     pub token_usage: TokenUsage,
+    pub turn_token_usage: TokenUsage,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

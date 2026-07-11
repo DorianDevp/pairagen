@@ -1,5 +1,7 @@
 local M = {
   session_id = nil,
+  source_buf = nil,
+  source_cursor = nil,
   card = nil,
   prompt_win = nil,
   prompt_buf = nil,
@@ -10,13 +12,21 @@ local M = {
   status_win = nil,
   status_buf = nil,
   diff_tab = nil,
+  diff_buf = nil,
+  diff_win = nil,
+  diff_source_buf = nil,
+  diff_source_tick = nil,
   thinking_win = nil,
   thinking_buf = nil,
   thinking_timer = nil,
   thinking_request_id = nil,
   thinking_session_id = nil,
+  thinking_started_at = nil,
+  thinking_label = nil,
+  thinking_steps = nil,
   last_card = nil,
   token_usage = nil,
+  turn_token_usage = nil,
 }
 
 return M

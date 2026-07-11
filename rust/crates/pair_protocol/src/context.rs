@@ -48,6 +48,8 @@ pub struct ContextBundle {
     pub cursor: Cursor,
     pub selection: Option<Selection>,
     pub buffer_text: String,
+    #[serde(default = "one")]
+    pub buffer_start_line: usize,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -60,6 +62,8 @@ pub struct StartSessionParams {
     pub prompt: String,
     pub mode: Mode,
     pub buffer_text: String,
+    #[serde(default = "one")]
+    pub buffer_start_line: usize,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -71,7 +75,12 @@ impl ContextBundle {
             cursor: params.cursor,
             selection: params.selection,
             buffer_text: params.buffer_text,
+            buffer_start_line: params.buffer_start_line,
             diagnostics: params.diagnostics,
         }
     }
+}
+
+fn one() -> usize {
+    1
 }
