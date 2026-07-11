@@ -53,6 +53,11 @@ function M.start(text, mode, source)
 
   state.source_buf = captured.buf
   state.source_cursor = { params.cursor.line, math.max(params.cursor.column - 1, 0) }
+  state.goal = {
+    statement = text,
+    completed_steps = {},
+    known_observations = {},
+  }
 
   rpc.request("session/start", params, function(message)
     if not thinking.current(request_id) then
@@ -69,7 +74,7 @@ function M.start(text, mode, source)
     end
 
     state.session_id = message.result.session_id
-    state.goal = message.result.goal
+    state.goal = message.result.goal or state.goal
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
     card.show(message.result.card)
@@ -132,7 +137,7 @@ function M.action(action)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
-    state.goal = message.result.goal
+    state.goal = message.result.goal or state.goal
     card.show(message.result.card)
   end)
 end
@@ -179,7 +184,7 @@ function M.reply(text)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
-    state.goal = message.result.goal
+    state.goal = message.result.goal or state.goal
     card.show(message.result.card)
   end)
 end

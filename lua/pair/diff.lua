@@ -152,10 +152,14 @@ function M.controls(card)
     "Edit code directly",
   }
   if state.goal and state.goal.statement then
-    table.insert(lines, 2, "Goal: " .. M.truncate(state.goal.statement, 72))
+    table.insert(lines, 2, "Active goal: " .. M.truncate(state.goal.statement, 72))
     local completed = #(state.goal.completed_steps or {})
     if completed > 0 then
       table.insert(lines, 3, "Progress: " .. completed .. " accepted")
+    end
+    local network = M.observation_network(state.goal.known_observations or {})
+    if network ~= "" then
+      table.insert(lines, completed > 0 and 4 or 3, network)
     end
   end
   if card.warnings and card.warnings[1] then
@@ -187,6 +191,18 @@ function M.controls(card)
       vim.api.nvim_set_current_win(state.diff_win)
     end
   end, { buffer = buf, nowait = true, silent = true })
+end
+
+function M.observation_network(observations)
+  local nodes = {}
+  for index, observation in ipairs(observations) do
+    local kind = observation.kind == "hypothesis" and "H" or observation.kind == "signal" and "S" or "F"
+    local active = observation.active and "*" or "."
+    local repeats = (observation.occurrences or 1) > 1 and "x" .. observation.occurrences or ""
+    table.insert(nodes, string.format("[%s%d%s%s]", kind, index, active, repeats))
+  end
+
+  return table.concat(nodes, "--")
 end
 
 function M.truncate(text, limit)
@@ -305,7 +321,7 @@ function M.send(accepted, patch_ids, changed_files, error)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
-    state.goal = message.result.goal
+    state.goal = message.result.goal or state.goal
     require("pair.card").show(message.result.card)
   end)
 end

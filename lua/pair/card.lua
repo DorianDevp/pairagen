@@ -92,12 +92,62 @@ function M.goal(lines)
     return
   end
 
-  table.insert(lines, "Goal: " .. M.one_line(goal.statement))
+  table.insert(lines, "Active goal: " .. M.one_line(goal.statement))
   local completed = #(goal.completed_steps or {})
   if completed > 0 then
     table.insert(lines, string.format("Progress: %d accepted local step%s", completed, completed == 1 and "" or "s"))
   end
+  M.observation_network(lines, goal.known_observations or {})
   table.insert(lines, "")
+end
+
+function M.observation_network(lines, observations)
+  if #observations == 0 then
+    return
+  end
+
+  table.insert(lines, "Context network:")
+  local nodes = {}
+  for index, observation in ipairs(observations) do
+    table.insert(nodes, M.observation_node(observation, index))
+  end
+  M.add(lines, table.concat(nodes, "--"))
+
+  local active_findings = {}
+  local active_signals = {}
+  for index, observation in ipairs(observations) do
+    if observation.active then
+      local item = string.format("%s %s", M.observation_node(observation, index), M.short(observation.label, 72))
+      if observation.kind == "signal" then
+        table.insert(active_signals, item)
+      else
+        table.insert(active_findings, item)
+      end
+    end
+  end
+  if #active_findings > 0 then
+    table.insert(lines, "Active findings: " .. table.concat(active_findings, " | "))
+  end
+  if #active_signals > 0 then
+    table.insert(lines, "Active signals: " .. table.concat(active_signals, " | "))
+  end
+end
+
+function M.observation_node(observation, index)
+  local kind = observation.kind == "hypothesis" and "H" or observation.kind == "signal" and "S" or "F"
+  local active = observation.active and "*" or "."
+  local repeats = (observation.occurrences or 1) > 1 and "x" .. observation.occurrences or ""
+
+  return string.format("[%s%d%s%s]", kind, index, active, repeats)
+end
+
+function M.short(text, limit)
+  text = M.one_line(text)
+  if #text <= limit then
+    return text
+  end
+
+  return text:sub(1, limit - 3) .. "..."
 end
 
 function M.one_line(text)
