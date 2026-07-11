@@ -68,7 +68,7 @@ M.values = {
   card = {
     border = "rounded",
     max_width = 72,
-    max_height = 12,
+    max_height = 16,
   },
   thinking = {
     enabled = true,

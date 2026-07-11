@@ -29,13 +29,16 @@ function M.show(card)
 
   local lines = M.lines(card)
   local width = M.width(lines)
+  local height = M.height(lines, width)
   local buf, win = ui.render(state.card_buf, state.card_win, lines, {
     width = width,
-    height = math.min(#lines, config.values.card.max_height),
+    height = height,
   })
 
   state.card_buf = buf
   state.card_win = win
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
 
   M.bind(buf, card)
   ui.focus(win)
@@ -49,9 +52,9 @@ function M.lines(card)
   local lines = {
     M.title(card.kind),
     string.rep("-", 32),
-    M.actions(card),
-    "",
   }
+  vim.list_extend(lines, M.actions(card))
+  table.insert(lines, "")
   M.goal(lines)
 
   if card.kind == "hypothesis" then
@@ -92,7 +95,7 @@ function M.goal(lines)
     return
   end
 
-  table.insert(lines, "Active goal: " .. M.one_line(goal.statement))
+  table.insert(lines, "Active goal: " .. M.short(goal.statement, 56))
   local completed = #(goal.completed_steps or {})
   if completed > 0 then
     table.insert(lines, string.format("Progress: %d accepted local step%s", completed, completed == 1 and "" or "s"))
@@ -106,30 +109,18 @@ function M.observation_network(lines, observations)
     return
   end
 
-  table.insert(lines, "Context network:")
-  local nodes = {}
+  local rows = { "Context: " }
   for index, observation in ipairs(observations) do
-    table.insert(nodes, M.observation_node(observation, index))
-  end
-  M.add(lines, table.concat(nodes, "--"))
-
-  local active_findings = {}
-  local active_signals = {}
-  for index, observation in ipairs(observations) do
-    if observation.active then
-      local item = string.format("%s %s", M.observation_node(observation, index), M.short(observation.label, 72))
-      if observation.kind == "signal" then
-        table.insert(active_signals, item)
-      else
-        table.insert(active_findings, item)
-      end
+    local node = M.observation_node(observation, index)
+    local separator = rows[#rows] == "Context: " and "" or "--"
+    if #rows[#rows] + #separator + #node > 68 then
+      table.insert(rows, "         " .. node)
+    else
+      rows[#rows] = rows[#rows] .. separator .. node
     end
   end
-  if #active_findings > 0 then
-    table.insert(lines, "Active findings: " .. table.concat(active_findings, " | "))
-  end
-  if #active_signals > 0 then
-    table.insert(lines, "Active signals: " .. table.concat(active_signals, " | "))
+  for _, row in ipairs(rows) do
+    table.insert(lines, row)
   end
 end
 
@@ -221,7 +212,17 @@ function M.actions(card)
     end
   end
 
-  return table.concat(parts, "  ")
+  local lines = { "" }
+  for _, part in ipairs(parts) do
+    local separator = lines[#lines] == "" and "" or "  "
+    if #lines[#lines] + #separator + #part > 68 then
+      table.insert(lines, part)
+    else
+      lines[#lines] = lines[#lines] .. separator .. part
+    end
+  end
+
+  return lines
 end
 
 function M.bind(buf, card)
@@ -259,6 +260,15 @@ function M.width(lines)
   end
 
   return math.min(width, config.values.card.max_width)
+end
+
+function M.height(lines, width)
+  local height = 0
+  for _, line in ipairs(lines) do
+    height = height + math.max(math.ceil(vim.fn.strdisplaywidth(line) / math.max(width, 1)), 1)
+  end
+
+  return math.min(height, config.values.card.max_height)
 end
 
 return M
