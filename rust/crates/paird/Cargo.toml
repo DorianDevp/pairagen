@@ -2,6 +2,11 @@
 name = "paird"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Local backend daemon for the Pairagen Neovim pair-programming interface"
+publish = false
 
 [dependencies]
 anyhow.workspace = true
