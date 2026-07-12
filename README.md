@@ -1,3 +1,6 @@
+Repo ready for desloppification. I had fun with vibing this project,
+but because of growing size and complexity it's time take the steer.
+
 # Pairagen
 
 Pairagen is an interactive pair-programming stepper for Neovim.
