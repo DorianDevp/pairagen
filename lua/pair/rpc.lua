@@ -1,4 +1,5 @@
 local config = require("pair.config")
+local installer = require("pair.installer")
 local log = require("pair.log")
 local ui = require("pair.ui")
 
@@ -12,14 +13,36 @@ local M = {
   notifications = {},
   buffer = "",
 }
-local protocol_version = 5
+local protocol_version = require("pair.version").protocol
 
 function M.ensure()
   if M.job and vim.fn.jobwait({ M.job }, 0)[1] == -1 then
     return
   end
+  if M.starting then
+    return
+  end
 
-  local command = { config.values.backend.command }
+  M.starting = true
+  installer.resolve(function(command, error_message)
+    M.starting = false
+    if not command then
+      local message = "Could not prepare paird: " .. tostring(error_message)
+      log.event("backend_install_error", { error = error_message })
+      ui.notify(message, vim.log.levels.ERROR)
+      M.fail_all(message)
+      return
+    end
+    M.start(command)
+  end)
+end
+
+function M.start(backend_command)
+  if M.job and vim.fn.jobwait({ M.job }, 0)[1] == -1 then
+    return
+  end
+
+  local command = { backend_command }
 
   for _, arg in ipairs(config.values.backend.args or {}) do
     table.insert(command, arg)
@@ -102,14 +125,13 @@ function M.stop()
   M.job = nil
   M.ready = false
   M.incompatible = false
+  M.starting = false
   M.queue = {}
   M.pending = {}
   M.buffer = ""
 end
 
 function M.request(method, params, callback)
-  M.ensure()
-
   if M.incompatible then
     callback({
       error = {
@@ -126,6 +148,7 @@ function M.request(method, params, callback)
       params = params,
       callback = callback,
     })
+    M.ensure()
     return
   end
 

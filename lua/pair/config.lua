@@ -2,10 +2,20 @@ local M = {}
 
 M.values = {
   backend = {
-    command = "paird",
+    command = nil,
     args = {},
     mode = "auto",
     agent = "mock",
+  },
+  distribution = {
+    repository = nil,
+    version = "0.1.0",
+    auto_install = true,
+  },
+  logging = {
+    enabled = true,
+    include_content = false,
+    max_files = 20,
   },
   agents = {
     mock = {
