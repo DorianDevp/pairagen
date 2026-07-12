@@ -82,7 +82,7 @@ function M.resolve(callback)
     if vim.fn.executable("paird") == 1 then
       callback("paird")
     else
-      callback(nil, "set distribution.repository to owner/repository or configure backend.command")
+      callback(nil, "set distribution.repository to DorianDevp/pairagen owner/repositoryor configure backend.command")
     end
     return
   end

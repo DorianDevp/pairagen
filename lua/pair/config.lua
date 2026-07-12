@@ -8,7 +8,7 @@ M.values = {
     agent = "mock",
   },
   distribution = {
-    repository = nil,
+    repository = "DorianDevp/pairagen",
     auto_install = true,
   },
   logging = {

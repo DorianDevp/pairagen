@@ -1,6 +1,6 @@
-# Pair
+# Pairagen
 
-Pair is an interactive pair-programming stepper for Neovim.
+Pairagen is an interactive pair-programming stepper for Neovim.
 
 It is not a chat.
 It is not autocomplete.
@@ -9,9 +9,20 @@ You follow, inspect, fix, apply, or stop.
 Backends are replaceable.
 The editor experience stays the same.
 
-## Status
+## Status and compatibility
 
-MVP core is implemented:
+Pairagen is beta software. It has been developed and tested primarily with the
+Codex CLI app-server backend. Generic CLI, stdio agent, and local model adapters
+are available, but currently receive less real-world testing than Codex.
+
+Requirements:
+
+- Neovim 0.10 or newer,
+- `curl`, `tar`, and either `sha256sum` or `shasum` for managed installation,
+- Codex CLI for the tested Codex backend,
+- Linux x86_64/aarch64 or macOS Intel/Apple Silicon for managed `paird` binaries.
+
+Implemented capabilities include:
 
 - Neovim labeled textarea prompt, card, navigation, annotation, diff, apply and reject UI
 - thinking spinner, resume and reset controls
@@ -24,15 +35,43 @@ MVP core is implemented:
 - generic CLI backend
 - deterministic token-budgeted project context with LSP hints and dependency ranking
 
-## Neovim Setup
+## Installation
+
+With lazy.nvim:
+
+```lua
+{
+  "DorianDevp/pairagen",
+  config = function()
+    require("pair").setup({
+      backend = {
+        agent = "codex",
+      },
+    })
+  end,
+}
+```
+
+On the first Pair request, the plugin downloads the matching versioned `paird`
+archive from GitHub Releases, verifies its SHA-256 checksum, and installs it
+under `stdpath("data")/pairagen/bin`. No global installation is required.
+
+Run `:checkhealth pair` after installation.
+
+### Manual backend
+
+Automatic installation can be disabled or replaced with a custom binary:
 
 ```lua
 require("pair").setup({
   backend = {
-    command = "paird",
+    command = "/absolute/path/to/paird",
     args = { "--stdio" },
-    agent = "mock",
+    agent = "codex",
     mode = "auto",
+  },
+  distribution = {
+    auto_install = false,
   },
 })
 ```
@@ -50,15 +89,16 @@ require("pair").setup({
 })
 ```
 
-When using a built `target/debug/paird`, run `cargo build -p paird` after protocol changes. `cargo test` only refreshes test executables under `target/debug/deps`. The client rejects stale `paird` protocol versions before starting a session.
+When using a built `target/debug/paird`, run `cargo build -p paird` after protocol
+changes. `cargo test` only refreshes test executables under
+`target/debug/deps`. The client rejects stale `paird` protocol versions before
+starting a session.
 
 ## Agents
 
 ```lua
 require("pair").setup({
   backend = {
-    command = "paird",
-    args = { "--stdio" },
     agent = "codex",
   },
   agents = {
@@ -244,23 +284,59 @@ The current implementation does not train or run an ML model.
 :PairResume
 :PairReset
 :PairLog
+:PairLogClear
 :PairBackend
 :PairAgent
 :PairModel
 ```
 
 `:PairLog` prints the current JSONL session trace. It records the backend command
-and protocol handshake, complete RPC requests/responses, progress events, cards,
-goals, token usage, and backend errors. Every completed backend turn also emits
-an `agent_attempts` event. Each attempt records its accepted/retry/rejected
-outcome, exact retry reason, per-attempt token usage and compact tool activity;
-failed contract attempts include the rejected candidate card for diagnosis.
+and protocol handshake, structured RPC requests/responses, progress events,
+cards, goals, token usage, and backend errors. Every completed backend turn also
+emits an `agent_attempts` event. Each attempt records its
+accepted/retry/rejected outcome, retry metadata, per-attempt token usage and
+compact tool activity. Content-bearing fields are represented by redaction
+metadata unless full-content logging is explicitly enabled.
 
 The default trace location is:
 
 ```text
 ~/.local/state/nvim/pairagen/sessions/<timestamp>-<pid>.jsonl
 ```
+
+Logs redact prompts, source excerpts, diffs, findings, and model content by
+default. At most 20 trace files are retained. Logging can be disabled or full
+content can be enabled explicitly:
+
+```lua
+require("pair").setup({
+  logging = {
+    enabled = true,
+    include_content = false,
+    max_files = 20,
+  },
+})
+```
+
+Full-content logs may contain proprietary code and should never be attached to
+public issues without review.
+
+## Troubleshooting
+
+Run:
+
+```vim
+:checkhealth pair
+```
+
+It reports the plugin and protocol versions, release target, managed `paird`
+state, downloader prerequisites, active agent/model, logging privacy, and LSP
+clients. A protocol mismatch means the Lua plugin and `paird` come from
+different releases; remove the managed version directory or update the plugin.
+
+## License
+
+Pairagen is available under the [MIT License](LICENSE).
 
 ## paird
 
