@@ -11,8 +11,30 @@ function M.open_location(location)
 
   local file = location.file
   local open = config.values.navigation.open
+  local target = vim.fn.fnamemodify(file, ":p")
+  local target_buf
+  local target_win
 
-  if open == "tab" then
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buf) and vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":p") == target then
+      target_buf = buf
+      break
+    end
+  end
+  if target_buf then
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_buf(win) == target_buf then
+        target_win = win
+        break
+      end
+    end
+  end
+
+  if target_win then
+    vim.api.nvim_set_current_win(target_win)
+  elseif target_buf and open == "current" then
+    vim.api.nvim_win_set_buf(0, target_buf)
+  elseif open == "tab" then
     vim.cmd("tabedit " .. vim.fn.fnameescape(file))
   elseif open == "split" then
     vim.cmd("split " .. vim.fn.fnameescape(file))
@@ -29,6 +51,7 @@ function M.open_location(location)
   state.source_buf = vim.api.nvim_get_current_buf()
   state.source_cursor = { line, math.max(column - 1, 0) }
   extmarks.annotate(0, line, location.annotation)
+  vim.cmd("normal! zz")
 
   return true
 end

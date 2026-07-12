@@ -9,7 +9,7 @@ function M.show()
     return
   end
 
-  local text = "Pair " .. config.agent() .. " active - <leader>pr show"
+  local text = "Pair: " .. config.agent() .. "  " .. config.values.keymaps.resume .. " show"
   local width = math.min(#text + 2, math.max(vim.o.columns - 4, 20))
   local row = math.max(vim.o.lines - 4, 0)
   local col = math.max(vim.o.columns - width - 2, 0)
@@ -18,8 +18,9 @@ function M.show()
     height = 1,
     row = row,
     col = col,
-    border = "single",
+    border = "rounded",
     enter = false,
+    title = " Pair ",
   })
 
   state.status_buf = buf

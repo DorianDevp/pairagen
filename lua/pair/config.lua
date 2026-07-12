@@ -54,6 +54,7 @@ M.values = {
     hide = "<leader>ph",
     resume = "<leader>pr",
     reset = "<leader>pR",
+    go_to = "<leader>pg",
     draft_accept = "<leader>pa",
     draft_reject = "<leader>pd",
     draft_retry = "<leader>pr",
@@ -67,8 +68,8 @@ M.values = {
   },
   card = {
     border = "rounded",
-    max_width = 72,
-    max_height = 16,
+    max_width = 64,
+    max_height = 14,
   },
   thinking = {
     enabled = true,
@@ -81,7 +82,7 @@ M.values = {
     max_diagnostic_length = 160,
   },
   navigation = {
-    open = "tab",
+    open = "current",
     annotate = true,
   },
   diff = {

@@ -20,6 +20,7 @@ function M.setup()
   M.action(keys.stop, "stop")
   M.call(keys.hide, "hide")
   M.call(keys.resume, "resume")
+  M.call(keys.go_to, "go_to")
   M.call(keys.reset, "reset")
 end
 

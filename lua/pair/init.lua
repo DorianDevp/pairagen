@@ -2,6 +2,7 @@ local card = require("pair.card")
 local config = require("pair.config")
 local context = require("pair.context")
 local log = require("pair.log")
+local navigation = require("pair.navigation")
 local prompt = require("pair.prompt")
 local rpc = require("pair.rpc")
 local state = require("pair.state")
@@ -201,18 +202,43 @@ function M.resume()
   status.hide()
 
   if state.card then
-    card.show(state.card)
+    card.show(state.card, { enter = true })
 
     return
   end
 
   if state.last_card then
-    card.show(state.last_card)
+    card.show(state.last_card, { enter = true })
 
     return
   end
 
   ui.notify("No Pair card to restore", vim.log.levels.WARN)
+end
+
+function M.go_to()
+  if state.card and state.card.kind == "patch" and require("pair.diff").focus_change() then
+    return
+  end
+
+  if navigation.from_card(state.card or {}) then
+    ui.close(state.card_win)
+    state.card_win = nil
+    status.show()
+    return
+  end
+
+  if state.source_buf and vim.api.nvim_buf_is_valid(state.source_buf) then
+    local win = context.buffer_window(state.source_buf)
+    if win then
+      vim.api.nvim_set_current_win(win)
+      vim.api.nvim_win_set_cursor(win, state.source_cursor or { 1, 0 })
+      vim.cmd("normal! zz")
+      return
+    end
+  end
+
+  ui.notify("No Pair location to open", vim.log.levels.WARN)
 end
 
 function M.hide()
@@ -254,6 +280,7 @@ function M.reset()
   state.diff_win = nil
   state.diff_source_buf = nil
   state.diff_source_tick = nil
+  state.diff_first_row = nil
   state.token_usage = nil
   state.turn_token_usage = nil
   state.thinking_request_id = nil

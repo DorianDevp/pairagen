@@ -5,8 +5,8 @@ local ui = require("pair.ui")
 local M = {}
 local uv = vim.uv or vim.loop
 
-local width = 68
-local max_steps = 6
+local width = 52
+local max_steps = 3
 local spinner = { "|", "/", "-", "\\" }
 
 function M.start(label, session_id)
@@ -97,9 +97,11 @@ function M.render()
   local lines = M.lines(state.thinking_frame or 0)
   local buf, win = ui.render(state.card_buf, state.card_win, lines, {
     width = width,
-    height = math.min(#lines, 14),
+    height = math.min(#lines, 8),
     border = config.values.card.border,
-    row = math.floor(vim.o.lines * 0.18),
+    anchor = M.anchor(),
+    enter = false,
+    title = " Pair: Working ",
   })
 
   state.card_buf = buf
@@ -125,24 +127,22 @@ function M.lines(frame)
   local current = steps[#steps]
   local marker = spinner[(frame % #spinner) + 1]
   local lines = {
-    "Agent activity",
-    "Elapsed: " .. M.elapsed() .. "s",
-    "",
     marker .. " " .. (current and current.message or "Preparing agent"),
-    "",
-    "Recent steps",
+    "Elapsed  " .. M.elapsed() .. "s",
   }
 
   for _, step in ipairs(steps) do
-    local prefix = step.current and "[now] " or "[done]"
-
-    table.insert(lines, prefix .. " " .. step.message)
+    if not step.current then
+      table.insert(lines, "Done     " .. step.message)
+    end
   end
 
-  table.insert(lines, "")
-  table.insert(lines, "[q] Hide")
-
   return lines
+end
+
+function M.anchor()
+  local cursor = state.source_cursor or { 1, 0 }
+  return ui.buffer_anchor(state.source_buf, cursor[1], cursor[2])
 end
 
 function M.elapsed()

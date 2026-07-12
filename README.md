@@ -114,6 +114,10 @@ Next patch
 One local patch or completed goal summary
 ```
 
+Cards stay anchored beside the source line and do not take focus. Use `<leader>pg`
+to jump to a finding or the first line of an inline draft, and `<leader>pr` to
+focus the current Pair card.
+
 The goal and accepted-step count stay visible on cards and editable drafts. `Next patch` continues the same goal and must return either one local patch or a completed-goal summary; it does not restart discovery.
 
 ## Commands

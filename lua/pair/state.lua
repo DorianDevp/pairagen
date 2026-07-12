@@ -17,6 +17,7 @@ local M = {
   diff_win = nil,
   diff_source_buf = nil,
   diff_source_tick = nil,
+  diff_first_row = nil,
   thinking_win = nil,
   thinking_buf = nil,
   thinking_timer = nil,

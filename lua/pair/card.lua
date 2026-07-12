@@ -7,25 +7,37 @@ local ui = require("pair.ui")
 local M = {}
 
 local labels = {
-  reply = { "m", "Message" },
-  follow = { "f", "Follow" },
-  why = { "w", "Why" },
-  fix = { "x", "Fix" },
-  other_lead = { "n", "Other" },
-  apply = { "a", "Apply" },
-  apply_patch = { "a", "Apply" },
-  retry = { "r", "Retry" },
-  edit_prompt = { "e", "Edit" },
-  open = { "o", "Open" },
-  run_check = { "t", "Check" },
-  next = { "n", "Next patch" },
-  stop = { "q", "Stop" },
+  reply = { "m", "Message", "reply" },
+  follow = { "f", "Follow", "follow" },
+  why = { "w", "Why", "why" },
+  fix = { "x", "Draft", "fix" },
+  other_lead = { "n", "Other", "other_lead" },
+  apply = { "a", "Review", "draft_accept" },
+  apply_patch = { "a", "Review", "draft_accept" },
+  retry = { "r", "Retry", nil },
+  edit_prompt = { "e", "Edit", nil },
+  open = { "o", "Open", "go_to" },
+  run_check = { "t", "Check", nil },
+  next = { "n", "Next", nil },
+  stop = { "q", "Stop", "stop" },
 }
 
-function M.show(card)
+function M.show(card, opts)
+  opts = opts or {}
   state.card = card
   state.last_card = card
   status.hide()
+
+  if card.kind == "patch" then
+    local diff = require("pair.diff")
+    if diff.valid_preview() then
+      diff.controls(card, opts)
+      return
+    end
+    if diff.show(card, opts) then
+      return
+    end
+  end
 
   local lines = M.lines(card)
   local width = M.width(lines)
@@ -33,28 +45,24 @@ function M.show(card)
   local buf, win = ui.render(state.card_buf, state.card_win, lines, {
     width = width,
     height = height,
+    anchor = M.anchor(card),
+    enter = opts.enter == true,
+    title = " Pair: " .. M.title(card.kind) .. " ",
+    title_pos = "left",
   })
 
   state.card_buf = buf
   state.card_win = win
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
+  vim.wo[win].cursorline = false
 
   M.bind(buf, card)
-  ui.focus(win)
-
-  if card.kind == "patch" then
-    require("pair.diff").show(card)
-  end
+  M.highlight(buf, lines, card)
 end
 
 function M.lines(card)
-  local lines = {
-    M.title(card.kind),
-    string.rep("-", 32),
-  }
-  vim.list_extend(lines, M.actions(card))
-  table.insert(lines, "")
+  local lines = {}
   M.goal(lines)
 
   if card.kind == "hypothesis" then
@@ -81,10 +89,12 @@ function M.lines(card)
   local location = M.location(card)
   if location then
     table.insert(lines, "")
-    table.insert(lines, string.format("Location: %s:%s", location.file or "", location.line or 1))
+    table.insert(lines, string.format("At  %s:%s", vim.fn.fnamemodify(location.file or "", ":~:."), location.line or 1))
   end
 
   M.tokens(lines)
+  table.insert(lines, "")
+  vim.list_extend(lines, M.actions(card))
 
   return lines
 end
@@ -95,10 +105,10 @@ function M.goal(lines)
     return
   end
 
-  table.insert(lines, "Active goal: " .. M.short(goal.statement, 56))
+  table.insert(lines, "Goal  " .. M.short(goal.statement, 54))
   local completed = #(goal.completed_steps or {})
   if completed > 0 then
-    table.insert(lines, string.format("Progress: %d accepted local step%s", completed, completed == 1 and "" or "s"))
+    table.insert(lines, string.format("Done  %d local step%s", completed, completed == 1 and "" or "s"))
   end
   M.observation_network(lines, goal.known_observations or {})
   table.insert(lines, "")
@@ -109,12 +119,12 @@ function M.observation_network(lines, observations)
     return
   end
 
-  local rows = { "Context: " }
+  local rows = { "Map   " }
   for index, observation in ipairs(observations) do
     local node = M.observation_node(observation, index)
-    local separator = rows[#rows] == "Context: " and "" or "--"
+    local separator = rows[#rows] == "Map   " and "" or "  "
     if #rows[#rows] + #separator + #node > 68 then
-      table.insert(rows, "         " .. node)
+      table.insert(rows, "      " .. node)
     else
       rows[#rows] = rows[#rows] .. separator .. node
     end
@@ -175,17 +185,11 @@ function M.tokens(lines)
   end
 
   table.insert(lines, "")
-  table.insert(lines, string.format(
-    "Turn: in %s / out %s / total %s%s",
-    usage.input_tokens or 0,
-    usage.output_tokens or 0,
-    usage.total_tokens or 0,
-    usage.estimated and " est" or ""
-  ))
+  table.insert(lines, string.format("Turn  %s tokens%s", usage.total_tokens or 0, usage.estimated and " estimated" or ""))
 
   local total = state.token_usage
   if total and total.total_tokens ~= usage.total_tokens then
-    table.insert(lines, string.format("Session total: %s", total.total_tokens or 0))
+    table.insert(lines, string.format("Total %s tokens", total.total_tokens or 0))
   end
 end
 
@@ -201,14 +205,22 @@ end
 
 function M.actions(card)
   local actions = card.actions or card.next_actions or {}
-  local parts = { "[m] Message", "[h] Hide" }
+  local parts = {
+    M.action_hint("reply", labels.reply),
+    M.hint(config.values.keymaps.resume, "Focus"),
+    M.hint(config.values.keymaps.hide, "Hide"),
+  }
+
+  if M.location(card) then
+    table.insert(parts, M.hint(config.values.keymaps.go_to, "Go to line"))
+  end
 
   for _, action in ipairs(actions) do
     local name = type(action) == "table" and "apply_patch" or action
     local label = labels[name]
 
-    if label then
-      table.insert(parts, "[" .. label[1] .. "] " .. label[2])
+    if label and not (name == "open" and M.location(card)) then
+      table.insert(parts, M.action_hint(name, label))
     end
   end
 
@@ -225,6 +237,15 @@ function M.actions(card)
   return lines
 end
 
+function M.action_hint(_, label)
+  local key = label[3] and config.values.keymaps[label[3]] or label[1]
+  return M.hint(key, label[2])
+end
+
+function M.hint(key, text)
+  return string.format("[%s] %s", key or "?", text)
+end
+
 function M.bind(buf, card)
   local actions = card.actions or card.next_actions or {}
 
@@ -236,6 +257,10 @@ function M.bind(buf, card)
     require("pair").reply_prompt()
   end, { buffer = buf, nowait = true, silent = true })
 
+  vim.keymap.set("n", "g", function()
+    require("pair").go_to()
+  end, { buffer = buf, nowait = true, silent = true })
+
   for _, action in ipairs(actions) do
     local name = type(action) == "table" and "apply" or action
     local label = labels[name]
@@ -244,6 +269,34 @@ function M.bind(buf, card)
       vim.keymap.set("n", label[1], function()
         require("pair").action(name)
       end, { buffer = buf, nowait = true, silent = true })
+    end
+  end
+end
+
+function M.anchor(card)
+  local location = M.location(card)
+  if location and location.file then
+    local buf = require("pair.apply").buffer(location.file)
+    local anchor = ui.buffer_anchor(buf, location.line, math.max((location.column or 1) - 1, 0))
+    if anchor then
+      return anchor
+    end
+  end
+
+  local cursor = state.source_cursor or { 1, 0 }
+  return ui.buffer_anchor(state.source_buf, cursor[1], cursor[2])
+end
+
+function M.highlight(buf, lines, card)
+  vim.api.nvim_buf_clear_namespace(buf, -1, 0, -1)
+  for index, line in ipairs(lines) do
+    local group = line:match("^Goal") and "PairGoal"
+      or line:match("^%[") and "PairAction"
+      or line:match("^At  ") and "PairMuted"
+      or line:match("tokens$") and "PairMuted"
+      or card.kind == "error" and "DiagnosticError"
+    if group then
+      vim.api.nvim_buf_add_highlight(buf, -1, group, index - 1, 0, -1)
     end
   end
 end

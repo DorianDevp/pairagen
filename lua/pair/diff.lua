@@ -9,48 +9,49 @@ local ui = require("pair.ui")
 local M = {}
 local namespace = vim.api.nvim_create_namespace("pair-patch")
 
-function M.show(card)
+function M.show(card, opts)
+  opts = opts or {}
   local patch = (card.patches or {})[1]
 
   if not patch then
     ui.notify("Patch card has no local change", vim.log.levels.ERROR)
-    return
+    return false
   end
 
   local source_buf = state.source_buf or apply.buffer(patch.file)
   if not source_buf or not vim.api.nvim_buf_is_valid(source_buf) then
     ui.notify("Open the proposed location before editing the patch", vim.log.levels.WARN)
-    return
+    return false
   end
 
   local source_name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(source_buf), ":p")
   local patch_name = vim.fn.fnamemodify(patch.file, ":p")
   if source_name ~= patch_name then
     ui.notify("Patch target is not the currently accepted source location", vim.log.levels.WARN)
-    return
+    return false
   end
 
   local source_win = context.buffer_window(source_buf)
   if not source_win then
     ui.notify("Source location is not visible", vim.log.levels.WARN)
-    return
+    return false
   end
 
   local source_lines = vim.api.nvim_buf_get_lines(source_buf, 0, -1, false)
   local hunk_ok, hunk = pcall(apply.parse_hunk, patch.diff)
   if not hunk_ok then
     ui.notify(hunk, vim.log.levels.ERROR)
-    return
+    return false
   end
   local start_ok, source_start = pcall(apply.resolve_start, source_lines, hunk)
   if not start_ok then
     ui.notify(source_start, vim.log.levels.ERROR)
-    return
+    return false
   end
   local draft_ok, draft_lines = pcall(apply.apply_diff, source_lines, patch.diff)
   if not draft_ok then
     ui.notify(draft_lines, vim.log.levels.ERROR)
-    return
+    return false
   end
 
   local draft_buf = vim.api.nvim_create_buf(false, true)
@@ -63,7 +64,6 @@ function M.show(card)
   vim.api.nvim_buf_set_lines(draft_buf, 0, -1, false, draft_lines)
 
   vim.api.nvim_win_set_buf(source_win, draft_buf)
-  vim.api.nvim_set_current_win(source_win)
 
   state.diff_buf = draft_buf
   state.diff_win = source_win
@@ -71,18 +71,16 @@ function M.show(card)
   state.diff_source_tick = vim.api.nvim_buf_get_changedtick(source_buf)
 
   local annotations = M.annotations(hunk, source_start)
+  state.diff_first_row = annotations.first_row
   M.decorate(draft_buf, draft_lines, annotations, card.warnings or {})
-  vim.api.nvim_win_set_cursor(source_win, {
-    math.min(annotations.first_row + 1, math.max(#draft_lines, 1)),
-    0,
-  })
-  M.controls(card)
-  vim.api.nvim_set_current_win(source_win)
+  M.controls(card, opts)
 
   local keymaps = require("pair.config").values.keymaps
   vim.keymap.set("n", keymaps.draft_accept, M.accept, { buffer = draft_buf, nowait = true, silent = true })
   vim.keymap.set("n", keymaps.draft_reject, M.reject, { buffer = draft_buf, nowait = true, silent = true })
   vim.keymap.set("n", keymaps.draft_retry, M.retry, { buffer = draft_buf, nowait = true, silent = true })
+
+  return true
 end
 
 function M.annotations(hunk, source_start)
@@ -143,31 +141,32 @@ function M.decorate(buf, draft_lines, annotations, warnings)
   end
 end
 
-function M.controls(card)
+function M.controls(card, opts)
+  opts = opts or {}
+  local keys = require("pair.config").values.keymaps
   local lines = {
-    "Pair draft",
-    "Active step: " .. M.truncate(card.explanation or card.title or "Local change", 96),
-    "<leader>pa  Accept",
-    "<leader>pd  Reject",
-    "<leader>pr  Retry",
-    "Edit code directly",
+    M.truncate(card.explanation or card.title or "Local change", 58),
+    "",
+    string.format("[%s] Go to change", keys.go_to),
+    string.format("[%s] Accept   [%s] Reject", keys.draft_accept, keys.draft_reject),
+    string.format("[%s] Retry    edit the draft directly", keys.draft_retry),
   }
   if state.goal and state.goal.statement then
-    table.insert(lines, 2, "Active goal: " .. M.truncate(state.goal.statement, 72))
+    table.insert(lines, 1, "Goal  " .. M.truncate(state.goal.statement, 52))
     local completed = #(state.goal.completed_steps or {})
     if completed > 0 then
-      table.insert(lines, 3, "Progress: " .. completed .. " accepted")
+      table.insert(lines, 2, "Done  " .. completed .. " accepted")
     end
     local network = M.observation_network(state.goal.known_observations or {})
     if network ~= "" then
-      table.insert(lines, completed > 0 and 4 or 3, network)
+      table.insert(lines, completed > 0 and 3 or 2, "Map   " .. network)
     end
   end
   if card.warnings and card.warnings[1] then
     table.insert(lines, "Warning shown at hunk")
   end
 
-  local width = 24
+  local width = math.min(58, require("pair.config").values.card.max_width)
   local height = 0
   for _, line in ipairs(lines) do
     height = height + math.max(math.ceil(vim.fn.strdisplaywidth(line) / width), 1)
@@ -175,23 +174,45 @@ function M.controls(card)
   local buf, win = ui.render(state.card_buf, state.card_win, lines, {
     width = width,
     height = height,
-    row = 1,
-    col = math.max(vim.o.columns - width - 2, 0),
-    enter = false,
+    anchor = ui.buffer_anchor(state.diff_buf, (state.diff_first_row or 0) + 1, 0),
+    enter = opts.enter == true,
+    title = " Pair: Draft ",
   })
   state.card_buf = buf
   state.card_win = win
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true
 
+  for index, line in ipairs(lines) do
+    local group = line:match("^Goal") and "PairGoal" or line:match("^%[") and "PairAction"
+    if group then
+      vim.api.nvim_buf_add_highlight(buf, -1, group, index - 1, 0, -1)
+    end
+  end
+
   vim.keymap.set("n", "a", M.accept, { buffer = buf, nowait = true, silent = true })
   vim.keymap.set("n", "q", M.reject, { buffer = buf, nowait = true, silent = true })
   vim.keymap.set("n", "r", M.retry, { buffer = buf, nowait = true, silent = true })
   vim.keymap.set("n", "e", function()
-    if M.valid_preview() then
-      vim.api.nvim_set_current_win(state.diff_win)
-    end
+    M.focus_change()
   end, { buffer = buf, nowait = true, silent = true })
+  vim.keymap.set("n", "g", M.focus_change, { buffer = buf, nowait = true, silent = true })
+end
+
+function M.focus_change()
+  if not M.valid_preview() then
+    return false
+  end
+
+  vim.api.nvim_set_current_win(state.diff_win)
+  local line_count = math.max(vim.api.nvim_buf_line_count(state.diff_buf), 1)
+  vim.api.nvim_win_set_cursor(state.diff_win, {
+    math.min((state.diff_first_row or 0) + 1, line_count),
+    0,
+  })
+  vim.cmd("normal! zz")
+
+  return true
 end
 
 function M.observation_network(observations)
@@ -290,6 +311,7 @@ function M.restore_source(cursor)
   state.diff_win = nil
   state.diff_source_buf = nil
   state.diff_source_tick = nil
+  state.diff_first_row = nil
 end
 
 function M.send(accepted, patch_ids, changed_files, error)
