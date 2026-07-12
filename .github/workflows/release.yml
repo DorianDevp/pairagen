@@ -33,23 +33,13 @@ jobs:
       - name: Verify tag version
         shell: bash
         run: |
+          scripts/check-versions.sh
           expected="v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
           test "$GITHUB_REF_NAME" = "$expected"
       - name: Build paird
         run: cargo build --release --locked --target ${{ matrix.target }} -p paird
       - name: Package paird
-        shell: bash
-        run: |
-          artifact="paird-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
-          staging="$(mktemp -d)"
-          cp "target/${{ matrix.target }}/release/paird" "$staging/paird"
-          cp LICENSE README.md "$staging/"
-          tar -C "$staging" -czf "$artifact" paird LICENSE README.md
-          if command -v sha256sum >/dev/null; then
-            sha256sum "$artifact" > "$artifact.sha256"
-          else
-            shasum -a 256 "$artifact" > "$artifact.sha256"
-          fi
+        run: scripts/package-release.sh ${{ matrix.target }} target/${{ matrix.target }}/release/paird
       - uses: actions/upload-artifact@v7
         with:
           name: paird-${{ matrix.target }}
