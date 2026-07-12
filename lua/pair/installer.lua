@@ -76,7 +76,9 @@ function M.resolve(callback)
     end
     return
   end
-  if not distribution.repository or distribution.repository == "" then
+  if (not distribution.repository or distribution.repository == "")
+    and (not distribution.base_url or distribution.base_url == "")
+  then
     if vim.fn.executable("paird") == 1 then
       callback("paird")
     else
@@ -113,11 +115,8 @@ function M.download(target, callback)
 
   local distribution = config.values.distribution
   local tag = "v" .. M.version()
-  local base = string.format(
-    "https://github.com/%s/releases/download/%s",
-    distribution.repository,
-    tag
-  )
+  local base = distribution.base_url and distribution.base_url:gsub("/$", "") .. "/" .. tag
+    or string.format("https://github.com/%s/releases/download/%s", distribution.repository, tag)
   local artifact = M.artifact(target)
   local temporary = string.format("%s/pairagen-download-%s", vim.fn.stdpath("cache"), vim.fn.getpid())
   local archive = temporary .. "/" .. artifact

@@ -40,10 +40,11 @@ function M.check()
     ok("Managed paird: " .. installer.install_path(target))
   elseif config.values.distribution.auto_install == false then
     warn("Managed paird is not installed and automatic installation is disabled")
-  elseif not config.values.distribution.repository then
+  elseif not config.values.distribution.repository and not config.values.distribution.base_url then
     error("distribution.repository is not configured")
   else
-    info("paird will be installed from " .. config.values.distribution.repository .. " on first use")
+    local source = config.values.distribution.base_url or config.values.distribution.repository
+    info("paird will be installed from " .. source .. " on first use")
   end
 
   for _, command in ipairs({ "curl", "tar" }) do

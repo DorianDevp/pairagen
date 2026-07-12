@@ -9,7 +9,6 @@ M.values = {
   },
   distribution = {
     repository = nil,
-    version = "0.1.0",
     auto_install = true,
   },
   logging = {
