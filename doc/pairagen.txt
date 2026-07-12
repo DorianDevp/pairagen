@@ -1,0 +1,87 @@
+*pairagen.txt*                Pairagen pair programming for Neovim
+
+===============================================================================
+CONTENTS                                                     *pairagen-contents*
+
+1. Introduction .............................................. |pairagen|
+2. Setup ................................................ |pairagen-setup|
+3. Commands ............................................ |pairagen-commands|
+4. Privacy .............................................. |pairagen-privacy|
+5. Health ................................................ |pairagen-health|
+
+===============================================================================
+INTRODUCTION                                                     *pairagen*
+
+Pairagen presents one hypothesis, finding, or editable patch at a time. It is
+designed for explicit user-controlled pair-programming steps rather than an
+open-ended chat session.
+
+Pairagen has been tested primarily with the Codex CLI app-server backend.
+
+===============================================================================
+SETUP                                                       *pairagen-setup*
+
+Minimum setup: >lua
+
+  require("pair").setup({
+    backend = { agent = "codex" },
+  })
+<
+The matching `paird` release binary is downloaded and checksum-verified on the
+first request. Set `backend.command` to use a manually installed binary.
+
+===============================================================================
+COMMANDS                                                 *pairagen-commands*
+
+                                                       *:Pair*
+:Pair                  Open a new Pair prompt.
+                                                       *:PairReply*
+:PairReply             Send a message in the active session.
+                                                       *:PairFix*
+:PairFix               Request one local editable patch.
+                                                       *:PairFollow*
+:PairFollow            Follow the current observation.
+                                                       *:PairWhy*
+:PairWhy               Ask for the reasoning behind the current observation.
+                                                       *:PairOther*
+:PairOther             Request another lead.
+                                                       *:PairNext*
+:PairNext              Explicitly continue after an applied local step.
+                                                       *:PairStop*
+:PairStop              Finish the active session.
+                                                       *:PairHide*
+:PairHide              Hide the current Pair UI.
+                                                       *:PairResume*
+:PairResume            Show and focus the current Pair UI.
+                                                       *:PairReset*
+:PairReset             Stop the backend and clear local session state.
+                                                       *:PairAgent*
+:PairAgent [name]      Show or select the active agent.
+                                                       *:PairModel*
+:PairModel [model]     Show or select the active model. Use `default` to clear
+                       a persisted model choice.
+                                                       *:PairLog*
+:PairLog               Print the current local trace path.
+                                                       *:PairLogClear*
+:PairLogClear          Delete Pairagen session traces.
+
+===============================================================================
+PRIVACY                                                   *pairagen-privacy*
+
+Session traces are local, content-redacted by default, and subject to retention.
+Enabling `logging.include_content` may store proprietary source code, prompts,
+diffs, and model responses. Pairagen sends selected source context to the backend
+configured by the user.
+
+===============================================================================
+HEALTH                                                     *pairagen-health*
+
+Run: >vim
+
+  :checkhealth pair
+<
+The report covers Neovim compatibility, release target, managed `paird`,
+download verification tools, active agent/model, logging privacy, and LSP
+clients.
+
+vim:tw=78:ts=8:noet:ft=help:norl:

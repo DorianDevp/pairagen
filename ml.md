@@ -1,105 +1,90 @@
-# Klasyczny ML dla optymalizacji pracy Pair
+# Classical ML for Pairagen context optimization
 
 ## Status
 
-Ten dokument opisuje opcjonalny kierunek rozwoju na przyszłość. Bieżący system
-optymalizacji kontekstu ma pozostać w pełni deterministyczny i nie zależy od
-modelu ML, procesu treningowego ani środowiska Python.
+This document describes an optional future direction. The current context
+optimizer is fully deterministic and does not depend on an ML model, Python
+runtime, or training pipeline.
 
-## Cel
+## Goal
 
-Najbardziej uzasadnionym zastosowaniem klasycznego ML w Pair nie jest
-generowanie lub rozumienie kodu. Jest nim ranking kontekstu i wybór polityki
-wykonania: dostarczenie agentowi tych fragmentów repozytorium, które mają
-największą oczekiwaną użyteczność przy możliwie małym koszcie tokenowym i
-czasowym.
+The most useful classical ML application in Pairagen is not code generation.
+It is context and execution-policy ranking: selecting project fragments with
+the highest expected usefulness at the lowest token and latency cost.
 
-Model powinien być opcjonalną, wymienną funkcją rankującą nad kandydatami
-utworzonymi przez deterministyczny indeks i graf zależności. Awaria, brak modelu
-albo zbyt mała ilość danych muszą automatycznie pozostawiać system przy rankingu
-heurystycznym.
-
-## Główny przypadek użycia: ranking fragmentów kontekstu
-
-Przepływ docelowy:
+The model should remain an optional ranking function over candidates produced
+by the deterministic index and dependency graph. Missing data, model failures,
+or a missing model must always fall back to the heuristic ranker.
 
 ```text
-prompt + kursor + zaznaczenie + diagnostyki
+prompt + cursor + selection + diagnostics
                     ↓
-      deterministyczny generator kandydatów
+       deterministic candidate generator
                     ↓
-          graf symboli i zależności
+          symbol and dependency graph
                     ↓
-      heurystyka lub opcjonalny model ML
+       heuristic or optional ML ranker
                     ↓
-        pakowanie do budżetu tokenów
+             token-budget packing
                     ↓
                   agent
 ```
 
-Dla każdego kandydata model przewiduje użyteczność fragmentu w danym zadaniu.
-Ranking powinien uwzględniać koszt:
+A useful objective is expected accepted-step improvement per token:
 
 ```text
-wartość(kandydat) = P(użyteczny | zadanie, kandydat) - λ * koszt_tokenów
+value(candidate) = P(useful | task, candidate) - λ * token_cost
 ```
 
-Lepszym celem od samego prawdopodobieństwa użycia może być oczekiwany przyrost
-szansy na zaakceptowany krok na jeden token.
+## Candidate features
 
-## Przykładowe cechy
+Features should be cheap, stable, and mostly language-independent:
 
-Cechy powinny być tanie, stabilne i w większości niezależne od konkretnego
-języka:
+- call/import graph distance,
+- directory distance from the active file,
+- cursor-symbol definition or reference,
+- prompt overlap with symbols and paths,
+- active diagnostic relationship,
+- symbol and artifact kind,
+- reference count,
+- test-file indicator,
+- historical file co-change,
+- fragment token count,
+- index freshness,
+- historical success for similar candidates,
+- session mode and expected card type,
+- previous retry and rejection counts.
 
-- odległość w grafie wywołań lub importów,
-- odległość katalogu od aktualnego pliku,
-- definicja albo użycie symbolu spod kursora,
-- pokrycie nazw z promptu przez nazwy symboli i ścieżkę,
-- powiązanie z aktywną diagnostyką,
-- rodzaj symbolu i fragmentu,
-- liczba referencji do symbolu,
-- informacja, czy fragment jest testem,
-- historyczne współzmienianie plików,
-- liczba tokenów fragmentu,
-- świeżość wpisu w indeksie,
-- dotychczasowa skuteczność podobnych kandydatów,
-- tryb sesji i rodzaj oczekiwanej karty,
-- liczba wcześniejszych retry i odrzuceń.
+The first model should not consume raw source code or embeddings. It should
+improve deterministic analysis rather than replace it.
 
-Nie należy rozpoczynać od surowego kodu, embeddingów ani dużej liczby cech
-tekstowych. Model ma poprawiać selekcję dokonaną przez analizator, a nie zastępować
-analizę kodu.
+## Interaction labels
 
-## Etykiety z interakcji
+Pairagen naturally produces weak supervision without manual annotation.
 
-Pair ma naturalną pętlę informacji zwrotnej. Etykiety mogą być wyprowadzane bez
-ręcznego oznaczania danych.
+Positive signals include:
 
-Sygnały pozytywne:
+- a fragment appears in an accepted patch,
+- the user opens a suggested location,
+- the user selects `Follow`,
+- a diagnostic disappears after applying a patch,
+- a patch is accepted without edits,
+- the goal completes without retry.
 
-- fragment znalazł się w zaakceptowanym patchu,
-- wskazana lokalizacja została otwarta przez użytkownika,
-- użytkownik wybrał `Follow`,
-- diagnostyka zniknęła po zastosowaniu patcha,
-- krok został zaakceptowany bez ręcznej korekty,
-- sesja osiągnęła cel bez retry.
+Negative signals include:
 
-Sygnały negatywne:
+- patch rejection,
+- `Other` or `Retry`,
+- an unused supplied fragment,
+- an agent search for a missing file,
+- patch-contract repair,
+- new diagnostics or failing checks after the change.
 
-- patch został odrzucony,
-- użytkownik wybrał `Other` albo `Retry`,
-- dostarczony fragment nie został wykorzystany,
-- agent musiał samodzielnie odnaleźć pominięty plik,
-- kontrakt patcha wymagał naprawy,
-- po zmianie pojawiły się nowe diagnostyki lub niepowodzenia testów.
+The strongest label is an accepted patch with zero user edit distance.
 
-Najmocniejszą etykietą jest zaakceptowanie patcha bez edycji. Samo zaakceptowanie
-nie wystarcza, ponieważ użytkownik może wcześniej istotnie zmienić draft.
+## Training telemetry
 
-## Telemetria potrzebna do przyszłego treningu
-
-Dla każdej sesji i każdego rozważanego kandydata warto zapisywać:
+Candidate-level telemetry should contain versioned, privacy-aware features:
 
 ```json
 {
@@ -121,94 +106,64 @@ Dla każdej sesji i każdego rozważanego kandydata warto zapisywać:
 }
 ```
 
-Dodatkowo na poziomie kroku:
+Step-level telemetry should include patch hashes, edit distance, time to user
+decision, diagnostics and checks before/after, token usage, backend latency,
+retry count, backend, model, and effort.
 
-- hash zaproponowanego i ostatecznie zastosowanego patcha,
-- dystans edycyjny pomiędzy nimi,
-- czas do akceptacji lub odrzucenia,
-- diagnostyki przed i po,
-- testy przed i po,
-- tokeny wejściowe i wyjściowe,
-- czas backendu,
-- liczbę automatycznych retry,
-- wybrany backend, model i effort.
+Source code and prompts may contain private data. Training datasets should stay
+local by default, support content-free feature logging, and use explicit schema
+and model versions.
 
-Kod źródłowy i prompty mogą zawierać dane prywatne. Dataset treningowy powinien
-domyślnie pozostawać lokalny, umożliwiać wyłączenie zapisu treści i przechowywać
-wersję zanonimizowanych cech zamiast pełnych fragmentów.
+## Model sequence
 
-## Proponowane modele
+1. Logistic regression as an interpretable baseline.
+2. Gradient boosting such as LightGBM or XGBoost.
+3. LambdaMART once enough complete sessions exist.
+4. A contextual bandit only for controlled backend, model, or budget choices.
 
-Kolejność eksperymentów:
+Every model must be evaluated against the production heuristic, not only a
+random baseline.
 
-1. Regresja logistyczna jako interpretowalny baseline.
-2. Gradient boosting, np. LightGBM albo XGBoost.
-3. Learning-to-rank, np. LambdaMART, gdy dostępna będzie odpowiednia liczba
-   całych sesji.
-4. Contextual bandit dopiero dla kontrolowanego wyboru backendu, modelu lub
-   budżetu.
+## Evaluation
 
-Model należy oceniać względem rankingu heurystycznego, a nie tylko względem
-losowego wyboru.
+Data splits must happen by session, repository, and time. Splitting individual
+candidates would leak strongly correlated examples between train and test.
 
-## Dalsze zastosowania
-
-Po rankingu kontekstu te same dane mogą wspierać:
-
-- wybór rozmiaru lokalnego wycinka kodu,
-- wybór backendu, modelu i effort,
-- przewidywanie ryzyka kosztownego retry,
-- ranking testów do uruchomienia w ograniczonym budżecie czasu,
-- wykrywanie utknięcia sesji,
-- prognozę liczby tokenów i czasu kroku.
-
-Deterministyczne walidatory zawsze pozostają źródłem prawdy. ML może dobrać
-strategię przed wywołaniem backendu, ale nie powinien zatwierdzać patcha ani
-zastępować kontroli kontraktu.
-
-## Trening i ewaluacja
-
-Danych nie wolno losowo dzielić po pojedynczych kandydatach. Kandydaci z jednej
-sesji są silnie skorelowani i spowodowaliby leakage. Podział powinien następować
-po całych sesjach, repozytoriach i czasie.
-
-Najważniejsze metryki:
+Primary metrics:
 
 - accepted steps per input token,
-- czas do pierwszego zaakceptowanego patcha,
-- liczba retry na zaakceptowany krok,
-- context precision,
-- context recall,
-- NDCG lub MRR rankingu,
-- udział zadań zakończonych w zadanym budżecie.
+- time to first accepted patch,
+- retries per accepted step,
+- context precision and recall,
+- NDCG or MRR,
+- tasks completed within a fixed budget.
 
-Przed włączeniem modelu należy zastosować shadow mode: model zapisuje własny
-ranking, ale produkcyjnie działa heurystyka. Pozwala to porównać decyzje bez
-wpływania na użytkownika.
+Before activation, run the model in shadow mode: record its ranking while the
+heuristic remains authoritative.
 
-## Integracja techniczna
+## Integration
 
-Preferowana architektura:
+Preferred architecture:
 
-- trening offline w Pythonie,
-- eksport prostego modelu jako JSON ze współczynnikami albo ONNX,
-- inferencja w procesie Rust,
-- brak uruchamiania nowego procesu Python przy każdym kroku,
-- jawna wersja schematu cech i modelu,
-- automatyczny fallback do heurystyki.
+- offline Python training,
+- JSON coefficients or ONNX export,
+- inference inside the Rust process,
+- no per-turn Python process,
+- explicit feature/model schema versions,
+- automatic heuristic fallback.
 
-Alternatywnie podczas eksperymentów może działać długowieczny lokalny proces
-`pair-ranker` komunikujący się po stdio.
+A long-lived local `pair-ranker` process over stdio is acceptable during early
+experiments.
 
-## Warunek rozpoczęcia prac
+## Start conditions
 
-Implementację ML warto rozpocząć dopiero wtedy, gdy:
+ML implementation should begin only when:
 
-- deterministyczny generator kandydatów i ranking mają stabilny kontrakt,
-- telemetria obejmuje wynik interakcji użytkownika,
-- dostępna jest wystarczająca liczba niezależnych sesji,
-- istnieje offline replay i baseline heurystyczny,
-- można wykazać poprawę kosztu lub skuteczności w shadow mode.
+- candidate generation and ranking contracts are stable,
+- interaction outcome telemetry is available,
+- enough independent sessions exist,
+- offline replay and a heuristic baseline exist,
+- shadow-mode results demonstrate a measurable cost or quality improvement.
 
-Do tego czasu zbieramy wersjonowane cechy i decyzje, ale bieżący produkt działa
-wyłącznie na regułach deterministycznych.
+Until then, Pairagen should collect versioned decisions and features while the
+production system remains deterministic.
