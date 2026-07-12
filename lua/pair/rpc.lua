@@ -12,6 +12,7 @@ local M = {
   pending = {},
   notifications = {},
   buffer = "",
+  generation = 0,
 }
 local protocol_version = require("pair.version").protocol
 
@@ -24,7 +25,12 @@ function M.ensure()
   end
 
   M.starting = true
+  M.generation = M.generation + 1
+  local generation = M.generation
   installer.resolve(function(command, error_message)
+    if generation ~= M.generation then
+      return
+    end
     M.starting = false
     if not command then
       local message = "Could not prepare paird: " .. tostring(error_message)
@@ -118,6 +124,7 @@ function M.start(backend_command)
 end
 
 function M.stop()
+  M.generation = M.generation + 1
   if M.job and vim.fn.jobwait({ M.job }, 0)[1] == -1 then
     vim.fn.jobstop(M.job)
   end
