@@ -12,7 +12,7 @@ local M = {
   notifications = {},
   buffer = "",
 }
-local protocol_version = 3
+local protocol_version = 5
 
 function M.ensure()
   if M.job and vim.fn.jobwait({ M.job }, 0)[1] == -1 then

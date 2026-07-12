@@ -9,12 +9,16 @@ function M.current(prompt, mode)
 
   value.prompt = prompt
   value.mode = mode or "auto"
+  value.context_policy = vim.deepcopy(config.values.context.optimization)
 
   return value, source
 end
 
 function M.session()
-  return M.capture(require("pair.state").source_buf).value
+  local value = M.capture(require("pair.state").source_buf).value
+  value.hints = M.merge_hints(value.hints, require("pair.state").workspace_hints or {})
+
+  return value
 end
 
 function M.capture(preferred_buf)
@@ -42,8 +46,196 @@ function M.capture(preferred_buf)
       buffer_text = buffer_text,
       buffer_start_line = buffer_start_line,
       diagnostics = M.diagnostics(file, buf),
+      hints = M.lsp_hints(buf, cursor, vim.fn.getcwd()),
     },
   }
+end
+
+function M.lsp_hints(buf, cursor, cwd)
+  local options = config.values.context.lsp or {}
+  if options.enabled == false or not vim.lsp then
+    return {}
+  end
+
+  local clients = vim.lsp.get_clients and vim.lsp.get_clients({ bufnr = buf }) or vim.lsp.get_active_clients({ bufnr = buf })
+  local methods = {
+    { enabled = options.definition, method = "textDocument/definition", kind = "definition" },
+    { enabled = options.declaration, method = "textDocument/declaration", kind = "declaration" },
+    { enabled = options.type_definition, method = "textDocument/typeDefinition", kind = "type_definition" },
+    { enabled = options.implementation, method = "textDocument/implementation", kind = "implementation" },
+    { enabled = options.references, method = "textDocument/references", kind = "reference" },
+  }
+  local params = {
+    textDocument = { uri = vim.uri_from_bufnr(buf) },
+    position = { line = cursor[1] - 1, character = cursor[2] },
+  }
+  local hints = {}
+  local seen = {}
+  local limit = options.max_locations or 16
+  local timeout = options.timeout_ms or 120
+  local started = vim.uv.hrtime()
+
+  for _, item in ipairs(methods) do
+    if item.enabled ~= false then
+      for _, client in ipairs(clients or {}) do
+        if #hints >= limit then
+          return hints
+        end
+        local supported = not client.supports_method or client:supports_method(item.method, { bufnr = buf })
+        if supported then
+          local elapsed_ms = (vim.uv.hrtime() - started) / 1000000
+          local remaining = math.floor(timeout - elapsed_ms)
+          if remaining <= 0 then
+            return hints
+          end
+          local request_params = vim.deepcopy(params)
+          if item.kind == "reference" then
+            request_params.context = { includeDeclaration = false }
+          end
+          local ok, response = pcall(client.request_sync, client, item.method, request_params, remaining, buf)
+          if ok and response and not response.err and response.result then
+            M.add_lsp_locations(hints, seen, response.result, item.kind, client.name or "lsp", limit, cwd)
+          end
+        end
+      end
+    end
+  end
+
+  return hints
+end
+
+function M.workspace_hints(prompt, cwd, buf)
+  local options = config.values.context.lsp or {}
+  if options.enabled == false or options.workspace_symbols == false or not vim.lsp then
+    return {}
+  end
+
+  local clients = vim.lsp.get_clients and vim.lsp.get_clients({ bufnr = buf }) or vim.lsp.get_active_clients({ bufnr = buf })
+  local queries = M.workspace_queries(prompt, options.max_workspace_queries or 3)
+  local hints = {}
+  local seen = {}
+  local limit = options.max_locations or 16
+  local timeout = options.workspace_timeout_ms or options.timeout_ms or 120
+  local started = vim.uv.hrtime()
+
+  for _, query in ipairs(queries) do
+    for _, client in ipairs(clients or {}) do
+      if #hints >= limit then
+        return hints
+      end
+      local supported = not client.supports_method or client:supports_method("workspace/symbol")
+      if supported then
+        local elapsed_ms = (vim.uv.hrtime() - started) / 1000000
+        local remaining = math.floor(timeout - elapsed_ms)
+        if remaining <= 0 then
+          return hints
+        end
+        local ok, response = pcall(client.request_sync, client, "workspace/symbol", { query = query }, remaining)
+        if ok and response and not response.err and response.result then
+          M.add_lsp_locations(
+            hints,
+            seen,
+            response.result,
+            "definition",
+            (client.name or "lsp") .. ":workspace_symbol",
+            limit,
+            cwd
+          )
+        end
+      end
+    end
+  end
+
+  return hints
+end
+
+function M.workspace_queries(prompt, limit)
+  local ignored = {
+    concrete = true,
+    potem = true,
+    rzecz = true,
+    struct = true,
+    structów = true,
+    template = true,
+  }
+  local weighted = {}
+  local seen = {}
+  for term in tostring(prompt or ""):lower():gmatch("[%w_%-]+") do
+    if #term >= 5 and not ignored[term] and not seen[term] then
+      seen[term] = true
+      table.insert(weighted, {
+        term = term,
+        weight = (term:find("_", 1, true) and 1000 or 0) + #term,
+      })
+    end
+  end
+  table.sort(weighted, function(left, right)
+    if left.weight == right.weight then
+      return left.term < right.term
+    end
+    return left.weight > right.weight
+  end)
+
+  local queries = {}
+  for index = 1, math.min(limit, #weighted) do
+    table.insert(queries, weighted[index].term)
+  end
+  return queries
+end
+
+function M.merge_hints(left, right)
+  local merged = {}
+  local seen = {}
+  for _, hints in ipairs({ left or {}, right or {} }) do
+    for _, hint in ipairs(hints) do
+      local key = table.concat({ hint.file or "", hint.line or 0, hint.column or 0 }, ":")
+      if not seen[key] then
+        seen[key] = true
+        table.insert(merged, hint)
+      end
+    end
+  end
+  return merged
+end
+
+function M.add_lsp_locations(hints, seen, result, kind, source, limit, cwd)
+  local locations = result
+  if result.uri or result.targetUri then
+    locations = { result }
+  end
+  if type(locations) ~= "table" then
+    return
+  end
+
+  for _, location in ipairs(locations) do
+    if #hints >= limit then
+      return
+    end
+    local target = location.location or location
+    local uri = target.targetUri or target.uri
+    local range = target.targetSelectionRange or target.targetRange or target.range
+    if uri and range and range.start then
+      local ok, filename = pcall(vim.uri_to_fname, uri)
+      local root = vim.fn.fnamemodify(cwd or vim.fn.getcwd(), ":p"):gsub("/$", "")
+      local absolute = ok and vim.fn.fnamemodify(filename, ":p") or ""
+      if ok and (absolute == root or absolute:sub(1, #root + 1) == root .. "/") then
+        local file = vim.fn.fnamemodify(filename, ":.")
+        local line = range.start.line + 1
+        local column = range.start.character + 1
+        local key = table.concat({ file, line, column }, ":")
+        if not seen[key] then
+          seen[key] = true
+          table.insert(hints, {
+            file = file,
+            line = line,
+            column = column,
+            kind = kind,
+            source = source,
+          })
+        end
+      end
+    end
+  end
 end
 
 function M.source_buffer(preferred_buf)
@@ -96,21 +288,32 @@ end
 
 function M.diagnostics(file, buf)
   local items = {}
-  local diagnostics = vim.diagnostic.get(buf or 0)
   local limit = config.values.context.max_diagnostics
-
-  for _, diagnostic in ipairs(diagnostics) do
-    if #items >= limit then
-      break
+  local buffers = { buf or 0 }
+  local root = vim.fn.fnamemodify(vim.fn.getcwd(), ":p"):gsub("/$", "")
+  for _, candidate in ipairs(vim.api.nvim_list_bufs()) do
+    local candidate_file = vim.api.nvim_buf_get_name(candidate)
+    local absolute = candidate_file ~= "" and vim.fn.fnamemodify(candidate_file, ":p") or ""
+    local in_project = absolute == root or absolute:sub(1, #root + 1) == root .. "/"
+    if candidate ~= buf and vim.api.nvim_buf_is_loaded(candidate) and in_project then
+      table.insert(buffers, candidate)
     end
+  end
 
-    table.insert(items, {
-      file = vim.fn.fnamemodify(file, ":."),
-      line = diagnostic.lnum + 1,
-      column = diagnostic.col + 1,
-      severity = tostring(diagnostic.severity),
-      message = M.truncate(diagnostic.message, config.values.context.max_diagnostic_length),
-    })
+  for _, diagnostic_buf in ipairs(buffers) do
+    local diagnostic_file = diagnostic_buf == buf and file or vim.api.nvim_buf_get_name(diagnostic_buf)
+    for _, diagnostic in ipairs(vim.diagnostic.get(diagnostic_buf)) do
+      if #items >= limit then
+        return items
+      end
+      table.insert(items, {
+        file = vim.fn.fnamemodify(diagnostic_file, ":."),
+        line = diagnostic.lnum + 1,
+        column = diagnostic.col + 1,
+        severity = tostring(diagnostic.severity),
+        message = M.truncate(diagnostic.message, config.values.context.max_diagnostic_length),
+      })
+    end
   end
 
   return items

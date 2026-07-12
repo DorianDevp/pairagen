@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::process::Stdio;
 
 use anyhow::{Result, anyhow};
@@ -28,6 +29,7 @@ struct CodexAppState {
     process: Option<CodexAppProcess>,
     next_id: u64,
     threads: HashMap<String, String>,
+    context_fingerprints: HashMap<String, u64>,
 }
 
 struct CodexAppProcess {
@@ -39,6 +41,7 @@ struct CodexAppProcess {
 struct TurnOutput {
     text: String,
     token_usage: Option<TokenUsage>,
+    activities: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -125,6 +128,7 @@ impl CodexAppBackend {
                 process: None,
                 next_id: 1,
                 threads: HashMap::new(),
+                context_fingerprints: HashMap::new(),
             }),
         }
     }
@@ -183,11 +187,7 @@ impl CodexAppBackend {
         model: &Option<String>,
     ) -> Result<String> {
         let patch_turn = req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch);
-        let thread_key = format!(
-            "{}:{}",
-            req.session.id,
-            if patch_turn { "patch" } else { "discover" }
-        );
+        let thread_key = thread_key(req);
 
         if let Some(thread_id) = state.threads.get(&thread_key) {
             return Ok(thread_id.clone());
@@ -196,7 +196,7 @@ impl CodexAppBackend {
         let base_instructions = if patch_turn {
             "You are a local Pairagen pair-programming partner. Do not use tools, commands, file reads, or repo inspection. Never edit files. Return exactly one final JSON object matching the supplied output schema and no prose."
         } else {
-            "You are a local Pairagen pair-programming partner. You may use targeted read-only project tools to find the next relevant code block. Never edit files. Return exactly one final JSON object matching the supplied output schema and no prose."
+            "You are a local Pairagen pair-programming partner. You may use at most two targeted read-only project tool calls to find the next relevant code block. Stop searching once the supplied context supports an exact location. Never edit files. Return exactly one final JSON object matching the supplied output schema and no prose."
         };
         let developer_instructions = if patch_turn {
             "Work as an equal pair-programming partner. Propose one coherent local block at the supplied location and explain why this is the useful next move. Do not take over the whole task. Return one structured patch hunk as an editable draft, not a finished agenda."
@@ -244,7 +244,12 @@ impl CodexAppBackend {
         Self::ensure(&mut state, &self.command, &self.args).await?;
 
         let thread_id = Self::thread_id(&mut state, req, &self.model).await?;
-        let input = prompt(req);
+        let fingerprint = context_fingerprint(req);
+        let include_context = state.context_fingerprints.get(&thread_id) != Some(&fingerprint);
+        state
+            .context_fingerprints
+            .insert(thread_id.clone(), fingerprint);
+        let input = prompt(req, include_context);
         report_progress(
             progress,
             &req.session.id,
@@ -270,7 +275,7 @@ impl CodexAppBackend {
                     }],
                     "model": self.model,
                     "effort": self.effort,
-                    "outputSchema": output_schema(&req)
+                    "outputSchema": output_schema(req)
                 }
             }))
             .await?;
@@ -300,6 +305,20 @@ impl CodexAppBackend {
             actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
         })
     }
+}
+
+fn thread_key(req: &BackendRequest) -> String {
+    let patch_turn = req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch);
+    format!(
+        "{}:{}:{}",
+        req.session.id,
+        if patch_turn { "patch" } else { "discover" },
+        if patch_turn {
+            req.session.completed_steps.len()
+        } else {
+            0
+        }
+    )
 }
 
 impl Drop for CodexAppProcess {
@@ -361,6 +380,7 @@ impl CodexAppState {
     ) -> Result<TurnOutput> {
         let mut text = String::new();
         let mut token_usage = None;
+        let mut activities = Vec::new();
 
         loop {
             let message = self.next_message().await?;
@@ -387,6 +407,15 @@ impl CodexAppState {
                 text = value.to_string();
             }
 
+            if method == Some("item/completed")
+                && message_turn_id == Some(turn_id)
+                && let Some(item) = params.get("item")
+                && let Some(activity) = activity_summary(item)
+                && !activities.contains(&activity)
+            {
+                activities.push(activity);
+            }
+
             if method == Some("thread/tokenUsage/updated")
                 && message_turn_id == Some(turn_id)
                 && let Some(usage) = parse_usage(params.get("tokenUsage"))
@@ -408,7 +437,11 @@ impl CodexAppState {
                     return Err(anyhow!("codex turn completed without final answer"));
                 }
 
-                return Ok(TurnOutput { text, token_usage });
+                return Ok(TurnOutput {
+                    text,
+                    token_usage,
+                    activities,
+                });
             }
         }
     }
@@ -504,10 +537,12 @@ impl BackendAdapter for CodexAppBackend {
                 backend: "codex_app".into(),
                 token_usage: output.token_usage.or_else(|| {
                     Some(TokenUsage::estimated(
-                        estimate_tokens(&prompt(&req)),
+                        estimate_tokens(&prompt(&req, true)),
                         estimate_tokens(&output.text),
                     ))
                 }),
+                activities: output.activities,
+                attempts: vec![],
             },
         })
     }
@@ -524,7 +559,7 @@ impl BackendAdapter for CodexAppBackend {
     }
 }
 
-fn prompt(req: &BackendRequest) -> String {
+fn prompt(req: &BackendRequest, include_context: bool) -> String {
     let patch_turn = req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch);
     let continuation = req.card_contract.allow_goal_completion;
     let turn_rules = if continuation {
@@ -550,7 +585,8 @@ fn prompt(req: &BackendRequest) -> String {
         )
     } else {
         "- Find only one useful next move, not a plan for the whole solution.\n\
-         - Use targeted project search to identify one coherent block. Do not stop just because the initial excerpt is indirect or missing.\n\
+         - Inspect the supplied ranked project context first. Use targeted project search only when those fragments are insufficient.\n\
+         - Do not stop just because the initial excerpt is indirect or missing.\n\
          - When the user names a destination or consumer such as a template, API, caller, or renderer, prefer that consumer block as the next location before changing its producer.\n\
          - Explain what you noticed, why it matters now, and how the code led you there. Do not dictate keystrokes or a line-by-line walkthrough.\n\
          - Return a concrete evidence/next/location pointing to that block so the editor can move there before Fix.\n\
@@ -565,6 +601,41 @@ fn prompt(req: &BackendRequest) -> String {
 - finding: {\"op\":\"finding\",\"title\":string,\"finding\":string,\"location\":object|null,\"annotation\":string|null}\n\
 - patch: use the exact structured patch schema supplied by the API. Each hunk has old_start, new_start, and lines with kind context/remove/add plus line text without a diff prefix.\n\
 - error: {\"op\":\"error\",\"title\":string,\"message\":string}"
+    };
+
+    let ranked_context = if patch_turn || continuation || req.context.artifacts.is_empty() {
+        "none".into()
+    } else {
+        req.context
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                format!(
+                    "--- {}:{}-{} ({:?}; {}) ---\n{}",
+                    artifact.file.display(),
+                    artifact.start_line,
+                    artifact.end_line,
+                    artifact.kind,
+                    artifact.reason,
+                    artifact.text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let source_context = if include_context {
+        format!(
+            "File: {}\nCursor: {}:{}\nBuffer starts at file line: {}\nBuffer excerpt:\n```text\n{}\n```\nRanked project context (read before using tools):\n```text\n{}\n```",
+            req.context.file.display(),
+            req.context.cursor.line,
+            req.context.cursor.column,
+            req.context.buffer_start_line,
+            req.context.buffer_text,
+            ranked_context,
+        )
+    } else {
+        "Source context is unchanged from the preceding turn in this Pair thread. Reuse that exact buffer and ranked project context.".into()
     };
 
     format!(
@@ -584,13 +655,7 @@ Known findings and signals (do not repeat): {known_observations}
 Mode: {mode}
 Action: {action}
 Last card: {last}
-File: {file}
-Cursor: {line}:{column}
-Buffer starts at file line: {buffer_start_line}
-Buffer excerpt:
-```text
-{buffer}
-```"#,
+{source_context}"#,
         prompt = req.session.prompt,
         completed_steps =
             serde_json::to_string(&req.session.completed_steps).unwrap_or_else(|_| "[]".into()),
@@ -606,12 +671,28 @@ Buffer excerpt:
         turn_rules = turn_rules,
         output_contract = output_contract,
         last = req.session.last_summary.as_deref().unwrap_or("none"),
-        file = req.context.file.display(),
-        line = req.context.cursor.line,
-        column = req.context.cursor.column,
-        buffer_start_line = req.context.buffer_start_line,
-        buffer = req.context.buffer_text
+        source_context = source_context,
     )
+}
+
+fn context_fingerprint(req: &BackendRequest) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    req.context.file.hash(&mut hasher);
+    req.context.cursor.line.hash(&mut hasher);
+    req.context.cursor.column.hash(&mut hasher);
+    req.context.buffer_start_line.hash(&mut hasher);
+    req.context.buffer_text.hash(&mut hasher);
+    for diagnostic in &req.context.diagnostics {
+        diagnostic.file.hash(&mut hasher);
+        diagnostic.line.hash(&mut hasher);
+        diagnostic.message.hash(&mut hasher);
+    }
+    for artifact in &req.context.artifacts {
+        artifact.file.hash(&mut hasher);
+        artifact.start_line.hash(&mut hasher);
+        artifact.text.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn action_value(action: &BackendAction) -> Value {
@@ -1025,6 +1106,57 @@ fn message_turn_id(params: &Value) -> Option<&str> {
     })
 }
 
+fn activity_summary(item: &Value) -> Option<String> {
+    let kind = item.get("type").and_then(Value::as_str)?;
+    if matches!(kind, "reasoning" | "agentMessage" | "plan") {
+        return None;
+    }
+
+    let detail = match kind {
+        "commandExecution" => item.get("command").map(compact_value),
+        "fileChange" => item
+            .get("path")
+            .or_else(|| item.get("changes"))
+            .map(compact_value),
+        "mcpToolCall" => {
+            let server = item.get("server").and_then(Value::as_str).unwrap_or("mcp");
+            let tool = item
+                .get("tool")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            Some(format!("{server}/{tool}"))
+        }
+        "webSearch" => item.get("query").map(compact_value),
+        "dynamicToolCall" | "toolCall" => item
+            .get("tool")
+            .or_else(|| item.get("name"))
+            .map(compact_value),
+        _ if kind.to_lowercase().contains("tool") || kind.to_lowercase().contains("command") => {
+            item.get("name").map(compact_value)
+        }
+        _ => return None,
+    };
+    let detail = detail.filter(|value| !value.is_empty());
+    Some(match detail {
+        Some(detail) => format!("{kind}: {detail}"),
+        None => kind.to_string(),
+    })
+}
+
+fn compact_value(value: &Value) -> String {
+    let value = value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.to_string());
+    let mut compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() > 240 {
+        compact = compact.chars().take(240).collect::<String>();
+        compact.push_str("...");
+    }
+    compact
+}
+
 fn report_progress(
     progress: Option<&ProgressReporter>,
     session_id: &str,
@@ -1076,11 +1208,90 @@ fn progress_for_message(message: &Value, turn_id: &str) -> Option<(&'static str,
 mod tests {
     use super::*;
 
+    fn request() -> BackendRequest {
+        BackendRequest {
+            session: crate::SessionSnapshot {
+                id: "s_1".into(),
+                prompt: "inspect target".into(),
+                completed_steps: vec![],
+                known_observations: vec![],
+                mode: pair_protocol::Mode::Auto,
+                card_count: 0,
+                last_card: None,
+                last_summary: None,
+            },
+            action: BackendAction::Start,
+            context: pair_protocol::ContextBundle {
+                cwd: "/tmp/project".into(),
+                file: "src/main.rs".into(),
+                cursor: pair_protocol::Cursor { line: 1, column: 1 },
+                selection: None,
+                buffer_text: "unique source payload".into(),
+                buffer_start_line: 1,
+                diagnostics: vec![],
+                hints: vec![],
+                artifacts: vec![],
+                report: None,
+            },
+            card_contract: crate::CardContract {
+                expected_kind: Some(pair_protocol::CardKind::Hypothesis),
+                ..Default::default()
+            },
+        }
+    }
+
     #[test]
     fn serializes_user_action_as_protocol_value() {
         let value = action_value(&BackendAction::User(Action::Fix));
 
         assert_eq!(value["action"], "fix");
+    }
+
+    #[test]
+    fn unchanged_context_is_not_repeated_in_thread_prompt() {
+        let request = request();
+
+        assert!(prompt(&request, true).contains("unique source payload"));
+        let repeated = prompt(&request, false);
+        assert!(!repeated.contains("unique source payload"));
+        assert!(repeated.contains("Source context is unchanged"));
+    }
+
+    #[test]
+    fn accepted_patch_step_rotates_patch_thread() {
+        let mut request = request();
+        request.card_contract.expected_kind = Some(pair_protocol::CardKind::Patch);
+        let first = thread_key(&request);
+        request.session.completed_steps.push("first patch".into());
+
+        assert_ne!(first, thread_key(&request));
+        assert_eq!(thread_key(&request), "s_1:patch:1");
+    }
+
+    #[test]
+    fn retry_within_the_same_step_reuses_patch_thread() {
+        let mut request = request();
+        request.card_contract.expected_kind = Some(pair_protocol::CardKind::Patch);
+        let first = thread_key(&request);
+        request.action = BackendAction::ContractRetry("repair it".into());
+
+        assert_eq!(first, thread_key(&request));
+    }
+
+    #[test]
+    fn summarizes_tool_activity_without_reasoning_text() {
+        let command = json!({
+            "type": "commandExecution",
+            "command": "rg layout_editor.html templates"
+        });
+        let reasoning = json!({"type": "reasoning", "text": "private"});
+
+        assert!(
+            activity_summary(&command)
+                .unwrap()
+                .contains("layout_editor.html")
+        );
+        assert_eq!(activity_summary(&reasoning), None);
     }
 
     #[test]

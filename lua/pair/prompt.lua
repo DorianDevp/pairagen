@@ -8,7 +8,7 @@ function M.open(mode)
   local source = require("pair.context").capture()
 
   M.open_for({
-    title = " Pair Prompt ",
+    title = M.title("Prompt"),
     footer = " Ctrl-s submit  Esc normal  q close ",
     submit = function(text)
       require("pair").start(text, mode, source)
@@ -18,12 +18,20 @@ end
 
 function M.reply()
   M.open_for({
-    title = " Pair Reply ",
+    title = M.title("Reply"),
     footer = " Ctrl-s send  Esc normal  q close ",
     submit = function(text)
       require("pair").reply(text)
     end,
   })
+end
+
+function M.title(kind)
+  local agent = config.agent()
+  local model = config.model()
+  local active = model and model ~= "" and (agent .. " / " .. model) or (agent .. " / default")
+
+  return string.format(" Pair %s · %s ", kind, active)
 end
 
 function M.open_for(opts)
@@ -34,6 +42,7 @@ function M.open_for(opts)
   local row = position.row
   local col = position.col
   local frame_buf = vim.api.nvim_create_buf(false, true)
+  local zindex = config.values.prompt.zindex or 200
   local frame_win = vim.api.nvim_open_win(frame_buf, false, {
     relative = "editor",
     row = row,
@@ -46,6 +55,7 @@ function M.open_for(opts)
     title_pos = "left",
     footer = opts.footer,
     footer_pos = "right",
+    zindex = zindex,
   })
 
   state.prompt_frame_buf = frame_buf
@@ -63,6 +73,7 @@ function M.open_for(opts)
     height = size.inner_height,
     style = "minimal",
     border = "none",
+    zindex = zindex + 1,
   })
 
   state.prompt_buf = buf

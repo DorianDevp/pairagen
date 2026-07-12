@@ -29,6 +29,9 @@ local M = {
   last_card = nil,
   token_usage = nil,
   turn_token_usage = nil,
+  context_report = nil,
+  workspace_hints = nil,
+  completion_notified_card = nil,
 }
 
 return M

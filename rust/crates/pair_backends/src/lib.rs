@@ -13,6 +13,7 @@ use pair_protocol::{
     MAX_HUNKS_PER_PATCH, MAX_PATCH_FILES, Mode, TokenUsage,
 };
 use serde::Serialize;
+use serde_json::json;
 
 pub use codex_app::*;
 pub use generic::*;
@@ -50,6 +51,34 @@ pub struct BackendRequest {
     pub action: BackendAction,
     pub context: ContextBundle,
     pub card_contract: CardContract,
+}
+
+pub fn backend_context(context: &ContextBundle) -> serde_json::Value {
+    let artifacts = context
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            json!({
+                "file": artifact.file,
+                "start_line": artifact.start_line,
+                "end_line": artifact.end_line,
+                "kind": artifact.kind,
+                "reason": artifact.reason,
+                "text": artifact.text,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "cwd": context.cwd,
+        "file": context.file,
+        "cursor": context.cursor,
+        "selection": context.selection,
+        "buffer_text": context.buffer_text,
+        "buffer_start_line": context.buffer_start_line,
+        "diagnostics": context.diagnostics,
+        "artifacts": artifacts,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +173,8 @@ pub struct BackendResponse {
 pub struct BackendMetadata {
     pub backend: String,
     pub token_usage: Option<TokenUsage>,
+    pub activities: Vec<String>,
+    pub attempts: Vec<pair_protocol::AgentAttempt>,
 }
 
 pub fn estimate_tokens(text: &str) -> usize {
@@ -232,5 +263,41 @@ mod tests {
             enforce_card_contract(summary, &contract, "test", "{}"),
             Card::Summary(_)
         ));
+    }
+
+    #[test]
+    fn backend_context_excludes_optimizer_telemetry() {
+        let context = ContextBundle {
+            cwd: "/tmp/project".into(),
+            file: "src/main.rs".into(),
+            cursor: pair_protocol::Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: "fn main() {}".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![pair_protocol::ContextArtifact {
+                file: "src/user.rs".into(),
+                start_line: 3,
+                end_line: 3,
+                kind: pair_protocol::ContextArtifactKind::Definition,
+                reason: "definition".into(),
+                text: "struct User;".into(),
+                estimated_tokens: 9,
+                score: 240,
+            }],
+            report: Some(pair_protocol::ContextReport {
+                enabled: true,
+                candidate_count: 99,
+                ..Default::default()
+            }),
+        };
+
+        let value = backend_context(&context);
+
+        assert!(value.get("report").is_none());
+        assert!(value.get("hints").is_none());
+        assert_eq!(value["artifacts"][0]["text"], "struct User;");
+        assert!(value["artifacts"][0].get("score").is_none());
     }
 }

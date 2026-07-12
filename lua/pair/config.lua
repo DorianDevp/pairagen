@@ -14,7 +14,6 @@ M.values = {
     codex = {
       kind = "codex_app",
       command = "codex",
-      model = "gpt-5.4-mini",
       effort = "low",
       models = {},
       args = {
@@ -65,6 +64,7 @@ M.values = {
     height = 10,
     padding_x = 4,
     padding_y = 2,
+    zindex = 200,
   },
   card = {
     border = "rounded",
@@ -80,6 +80,32 @@ M.values = {
     after = 24,
     max_diagnostics = 8,
     max_diagnostic_length = 160,
+    optimization = {
+      enabled = true,
+      total_token_budget = 2400,
+      reserved_tokens = 700,
+      primary_token_budget = 1000,
+      max_artifacts = 4,
+      snippet_lines = 10,
+      max_scan_files = 2000,
+      max_file_bytes = 524288,
+      cache_ttl_ms = 1500,
+      min_artifact_score = 40,
+      exclude = {},
+    },
+    lsp = {
+      enabled = true,
+      timeout_ms = 120,
+      max_locations = 16,
+      workspace_timeout_ms = 120,
+      max_workspace_queries = 3,
+      definition = true,
+      declaration = true,
+      type_definition = true,
+      implementation = true,
+      references = false,
+      workspace_symbols = true,
+    },
   },
   navigation = {
     open = "current",
@@ -92,11 +118,66 @@ M.values = {
   },
 }
 
+M.explicit_models = {}
+
 function M.setup(opts)
+  M.explicit_models = {}
+  for name, agent in pairs((opts and opts.agents) or {}) do
+    if agent.model ~= nil then
+      M.explicit_models[name] = true
+    end
+  end
   M.values = vim.tbl_deep_extend("force", M.values, opts or {})
   M.migrate_legacy_codex()
+  M.load_models()
 
   return M.values
+end
+
+function M.preferences_path()
+  return vim.fn.stdpath("state") .. "/pairagen/preferences.json"
+end
+
+function M.read_preferences()
+  local path = M.preferences_path()
+  if vim.fn.filereadable(path) ~= 1 then
+    return { models = {} }
+  end
+  local ok, value = pcall(vim.json.decode, table.concat(vim.fn.readfile(path), "\n"))
+  if not ok or type(value) ~= "table" then
+    return { models = {} }
+  end
+  value.models = type(value.models) == "table" and value.models or {}
+  return value
+end
+
+function M.load_models()
+  local preferences = M.read_preferences()
+  for name, model in pairs(preferences.models) do
+    local agent = M.values.agents[name]
+    if agent and not M.explicit_models[name] and type(model) == "string" and model ~= "" then
+      agent.model = model
+    end
+  end
+end
+
+function M.persist_model(agent_name, model)
+  local preferences = M.read_preferences()
+  preferences.models[agent_name] = model and model ~= "" and model or nil
+  local path = M.preferences_path()
+  local directory = vim.fn.fnamemodify(path, ":h")
+  local ok, error_message = pcall(function()
+    if vim.fn.mkdir(directory, "p") == 0 and vim.fn.isdirectory(directory) ~= 1 then
+      error("could not create " .. directory)
+    end
+    if vim.fn.writefile({ vim.json.encode(preferences) }, path) ~= 0 then
+      error("could not write " .. path)
+    end
+  end)
+  if ok then
+    return true, nil
+  end
+  return false, tostring(error_message)
 end
 
 function M.migrate_legacy_codex()
@@ -136,7 +217,7 @@ function M.agent_config()
 end
 
 function M.model(name)
-  local _, agent = M.agent_config()
+  local agent_name, agent = M.agent_config()
 
   if name then
     if name == "" then
@@ -144,9 +225,13 @@ function M.model(name)
     else
       agent.model = name
     end
+    if not M.explicit_models[agent_name] then
+      local saved, error_message = M.persist_model(agent_name, agent.model)
+      return agent.model, saved, error_message
+    end
   end
 
-  return agent.model
+  return agent.model, false
 end
 
 function M.model_names()

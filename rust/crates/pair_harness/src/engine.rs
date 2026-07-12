@@ -6,11 +6,12 @@ use pair_backends::{
     BackendAction, BackendAdapter, BackendProgress, BackendRequest, BackendResponse, CardContract,
     ProgressReporter, SessionSnapshot,
 };
+use pair_context::ContextOptimizer;
 use pair_patch::{PatchCoherence, PatchNormalizer, PatchValidator};
 use pair_protocol::{
-    Action, ActionResult, Card, CardKind, ContextBundle, ErrorCard, GoalProgress, Mode,
-    ObservationKind, ObservationProgress, PatchApplyResult, StartSessionParams, StartSessionResult,
-    SummaryCard,
+    Action, ActionResult, AgentAttempt, Card, CardKind, ContextBundle, ErrorCard, GoalProgress,
+    Mode, ObservationKind, ObservationProgress, PatchApplyResult, StartSessionParams,
+    StartSessionResult, SummaryCard, TokenUsage,
 };
 
 use crate::session::Session;
@@ -19,6 +20,7 @@ use crate::state::{NextState, SessionState};
 pub struct Engine {
     backend: Arc<dyn BackendAdapter>,
     sessions: HashMap<String, Session>,
+    context_optimizer: ContextOptimizer,
 }
 
 impl Engine {
@@ -26,6 +28,7 @@ impl Engine {
         Self {
             backend,
             sessions: HashMap::new(),
+            context_optimizer: ContextOptimizer::default(),
         }
     }
 
@@ -39,7 +42,12 @@ impl Engine {
         progress: Option<ProgressReporter>,
     ) -> Result<StartSessionResult> {
         let mut session = Session::new(params.clone());
-        let context = ContextBundle::from_start(params);
+        let context = self.context_optimizer.optimize(
+            ContextBundle::from_start(params),
+            &session.original_prompt,
+            &session.context_policy,
+        );
+        session.context = context.clone();
         let expected = expected_start_state(&session.mode);
         let response = self
             .next_distinct_response(
@@ -51,12 +59,14 @@ impl Engine {
             )
             .await;
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
+        let attempts = response.metadata.attempts.clone();
         self.add_usage(&mut session, &response.metadata.token_usage);
 
         let card = self.accept_response(&mut session, response, expected)?;
         let session_id = session.id.clone();
         let goal = goal_progress(&session);
         let token_usage = session.token_usage.clone();
+        let context_report = session.context.report.clone();
 
         self.sessions.insert(session_id.clone(), session);
 
@@ -66,6 +76,8 @@ impl Engine {
             goal,
             token_usage,
             turn_token_usage,
+            context_report,
+            attempts,
         })
     }
 
@@ -130,6 +142,8 @@ impl Engine {
                 goal: goal_progress(session),
                 token_usage,
                 turn_token_usage: Default::default(),
+                context_report: session.context.report.clone(),
+                attempts: vec![],
             });
         }
 
@@ -148,6 +162,7 @@ impl Engine {
             .await;
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
+        let attempts = response.metadata.attempts.clone();
         self.add_usage(session, &response.metadata.token_usage);
 
         let card = self.accept_response(session, response, state)?;
@@ -159,6 +174,8 @@ impl Engine {
             goal: goal_progress(session),
             token_usage,
             turn_token_usage,
+            context_report: session.context.report.clone(),
+            attempts,
         })
     }
 
@@ -189,6 +206,7 @@ impl Engine {
             .await;
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
+        let attempts = response.metadata.attempts.clone();
         self.add_usage(session, &response.metadata.token_usage);
 
         let card = self.accept_response(session, response, expected)?;
@@ -200,6 +218,8 @@ impl Engine {
             goal: goal_progress(session),
             token_usage,
             turn_token_usage,
+            context_report: session.context.report.clone(),
+            attempts,
         })
     }
 
@@ -224,29 +244,65 @@ impl Engine {
     }
 
     async fn apply_result_taken(
-        &self,
+        &mut self,
         session: &mut Session,
         result: PatchApplyResult,
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         session.state.require_patch()?;
         validate_apply_result(session, &result)?;
-        session.context = result.context.clone();
+        self.context_optimizer
+            .invalidate(&result.context.cwd, &result.changed_files);
+        session.context = self.context_optimizer.optimize(
+            result.context.clone(),
+            &session.original_prompt,
+            &session.context_policy,
+        );
         let session_id = result.session_id.clone();
 
-        let next_action = if result.accepted {
+        if result.accepted {
             let completed_steps = completed_patch_steps(session);
             session.completed_steps.extend(completed_steps);
             session.accepted_patches.extend(result.patch_ids.clone());
             session.state = SessionState::Summary;
-            Action::Next
-        } else {
-            session.rejected_patches.extend(result.patch_ids.clone());
-            session.state = SessionState::PatchShown;
-            Action::Retry
-        };
+            let changed_files = result.changed_files;
+            let summary = if changed_files.is_empty() {
+                "The local patch was applied. Continue only if the goal needs another change."
+                    .into()
+            } else {
+                format!(
+                    "Applied the local patch to {}. Continue only if the goal needs another change.",
+                    changed_files
+                        .iter()
+                        .map(|file| file.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            let card = Card::Summary(SummaryCard {
+                id: session.next_card_id("applied"),
+                title: "Local step applied".into(),
+                summary,
+                changed_files,
+                next_actions: vec![Action::Next, Action::RunCheck, Action::Stop],
+            });
+            session.cards.push(card.clone());
 
-        self.action_taken(&session_id, session, next_action, progress)
+            return Ok(ActionResult {
+                session_id,
+                card,
+                goal: goal_progress(session),
+                token_usage: session.token_usage.clone(),
+                turn_token_usage: TokenUsage::default(),
+                context_report: session.context.report.clone(),
+                attempts: vec![],
+            });
+        }
+
+        session.rejected_patches.extend(result.patch_ids.clone());
+        session.state = SessionState::PatchShown;
+
+        self.action_taken(&session_id, session, Action::Retry, progress)
             .await
     }
 
@@ -255,11 +311,21 @@ impl Engine {
     }
 
     pub fn update_context(&mut self, session_id: &str, context: ContextBundle) -> Result<()> {
-        let session = self
+        let (prompt, policy) = self
             .sessions
-            .get_mut(session_id)
+            .get(session_id)
+            .map(|session| {
+                (
+                    session.original_prompt.clone(),
+                    session.context_policy.clone(),
+                )
+            })
             .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
-        session.context = context;
+        let context = self.context_optimizer.optimize(context, &prompt, &policy);
+        self.sessions
+            .get_mut(session_id)
+            .expect("session checked above")
+            .context = context;
 
         Ok(())
     }
@@ -308,6 +374,7 @@ impl Engine {
     ) -> BackendResponse {
         let mut action = action;
         let mut token_usage = None;
+        let mut attempts = Vec::new();
 
         for attempt in 0..3 {
             let request = self.request(session, action, context.clone(), expected);
@@ -318,16 +385,40 @@ impl Engine {
             {
                 Ok(response) => response,
                 Err(error) => {
+                    let detail = format!("{error:#}");
                     let mut response = backend_failure_response(session, error);
                     merge_usage(&mut token_usage, &response.metadata.token_usage);
                     response.metadata.token_usage = token_usage;
+                    attempts.push(AgentAttempt {
+                        number: attempt + 1,
+                        backend: response.metadata.backend.clone(),
+                        outcome: "backend_error".into(),
+                        token_usage: TokenUsage::default(),
+                        detail: Some(detail),
+                        candidate_card: None,
+                        activities: vec![],
+                    });
+                    response.metadata.attempts = attempts;
                     return response;
                 }
             };
+            let attempt_usage = response.metadata.token_usage.clone().unwrap_or_default();
             merge_usage(&mut token_usage, &response.metadata.token_usage);
 
             if let Some((key, reason)) = duplicate_observation(session, &response.card) {
                 activate_observation(session, &key);
+                attempts.push(agent_attempt(
+                    attempt + 1,
+                    &response,
+                    if attempt < 2 {
+                        "duplicate_retry"
+                    } else {
+                        "rejected"
+                    },
+                    Some(reason.clone()),
+                    attempt_usage,
+                    true,
+                ));
                 if attempt < 2 {
                     if let Some(progress) = &progress {
                         progress(BackendProgress {
@@ -345,6 +436,7 @@ impl Engine {
 
                 let mut rejected = duplicate_failure_response(session, reason);
                 rejected.metadata.token_usage = token_usage;
+                rejected.metadata.attempts = attempts;
                 return rejected;
             }
 
@@ -355,6 +447,19 @@ impl Engine {
                     validate_backend_card(&candidate, expected, &context)
                 });
             if let Err(error) = validation {
+                let detail = error.to_string();
+                attempts.push(agent_attempt(
+                    attempt + 1,
+                    &response,
+                    if attempt < 2 {
+                        "contract_retry"
+                    } else {
+                        "rejected"
+                    },
+                    Some(detail.clone()),
+                    attempt_usage,
+                    true,
+                ));
                 if attempt < 2 {
                     if let Some(progress) = &progress {
                         progress(BackendProgress {
@@ -365,7 +470,7 @@ impl Engine {
                         });
                     }
                     action = BackendAction::ContractRetry(format!(
-                        "The previous card failed the local patch contract: {error}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card."
+                        "The previous card failed the local patch contract: {detail}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card."
                     ));
                     continue;
                 }
@@ -373,11 +478,21 @@ impl Engine {
                 response.card =
                     rejected_card(session, &candidate, error, response.raw_output.as_deref());
                 response.metadata.token_usage = token_usage;
+                response.metadata.attempts = attempts;
                 return response;
             }
 
             response.card = candidate;
+            attempts.push(agent_attempt(
+                attempt + 1,
+                &response,
+                "accepted",
+                None,
+                attempt_usage,
+                false,
+            ));
             response.metadata.token_usage = token_usage;
+            response.metadata.attempts = attempts;
             return response;
         }
 
@@ -421,6 +536,25 @@ impl Engine {
         if let Some(usage) = usage {
             session.token_usage.add(usage);
         }
+    }
+}
+
+fn agent_attempt(
+    number: usize,
+    response: &BackendResponse,
+    outcome: &str,
+    detail: Option<String>,
+    token_usage: TokenUsage,
+    include_candidate: bool,
+) -> AgentAttempt {
+    AgentAttempt {
+        number,
+        backend: response.metadata.backend.clone(),
+        outcome: outcome.into(),
+        token_usage,
+        detail,
+        candidate_card: include_candidate.then(|| response.card.clone()),
+        activities: response.metadata.activities.clone(),
     }
 }
 
@@ -844,6 +978,8 @@ fn backend_failure_response(session: &Session, error: anyhow::Error) -> BackendR
         metadata: pair_backends::BackendMetadata {
             backend: "harness".into(),
             token_usage: None,
+            activities: vec![],
+            attempts: vec![],
         },
     }
 }
@@ -862,6 +998,8 @@ fn duplicate_failure_response(session: &Session, reason: String) -> BackendRespo
         metadata: pair_backends::BackendMetadata {
             backend: "harness".into(),
             token_usage: None,
+            activities: vec![],
+            attempts: vec![],
         },
     }
 }
@@ -973,6 +1111,8 @@ mod tests {
             buffer_text: "placeholder".into(),
             buffer_start_line: 1,
             diagnostics: vec![],
+            hints: vec![],
+            context_policy: Default::default(),
         }
     }
 
@@ -985,6 +1125,9 @@ mod tests {
             buffer_text: buffer_text.into(),
             buffer_start_line: 1,
             diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
         }
     }
 
@@ -1013,7 +1156,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_patch_continues_directly_without_intermediate_summary() {
+    async fn accepted_patch_returns_a_local_receipt_before_optional_continuation() {
         let backend = Arc::new(MockBackend);
         let mut engine = Engine::new(backend);
         let start = engine.start(params()).await.unwrap();
@@ -1031,13 +1174,23 @@ mod tests {
             context: editor_context("payload = payload or {}"),
         };
 
-        let next = engine.apply_result(result).await.unwrap();
+        let applied = engine.apply_result(result).await.unwrap();
 
-        assert!(matches!(next.card, Card::Patch(_)));
+        let Card::Summary(receipt) = &applied.card else {
+            panic!("expected local applied receipt");
+        };
+        assert!(receipt.next_actions.contains(&Action::Next));
+        assert_eq!(applied.turn_token_usage, TokenUsage::default());
         assert_eq!(
-            engine.get(&next.session_id).unwrap().completed_steps,
+            engine.get(&applied.session_id).unwrap().completed_steps,
             vec!["src/work.ts: Keeps body present for callers."]
         );
+
+        let next = engine
+            .action(&applied.session_id, Action::Next)
+            .await
+            .unwrap();
+        assert!(matches!(next.card, Card::Patch(_)));
     }
 
     #[tokio::test]
@@ -1175,6 +1328,19 @@ mod tests {
             card.patches[0].diff,
             "@@ -1,1 +1,1 @@\n-placeholder\n+repaired\n"
         );
+        assert_eq!(result.attempts.len(), 2);
+        assert_eq!(result.attempts[0].outcome, "contract_retry");
+        assert!(
+            result.attempts[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("patch context was not found")
+        );
+        assert!(result.attempts[0].candidate_card.is_some());
+        assert_eq!(result.attempts[0].token_usage.total_tokens, 15);
+        assert_eq!(result.attempts[1].outcome, "accepted");
+        assert_eq!(result.turn_token_usage.total_tokens, 30);
     }
 
     #[tokio::test]
@@ -1235,6 +1401,14 @@ mod tests {
 
         assert!(card.message.contains("backend unavailable"));
         assert_eq!(result.turn_token_usage, Default::default());
+        assert_eq!(result.attempts[0].outcome, "backend_error");
+        assert!(
+            result.attempts[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("token limit reached")
+        );
         assert!(engine.get(&result.session_id).is_some());
     }
 
@@ -1254,6 +1428,10 @@ mod tests {
         };
         assert_eq!(card.finding, "The caller still consumes the old shape.");
         assert_eq!(card.annotation, None);
+        assert_eq!(result.attempts.len(), 2);
+        assert_eq!(result.attempts[0].outcome, "duplicate_retry");
+        assert!(result.attempts[0].candidate_card.is_some());
+        assert_eq!(result.attempts[1].outcome, "accepted");
 
         let observations = &engine.get(&start.session_id).unwrap().known_observations;
         assert_eq!(observations.len(), 3);
@@ -1333,6 +1511,9 @@ mod tests {
             buffer_text: "{{ block.preview_html|safe }}".into(),
             buffer_start_line: 1,
             diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
         };
 
         engine.update_context(&start.session_id, context).unwrap();
@@ -1406,6 +1587,8 @@ mod tests {
                 metadata: BackendMetadata {
                     backend: "repeating_observation".into(),
                     token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
+                    activities: vec![],
+                    attempts: vec![],
                 },
             })
         }
@@ -1474,6 +1657,8 @@ mod tests {
                 metadata: BackendMetadata {
                     backend: "flaky".into(),
                     token_usage: None,
+                    activities: vec![],
+                    attempts: vec![],
                 },
             })
         }
@@ -1523,6 +1708,8 @@ mod tests {
                 metadata: BackendMetadata {
                     backend: "bad_patch".into(),
                     token_usage: None,
+                    activities: vec![],
+                    attempts: vec![],
                 },
             })
         }
@@ -1593,6 +1780,8 @@ mod tests {
                 metadata: BackendMetadata {
                     backend: "repairing_patch".into(),
                     token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
+                    activities: vec![],
+                    attempts: vec![],
                 },
             })
         }
@@ -1637,6 +1826,8 @@ mod tests {
                 metadata: BackendMetadata {
                     backend: "wrong_type".into(),
                     token_usage: None,
+                    activities: vec![],
+                    attempts: vec![],
                 },
             })
         }

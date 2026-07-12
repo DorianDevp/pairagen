@@ -167,6 +167,8 @@ impl BackendAdapter for StdioAgentBackend {
             metadata: BackendMetadata {
                 backend: "agent_stdio".into(),
                 token_usage: Some(TokenUsage::estimated(answer.input_tokens, output_tokens)),
+                activities: vec![],
+                attempts: vec![],
             },
         })
     }
@@ -217,7 +219,7 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
             "last": req.session.last_summary
         },
         "a": action_value(&req.action),
-        "ctx": req.context,
+        "ctx": crate::backend_context(&req.context),
         "limits": req.card_contract
     })
 }

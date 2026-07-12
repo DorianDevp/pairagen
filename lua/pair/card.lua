@@ -59,6 +59,11 @@ function M.show(card, opts)
 
   M.bind(buf, card)
   M.highlight(buf, lines, card)
+
+  if card.kind == "summary" and M.has_action(card, "next") and state.completion_notified_card ~= card.id then
+    state.completion_notified_card = card.id
+    ui.notify("Local step applied. Choose Next to continue, Check, or Stop.")
+  end
 end
 
 function M.lines(card)
@@ -79,6 +84,15 @@ function M.lines(card)
     table.insert(lines, "")
     table.insert(lines, tostring(#(card.patches or {})) .. " file patch pending")
   elseif card.kind == "summary" then
+    if M.has_action(card, "next") then
+      table.insert(lines, "Status  Local step applied")
+      table.insert(lines, "Next    Continue only if the goal needs another change")
+      table.insert(lines, "")
+    elseif card.title ~= "Stopped" then
+      table.insert(lines, "Status  Goal complete")
+      table.insert(lines, "Next    Run checks, send a message, or stop")
+      table.insert(lines, "")
+    end
     M.add(lines, card.summary or card.title)
   elseif card.kind == "error" then
     M.add(lines, card.message or card.title)
@@ -97,6 +111,15 @@ function M.lines(card)
   vim.list_extend(lines, M.actions(card))
 
   return lines
+end
+
+function M.has_action(card, expected)
+  for _, action in ipairs(card.actions or card.next_actions or {}) do
+    if action == expected then
+      return true
+    end
+  end
+  return false
 end
 
 function M.goal(lines)
@@ -190,6 +213,15 @@ function M.tokens(lines)
   local total = state.token_usage
   if total and total.total_tokens ~= usage.total_tokens then
     table.insert(lines, string.format("Total %s tokens", total.total_tokens or 0))
+  end
+  local report = state.context_report
+  if report and report.enabled then
+    table.insert(lines, string.format(
+      "Context %s/%s · %s fragments",
+      report.used_tokens or 0,
+      report.budget_tokens or 0,
+      report.selected_count or 0
+    ))
   end
 end
 

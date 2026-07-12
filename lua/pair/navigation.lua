@@ -57,15 +57,19 @@ function M.open_location(location)
 end
 
 function M.from_card(card)
+  return M.open_location(M.card_location(card))
+end
+
+function M.card_location(card)
   if type(card.next_move) == "table" and card.next_move.kind == "open_location" then
-    return M.open_location(card.next_move)
+    return card.next_move
   elseif type(card.evidence) == "table" then
-    return M.open_location(card.evidence)
+    return card.evidence
   elseif type(card.location) == "table" then
-    return M.open_location(card.location)
+    return card.location
   end
 
-  return false
+  return nil
 end
 
 return M

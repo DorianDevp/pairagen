@@ -22,6 +22,7 @@ MVP core is implemented:
 - patch gate
 - mock backend
 - generic CLI backend
+- deterministic token-budgeted project context with LSP hints and dependency ranking
 
 ## Neovim Setup
 
@@ -98,6 +99,12 @@ Switch at runtime:
 :PairModel <model>
 ```
 
+If the active agent has no `model` set in `setup()`, `:PairModel <model>` stores
+the selection per agent in `stdpath("state")/pairagen/preferences.json` and
+restores it on the next Neovim start. A model explicitly configured in
+`setup()` always takes precedence. `:PairModel default` clears the stored model
+and returns that agent to its own default.
+
 ## Flow
 
 ```text
@@ -110,7 +117,9 @@ One local patch
 Edit the inline draft
 <leader>pa Accept, <leader>pd Reject, <leader>pr Retry
 Accepted local step
-Next patch
+Local applied receipt
+Explicit Next, Check, or Stop
+Next patch (only when requested)
 One local patch or completed goal summary
 ```
 
@@ -118,7 +127,107 @@ Cards stay anchored beside the source line and do not take focus. Use `<leader>p
 to jump to a finding or the first line of an inline draft, and `<leader>pr` to
 focus the current Pair card.
 
-The goal and accepted-step count stay visible on cards and editable drafts. `Next patch` continues the same goal and must return either one local patch or a completed-goal summary; it does not restart discovery.
+The goal and accepted-step count stay visible on cards and editable drafts. After
+accepting a patch, Pair shows a local receipt without calling the agent again.
+`Next` explicitly continues the same goal and must return either one local patch
+or a completed-goal summary; it does not restart discovery. This keeps the user
+in control and avoids spending an entire model turn merely to ask whether to
+continue.
+
+## Context optimization
+
+Pair builds a small ranked context bundle before calling an agent. The current
+buffer around the cursor remains the source of truth for editable patches. Extra
+project fragments are selected deterministically from:
+
+- definitions, declarations, type definitions and implementations reported by
+  active Neovim LSP clients,
+- diagnostics published through `vim.diagnostic`, including diagnostics exposed
+  by tools such as rust-analyzer and clippy,
+- direct and two-hop import/module dependencies,
+- symbol definitions and references matching the prompt, selection and cursor,
+- prompt-driven workspace symbols from the user's attached language servers,
+- related tests.
+
+Generated directories, VCS metadata, dependency vendors and large or binary
+files are excluded. Source-like templates and assets (including HTML, CSS,
+Askama/Jinja/Handlebars/Tera/Twig templates, Astro and GraphQL) are indexed too.
+An exact prompt path or basename receives the strongest deterministic signal;
+rare compound identifiers such as `preview_html` are favored while terms found
+throughout the repository are down-ranked. Candidates below
+`min_artifact_score` are omitted. The project index is incremental, cached in the `paird`
+process and invalidated after an applied Pair patch. Ranked fragments are packed
+into a hard token budget; candidates which do not fit are omitted.
+
+Cursor LSP queries and prompt-driven `workspace/symbol` queries share small,
+configurable deadlines. Results outside the project root are discarded and
+duplicate locations from multiple language servers or methods are merged. This
+lets existing clients such as typescript-language-server, Angular LS, gopls,
+Intelephense and rust-analyzer act as a cheap semantic index. Diagnostics from
+clippy remain available through `vim.diagnostic`.
+
+Codex app-server threads also fingerprint their supplied context. An unchanged
+buffer and unchanged ranked fragments are referenced from the preceding turn
+instead of being sent again. Stateless generic and stdio backends continue to
+receive a complete compact bundle. Contract retries reuse the current Codex
+thread, but accepting a patch rotates the patch thread before the next local
+step so accumulated conversation history does not grow without bound.
+
+The defaults can be overridden during setup:
+
+```lua
+require("pair").setup({
+  prompt = {
+    -- Prompt and reply windows stay above Pair cards.
+    zindex = 200,
+  },
+  context = {
+    before = 24,
+    after = 24,
+    optimization = {
+      enabled = true,
+      total_token_budget = 2400,
+      reserved_tokens = 700,
+      primary_token_budget = 1000,
+      max_artifacts = 4,
+      snippet_lines = 10,
+      max_scan_files = 2000,
+      max_file_bytes = 524288,
+      cache_ttl_ms = 1500,
+      min_artifact_score = 40,
+      exclude = { "generated", "fixtures/large" },
+    },
+    lsp = {
+      enabled = true,
+      -- This is one total deadline shared by every active client and method.
+      timeout_ms = 120,
+      max_locations = 16,
+      workspace_timeout_ms = 120,
+      max_workspace_queries = 3,
+      definition = true,
+      declaration = true,
+      type_definition = true,
+      implementation = true,
+      -- References can be expensive and numerous, so they are opt-in.
+      references = false,
+      workspace_symbols = true,
+    },
+  },
+})
+```
+
+Each card shows the used context budget and selected fragment count. The JSONL
+trace contains a `context_optimization` event with cache statistics, ranked
+candidates, scores and selection decisions. It does not add those statistics to
+the agent prompt.
+
+Choosing `Fix` on a card first moves the source context to the card's
+`next_move` (falling back to evidence/location), then captures the next request.
+The patch agent therefore receives the recommended consumer or template instead
+of the file where discovery happened.
+
+The future optional classical-ML ranking design is documented in [`ml.md`](ml.md).
+The current implementation does not train or run an ML model.
 
 ## Commands
 
@@ -140,7 +249,12 @@ The goal and accepted-step count stay visible on cards and editable drafts. `Nex
 :PairModel
 ```
 
-`:PairLog` prints the current JSONL session trace. It records the backend command and protocol handshake, complete RPC requests/responses, progress events, cards, goals, token usage, and backend errors.
+`:PairLog` prints the current JSONL session trace. It records the backend command
+and protocol handshake, complete RPC requests/responses, progress events, cards,
+goals, token usage, and backend errors. Every completed backend turn also emits
+an `agent_attempts` event. Each attempt records its accepted/retry/rejected
+outcome, exact retry reason, per-attempt token usage and compact tool activity;
+failed contract attempts include the rejected candidate card for diagnosis.
 
 The default trace location is:
 

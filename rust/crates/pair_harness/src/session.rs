@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use pair_protocol::{
-    Card, ContextBundle, Cursor, Location, Mode, ObservationProgress, PatchId, Selection,
-    StartSessionParams, TokenUsage,
+    Card, ContextBundle, ContextPolicy, Cursor, Location, Mode, ObservationProgress, PatchId,
+    Selection, StartSessionParams, TokenUsage,
 };
 use uuid::Uuid;
 
@@ -31,6 +31,7 @@ pub struct Session {
     pub state: SessionState,
     pub context: ContextBundle,
     pub token_usage: TokenUsage,
+    pub context_policy: ContextPolicy,
 }
 
 impl Session {
@@ -56,6 +57,7 @@ impl Session {
             state: SessionState::Thinking,
             context,
             token_usage: TokenUsage::default(),
+            context_policy: params.context_policy,
         }
     }
 

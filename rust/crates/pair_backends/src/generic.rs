@@ -72,7 +72,7 @@ impl GenericCliBackend {
                 "last": req.session.last_summary
             },
             "a": action_value(&req.action),
-            "ctx": req.context
+            "ctx": crate::backend_context(&req.context)
         });
 
         serde_json::to_string(&value).unwrap_or_default()
@@ -202,6 +202,8 @@ impl BackendAdapter for GenericCliBackend {
                     estimate_tokens(&prompt),
                     estimate_tokens(&stdout),
                 )),
+                activities: vec![],
+                attempts: vec![],
             },
         })
     }

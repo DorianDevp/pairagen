@@ -50,6 +50,7 @@ function M.start(text, mode, source)
     params = vim.deepcopy(source.value)
     params.prompt = text
     params.mode = mode or config.values.backend.mode
+    params.context_policy = vim.deepcopy(config.values.context.optimization)
   end
 
   state.source_buf = captured.buf
@@ -59,6 +60,8 @@ function M.start(text, mode, source)
     completed_steps = {},
     known_observations = {},
   }
+  state.workspace_hints = context.workspace_hints(text, params.cwd, captured.buf)
+  params.hints = context.merge_hints(params.hints, state.workspace_hints)
 
   rpc.request("session/start", params, function(message)
     if not thinking.current(request_id) then
@@ -78,6 +81,9 @@ function M.start(text, mode, source)
     state.goal = message.result.goal or state.goal
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.context_report = message.result.context_report
+    log.event("context_optimization", message.result.context_report or {})
+    log.event("agent_attempts", message.result.attempts or {})
     card.show(message.result.card)
   end)
 end
@@ -110,12 +116,16 @@ function M.action(action)
   ui.notify("Pair: " .. action)
   status.hide()
   local session_id = state.session_id
+  if action == "fix" and state.card then
+    M.focus_card_location(state.card)
+  end
+  local action_context = context.session()
   local request_id = thinking.start("Thinking", session_id)
 
   rpc.request("session/action", {
     session_id = session_id,
     action = action,
-    context = context.session(),
+    context = action_context,
   }, function(message)
     if not thinking.current(request_id) then
       return
@@ -138,9 +148,26 @@ function M.action(action)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.context_report = message.result.context_report
+    log.event("context_optimization", message.result.context_report or {})
+    log.event("agent_attempts", message.result.attempts or {})
     state.goal = message.result.goal or state.goal
     card.show(message.result.card)
   end)
+end
+
+function M.focus_card_location(active_card)
+  if not navigation.card_location(active_card) then
+    return false
+  end
+  local source_win = context.buffer_window(state.source_buf)
+  if source_win then
+    vim.api.nvim_set_current_win(source_win)
+  end
+  ui.close(state.card_win)
+  state.card_win = nil
+
+  return navigation.from_card(active_card)
 end
 
 function M.reply(text)
@@ -185,6 +212,9 @@ function M.reply(text)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.context_report = message.result.context_report
+    log.event("context_optimization", message.result.context_report or {})
+    log.event("agent_attempts", message.result.attempts or {})
     state.goal = message.result.goal or state.goal
     card.show(message.result.card)
   end)
@@ -283,6 +313,9 @@ function M.reset()
   state.diff_first_row = nil
   state.token_usage = nil
   state.turn_token_usage = nil
+  state.context_report = nil
+  state.workspace_hints = nil
+  state.completion_notified_card = nil
   state.thinking_request_id = nil
   state.thinking_session_id = nil
 
@@ -330,16 +363,24 @@ function M.model(name)
   end
 
   if name == "default" or name == "none" then
-    config.model("")
+    local _, saved, save_error = config.model("")
     rpc.stop()
-    ui.notify("Pair model: default")
+    if save_error then
+      ui.notify("Pair model: default (could not save: " .. save_error .. ")", vim.log.levels.WARN)
+    else
+      ui.notify("Pair model: default" .. (saved and " · saved" or ""))
+    end
 
     return nil
   end
 
-  config.model(name)
+  local _, saved, save_error = config.model(name)
   rpc.stop()
-  ui.notify("Pair model: " .. name)
+  if save_error then
+    ui.notify("Pair model: " .. name .. " (could not save: " .. save_error .. ")", vim.log.levels.WARN)
+  else
+    ui.notify("Pair model: " .. name .. (saved and " · saved" or ""))
+  end
 
   return name
 end

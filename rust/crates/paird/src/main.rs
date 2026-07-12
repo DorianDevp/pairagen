@@ -255,6 +255,8 @@ async fn print_mock_session() -> Result<()> {
         buffer_text: String::new(),
         buffer_start_line: 1,
         diagnostics: vec![],
+        hints: vec![],
+        context_policy: Default::default(),
     };
     let start = engine.start(params).await?;
     let patch = engine

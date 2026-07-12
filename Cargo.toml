@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "rust/crates/pair_backends",
+    "rust/crates/pair_context",
     "rust/crates/pair_harness",
     "rust/crates/pair_patch",
     "rust/crates/pair_protocol",

@@ -39,6 +39,8 @@ impl BackendAdapter for MockBackend {
                     estimate_tokens(&req.session.prompt),
                     estimate_tokens(&to_string(&card).unwrap_or_default()),
                 )),
+                activities: vec![],
+                attempts: vec![],
             },
             card,
             raw_output: None,

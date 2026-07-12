@@ -413,6 +413,9 @@ mod tests {
             buffer_text: "before\nold\nafter".into(),
             buffer_start_line: 50,
             diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
         };
 
         PatchValidator::validate_card_against_context(&card, &context).unwrap();
@@ -441,6 +444,9 @@ mod tests {
             buffer_text: "before\ncurrent\nafter".into(),
             buffer_start_line: 1,
             diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
         };
 
         let error = PatchValidator::validate_card_against_context(&card, &context).unwrap_err();
@@ -474,6 +480,9 @@ mod tests {
             buffer_text: "marker\nold\nafter".into(),
             buffer_start_line: 50,
             diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
         };
 
         PatchNormalizer::normalize_card(&mut card, &context).unwrap();
@@ -508,6 +517,9 @@ mod tests {
             buffer_text: "old\nbetween\nold".into(),
             buffer_start_line: 1,
             diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
         };
 
         let error = PatchNormalizer::normalize_card(&mut card, &context).unwrap_err();

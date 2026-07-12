@@ -1,0 +1,7 @@
+[package]
+name = "pair_context"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pair_protocol = { path = "../pair_protocol" }

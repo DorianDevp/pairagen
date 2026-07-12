@@ -91,6 +91,9 @@ pub struct StartSessionResult {
     pub goal: GoalProgress,
     pub token_usage: TokenUsage,
     pub turn_token_usage: TokenUsage,
+    pub context_report: Option<crate::ContextReport>,
+    #[serde(default)]
+    pub attempts: Vec<AgentAttempt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -116,6 +119,23 @@ pub struct ActionResult {
     pub goal: GoalProgress,
     pub token_usage: TokenUsage,
     pub turn_token_usage: TokenUsage,
+    pub context_report: Option<crate::ContextReport>,
+    #[serde(default)]
+    pub attempts: Vec<AgentAttempt>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentAttempt {
+    pub number: usize,
+    pub backend: String,
+    pub outcome: String,
+    pub token_usage: TokenUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_card: Option<Card>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activities: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

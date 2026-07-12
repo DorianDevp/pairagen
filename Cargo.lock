@@ -141,12 +141,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pair_context"
+version = "0.1.0"
+dependencies = [
+ "pair_protocol",
+]
+
+[[package]]
 name = "pair_harness"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "pair_backends",
+ "pair_context",
  "pair_patch",
  "pair_protocol",
  "thiserror",

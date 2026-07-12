@@ -345,6 +345,9 @@ function M.send(accepted, patch_ids, changed_files, error)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.context_report = message.result.context_report
+    log.event("context_optimization", message.result.context_report or {})
+    log.event("agent_attempts", message.result.attempts or {})
     state.goal = message.result.goal or state.goal
     require("pair.card").show(message.result.card)
   end)
