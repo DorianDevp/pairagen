@@ -46,7 +46,17 @@ function M.setup()
   end, { force = true })
 
   vim.api.nvim_create_user_command("PairLog", function()
-    print(require("pair.log").path())
+    local log = require("pair.log")
+    if require("pair.config").values.logging.enabled == false then
+      print("Pair logging is disabled")
+    else
+      print(log.path())
+    end
+  end, { force = true })
+
+  vim.api.nvim_create_user_command("PairLogClear", function()
+    require("pair.log").clear()
+    print("Pair session logs cleared")
   end, { force = true })
 
   vim.api.nvim_create_user_command("PairBackend", function()
