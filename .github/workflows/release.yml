@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Verify tag version
+        shell: bash
+        run: |
+          expected="v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          test "$GITHUB_REF_NAME" = "$expected"
+      - name: Build paird
+        run: cargo build --release --locked --target ${{ matrix.target }} -p paird
+      - name: Package paird
+        shell: bash
+        run: |
+          artifact="paird-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          staging="$(mktemp -d)"
+          cp "target/${{ matrix.target }}/release/paird" "$staging/paird"
+          cp LICENSE README.md "$staging/"
+          tar -C "$staging" -czf "$artifact" paird LICENSE README.md
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$artifact" > "$artifact.sha256"
+          else
+            shasum -a 256 "$artifact" > "$artifact.sha256"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: paird-${{ matrix.target }}
+          path: |
+            paird-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            paird-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Assemble checksums
+        run: cat dist/*.sha256 > dist/checksums.txt
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          prerelease=""
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease="--prerelease"
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz dist/checksums.txt \
+            --verify-tag \
+            --generate-notes \
+            --title "Pairagen $GITHUB_REF_NAME" \
+            $prerelease
