@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::process::Stdio;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -16,15 +17,24 @@ use crate::{
     BackendResponse, ProgressReporter, enforce_card_contract, estimate_tokens,
 };
 
+/// Keeps discovery and patch work on independent app-server processes. The
+/// split lets a speculative patch run while the user continues discovery,
+/// matching the phase-isolated process model used by the Claude adapter.
 pub struct CodexAppBackend {
     command: String,
     args: Vec<String>,
     model: Option<String>,
     effort: Option<String>,
-    state: Mutex<CodexAppState>,
+    discovery: Arc<Mutex<CodexAppState>>,
+    patch: Arc<Mutex<CodexAppState>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Phase {
+    Discovery,
+    Patch,
+}
+
 struct CodexAppState {
     process: Option<CodexAppProcess>,
     next_id: u64,
@@ -124,12 +134,15 @@ impl CodexAppBackend {
             args,
             model,
             effort,
-            state: Mutex::new(CodexAppState {
-                process: None,
-                next_id: 1,
-                threads: HashMap::new(),
-                context_fingerprints: HashMap::new(),
-            }),
+            discovery: Arc::new(Mutex::new(CodexAppState::default())),
+            patch: Arc::new(Mutex::new(CodexAppState::default())),
+        }
+    }
+
+    fn lane(&self, phase: Phase) -> Arc<Mutex<CodexAppState>> {
+        match phase {
+            Phase::Discovery => self.discovery.clone(),
+            Phase::Patch => self.patch.clone(),
         }
     }
 
@@ -137,6 +150,10 @@ impl CodexAppBackend {
         if state.process.is_some() {
             return Ok(());
         }
+
+        // Threads are ephemeral to one app-server process. Never carry their
+        // IDs or context cache into a replacement process after a crash.
+        state.clear_conversation();
 
         debug("starting codex app-server");
         let mut child = Command::new(command)
@@ -162,7 +179,7 @@ impl CodexAppBackend {
             stdout: BufReader::new(stdout).lines(),
         });
 
-        let _ = state
+        if let Err(error) = state
             .request(json!({
                 "method": "initialize",
                 "params": {
@@ -175,7 +192,11 @@ impl CodexAppBackend {
                     }
                 }
             }))
-            .await?;
+            .await
+        {
+            state.invalidate_process();
+            return Err(error);
+        }
         debug("codex app-server initialized");
 
         Ok(())
@@ -186,7 +207,7 @@ impl CodexAppBackend {
         req: &BackendRequest,
         model: &Option<String>,
     ) -> Result<String> {
-        let patch_turn = req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch);
+        let patch_turn = turn_phase(req) == Phase::Patch;
         let thread_key = thread_key(req);
 
         if let Some(thread_id) = state.threads.get(&thread_key) {
@@ -239,11 +260,40 @@ impl CodexAppBackend {
         progress: Option<&ProgressReporter>,
     ) -> Result<TurnOutput> {
         report_progress(progress, &req.session.id, "starting", "Starting Codex");
-        let mut state = self.state.lock().await;
+        let lane = self.lane(turn_phase(req));
+        let mut state = lane.lock().await;
 
-        Self::ensure(&mut state, &self.command, &self.args).await?;
+        let first = self.ask_once(&mut state, req, progress).await;
+        let Err(first_error) = first else {
+            return first;
+        };
+        if state.process.is_some() {
+            return Err(first_error);
+        }
 
-        let thread_id = Self::thread_id(&mut state, req, &self.model).await?;
+        // Transport failure invalidates the whole lane. Retry once on a fresh
+        // app-server; invalidation cleared the old thread IDs and fingerprints,
+        // so this attempt necessarily sends the complete source context.
+        report_progress(
+            progress,
+            &req.session.id,
+            "restarting",
+            "Restarting the Codex session",
+        );
+        self.ask_once(&mut state, req, progress)
+            .await
+            .map_err(|retry| anyhow!("codex connection failed: {first_error}; retry: {retry}"))
+    }
+
+    async fn ask_once(
+        &self,
+        state: &mut CodexAppState,
+        req: &BackendRequest,
+        progress: Option<&ProgressReporter>,
+    ) -> Result<TurnOutput> {
+        Self::ensure(state, &self.command, &self.args).await?;
+
+        let thread_id = Self::thread_id(state, req, &self.model).await?;
         let fingerprint = context_fingerprint(req);
         let include_context = state.context_fingerprints.get(&thread_id) != Some(&fingerprint);
         state
@@ -297,6 +347,13 @@ impl CodexAppBackend {
         state.read_turn(&turn_id, &req.session.id, progress).await
     }
 
+    async fn warm_up(&self) -> Result<()> {
+        let lane = self.lane(Phase::Discovery);
+        let mut state = lane.lock().await;
+
+        Self::ensure(&mut state, &self.command, &self.args).await
+    }
+
     fn error_card(message: impl Into<String>) -> Card {
         Card::Error(ErrorCard {
             id: "c_codex_app_error".into(),
@@ -307,8 +364,18 @@ impl CodexAppBackend {
     }
 }
 
+fn turn_phase(req: &BackendRequest) -> Phase {
+    if req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch)
+        || req.card_contract.allow_goal_completion
+    {
+        Phase::Patch
+    } else {
+        Phase::Discovery
+    }
+}
+
 fn thread_key(req: &BackendRequest) -> String {
-    let patch_turn = req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch);
+    let patch_turn = turn_phase(req) == Phase::Patch;
     format!(
         "{}:{}:{}",
         req.session.id,
@@ -327,7 +394,28 @@ impl Drop for CodexAppProcess {
     }
 }
 
+impl Default for CodexAppState {
+    fn default() -> Self {
+        Self {
+            process: None,
+            next_id: 1,
+            threads: HashMap::new(),
+            context_fingerprints: HashMap::new(),
+        }
+    }
+}
+
 impl CodexAppState {
+    fn clear_conversation(&mut self) {
+        self.threads.clear();
+        self.context_fingerprints.clear();
+    }
+
+    fn invalidate_process(&mut self) {
+        self.process = None;
+        self.clear_conversation();
+    }
+
     fn next_request_id(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -338,15 +426,8 @@ impl CodexAppState {
         let id = self.next_request_id();
         request["id"] = json!(id);
 
-        let process = self
-            .process
-            .as_mut()
-            .ok_or_else(|| anyhow!("codex app-server process unavailable"))?;
         let line = serde_json::to_string(&request)?;
-
-        process.stdin.write_all(line.as_bytes()).await?;
-        process.stdin.write_all(b"\n").await?;
-        process.stdin.flush().await?;
+        self.send_line(&line).await?;
 
         loop {
             let message = self.next_message().await?;
@@ -447,16 +528,24 @@ impl CodexAppState {
     }
 
     async fn next_message(&mut self) -> Result<Value> {
-        let process = self
-            .process
-            .as_mut()
-            .ok_or_else(|| anyhow!("codex app-server process unavailable"))?;
-
         loop {
-            let Some(line) = process.stdout.next_line().await? else {
-                self.process = None;
-
-                return Err(anyhow!("codex app-server closed stdout"));
+            let result = {
+                let process = self
+                    .process
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("codex app-server process unavailable"))?;
+                process.stdout.next_line().await
+            };
+            let line = match result {
+                Ok(Some(line)) => line,
+                Ok(None) => {
+                    self.invalidate_process();
+                    return Err(anyhow!("codex app-server closed stdout"));
+                }
+                Err(error) => {
+                    self.invalidate_process();
+                    return Err(error.into());
+                }
             };
 
             if line.trim().is_empty() {
@@ -465,6 +554,27 @@ impl CodexAppState {
 
             return Ok(serde_json::from_str(&line)?);
         }
+    }
+
+    async fn send_line(&mut self, line: &str) -> Result<()> {
+        let result = async {
+            let process = self
+                .process
+                .as_mut()
+                .ok_or_else(|| anyhow!("codex app-server process unavailable"))?;
+            process.stdin.write_all(line.as_bytes()).await?;
+            process.stdin.write_all(b"\n").await?;
+            process.stdin.flush().await?;
+
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
+            self.invalidate_process();
+        }
+
+        result
     }
 
     async fn handle_server_request(&mut self, message: &Value) -> Result<bool> {
@@ -500,15 +610,8 @@ impl CodexAppState {
 
         debug(&format!("handled codex server request {method}"));
 
-        let process = self
-            .process
-            .as_mut()
-            .ok_or_else(|| anyhow!("codex app-server process unavailable"))?;
         let line = serde_json::to_string(&response)?;
-
-        process.stdin.write_all(line.as_bytes()).await?;
-        process.stdin.write_all(b"\n").await?;
-        process.stdin.flush().await?;
+        self.send_line(&line).await?;
 
         Ok(true)
     }
@@ -548,6 +651,10 @@ impl BackendAdapter for CodexAppBackend {
         })
     }
 
+    async fn warmup(&self) -> Result<()> {
+        self.warm_up().await
+    }
+
     fn capabilities(&self) -> BackendInfo {
         BackendInfo {
             name: "codex_app".into(),
@@ -561,7 +668,7 @@ impl BackendAdapter for CodexAppBackend {
 }
 
 fn prompt(req: &BackendRequest, include_context: bool) -> String {
-    let patch_turn = req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch);
+    let patch_turn = turn_phase(req) == Phase::Patch;
     let continuation = req.card_contract.allow_goal_completion;
     let turn_rules = if continuation {
         format!(
@@ -1321,6 +1428,47 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn routes_discovery_and_patch_turns_to_separate_phases() {
+        let mut request = request();
+        assert_eq!(turn_phase(&request), Phase::Discovery);
+
+        request.card_contract.expected_kind = Some(pair_protocol::CardKind::Patch);
+        assert_eq!(turn_phase(&request), Phase::Patch);
+
+        request.card_contract.expected_kind = None;
+        request.card_contract.allow_goal_completion = true;
+        assert_eq!(turn_phase(&request), Phase::Patch);
+        assert_eq!(thread_key(&request), "s_1:patch:0");
+    }
+
+    #[tokio::test]
+    async fn discovery_and_patch_lanes_do_not_share_a_turn_lock() {
+        let backend = CodexAppBackend::new("unused", vec![], None, None);
+        let discovery = backend.lane(Phase::Discovery);
+        let patch = backend.lane(Phase::Patch);
+
+        assert!(!Arc::ptr_eq(&discovery, &patch));
+        let _discovery_guard = discovery.lock().await;
+        let patch_guard =
+            tokio::time::timeout(std::time::Duration::from_millis(50), patch.lock()).await;
+
+        assert!(patch_guard.is_ok(), "patch lane waited on discovery lane");
+    }
+
+    #[test]
+    fn invalidating_a_process_discards_ephemeral_thread_state() {
+        let mut state = CodexAppState::default();
+        state.threads.insert("key".into(), "thread".into());
+        state.context_fingerprints.insert("thread".into(), 42);
+
+        state.invalidate_process();
+
+        assert!(state.process.is_none());
+        assert!(state.threads.is_empty());
+        assert!(state.context_fingerprints.is_empty());
     }
 
     #[test]
