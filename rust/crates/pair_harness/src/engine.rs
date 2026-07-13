@@ -328,7 +328,11 @@ impl Engine {
 
         if result.accepted {
             let completed_steps = completed_patch_steps(session);
+            let completed_step_signatures = completed_patch_signatures(session);
             session.completed_steps.extend(completed_steps);
+            session
+                .completed_step_signatures
+                .extend(completed_step_signatures);
             session.accepted_patches.extend(result.patch_ids.clone());
             session.state = SessionState::Summary;
             session.goal_status = pair_protocol::GoalStatus::NeedsReview;
@@ -568,6 +572,40 @@ impl Engine {
                     }
                     action = BackendAction::ContractRetry(format!(
                         "{reason}. Return a distinct next observation; do not repeat known findings or signals."
+                    ));
+                    attempt += 1;
+                    continue;
+                }
+
+                let mut rejected = duplicate_failure_response(session, reason);
+                rejected.metadata.token_usage = token_usage;
+                rejected.metadata.attempts = attempts;
+                return rejected;
+            }
+
+            if let Some(reason) = duplicate_completed_step(session, &response.card) {
+                attempts.push(agent_attempt(
+                    attempt + 1,
+                    &response,
+                    if attempt < 2 {
+                        "duplicate_step_retry"
+                    } else {
+                        "rejected"
+                    },
+                    Some(reason.clone()),
+                    attempt_usage,
+                    true,
+                ));
+                if attempt < 2 {
+                    if let Some(progress) = &progress {
+                        progress(BackendProgress {
+                            session_id: session.id.clone(),
+                            phase: "deduplicating".into(),
+                            message: "Rejecting a repeated patch step".into(),
+                        });
+                    }
+                    action = BackendAction::ContractRetry(format!(
+                        "{reason}. Draft a materially different unresolved requirement. Do not merely rename, extract, or rephrase the accepted step. If this location is already resolved, return open_location for the actual next target or deny instead of inventing another patch here."
                     ));
                     attempt += 1;
                     continue;
@@ -900,6 +938,55 @@ fn duplicate_observation(session: &Session, card: &Card) -> Option<(String, Stri
         .observation_index
         .contains_key(&key)
         .then(|| (key, "backend repeated a retained observation".into()))
+}
+
+fn duplicate_completed_step(session: &Session, card: &Card) -> Option<String> {
+    let Card::Patch(card) = card else {
+        return None;
+    };
+
+    card.patches.iter().find_map(|patch| {
+        let candidate = normalize_step(&patch.explanation);
+        session
+            .completed_step_signatures
+            .iter()
+            .filter(|(file, _)| file == &patch.file)
+            .find(|(_, completed)| step_similarity(completed, &candidate) >= 0.72)
+            .map(|_| {
+                format!(
+                    "backend proposed a patch semantically overlapping an accepted step in {}",
+                    patch.file.display()
+                )
+            })
+    })
+}
+
+fn normalize_step(text: &str) -> String {
+    const STOP_WORDS: &[&str] = &[
+        "add", "adds", "and", "dla", "dodaje", "do", "for", "from", "into", "oraz", "the", "this",
+        "that", "to", "use", "uses", "with", "zmienia",
+    ];
+
+    normalize_observation(text)
+        .split_whitespace()
+        .filter(|word| word.chars().count() > 2 && !STOP_WORDS.contains(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn step_similarity(left: &str, right: &str) -> f32 {
+    let left = left
+        .split_whitespace()
+        .collect::<std::collections::HashSet<_>>();
+    let right = right
+        .split_whitespace()
+        .collect::<std::collections::HashSet<_>>();
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+
+    let shared = left.intersection(&right).count() as f32;
+    shared / left.len().min(right.len()) as f32
 }
 
 fn prepare_observation_card(session: &mut Session, card: &mut Card) {
@@ -1281,6 +1368,17 @@ fn completed_patch_steps(session: &Session) -> Vec<String> {
         .collect()
 }
 
+fn completed_patch_signatures(session: &Session) -> Vec<(std::path::PathBuf, String)> {
+    let Some(Card::Patch(card)) = session.cards.last() else {
+        return vec![];
+    };
+
+    card.patches
+        .iter()
+        .map(|patch| (patch.file.clone(), normalize_step(&patch.explanation)))
+        .collect()
+}
+
 fn rejected_card(
     session: &Session,
     received: &Card,
@@ -1480,6 +1578,30 @@ mod tests {
             artifacts: vec![],
             report: None,
         }
+    }
+
+    #[test]
+    fn detects_rephrased_completed_patch_in_the_same_file() {
+        let mut session = Session::new(params());
+        session.completed_step_signatures.push((
+            PathBuf::from("src/work.ts"),
+            normalize_step("Extract payload validation into a local helper"),
+        ));
+        let card = Card::Patch(PatchCard {
+            id: "c_repeat".into(),
+            title: "Extract validation".into(),
+            explanation: "Keep validation local.".into(),
+            warnings: vec![],
+            patches: vec![FilePatch {
+                id: "p_repeat".into(),
+                file: PathBuf::from("src/work.ts"),
+                diff: "@@ -1,1 +1,1 @@\n-old\n+new\n".into(),
+                explanation: "Extract the local helper used for payload validation".into(),
+            }],
+            actions: vec![Action::Apply],
+        });
+
+        assert!(duplicate_completed_step(&session, &card).is_some());
     }
 
     #[tokio::test]
