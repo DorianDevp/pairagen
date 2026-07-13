@@ -1,6 +1,8 @@
+pub mod claude_app;
 pub mod codex_app;
 pub mod generic;
 pub mod mock;
+pub mod ollama;
 pub mod stdio_agent;
 pub mod stream;
 
@@ -15,9 +17,11 @@ use pair_protocol::{
 use serde::Serialize;
 use serde_json::json;
 
+pub use claude_app::*;
 pub use codex_app::*;
 pub use generic::*;
 pub use mock::*;
+pub use ollama::*;
 pub use stdio_agent::*;
 pub use stream::*;
 
@@ -195,6 +199,36 @@ pub struct SessionSnapshot {
     pub card_count: usize,
     pub last_card: Option<Card>,
     pub last_summary: Option<String>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_request() -> BackendRequest {
+    BackendRequest {
+        session: SessionSnapshot {
+            id: "s_1".into(),
+            prompt: "payload is empty".into(),
+            completed_steps: vec![],
+            known_observations: vec![],
+            mode: Mode::Auto,
+            card_count: 0,
+            last_card: None,
+            last_summary: None,
+        },
+        action: BackendAction::Start,
+        context: ContextBundle {
+            cwd: "/tmp/project".into(),
+            file: "src/main.rs".into(),
+            cursor: pair_protocol::Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: "fn main() {}".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        },
+        card_contract: CardContract::default(),
+    }
 }
 
 #[cfg(test)]

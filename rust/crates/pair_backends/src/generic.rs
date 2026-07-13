@@ -33,7 +33,21 @@ impl GenericCliBackend {
     }
 
     fn prompt(&self, req: &BackendRequest) -> String {
-        let value = json!({
+        generic_prompt(req)
+    }
+
+    fn error_card(message: impl Into<String>) -> Card {
+        Card::Error(ErrorCard {
+            id: "c_backend_error".into(),
+            title: "Backend error".into(),
+            message: message.into(),
+            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+        })
+    }
+}
+
+pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
+    let value = json!({
             "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), deny(title,reason), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. error is only for technical failures. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
             "stream": {
                 "protocol": "ndjson",
@@ -71,21 +85,11 @@ impl GenericCliBackend {
                 "n": req.session.card_count,
                 "last": req.session.last_summary
             },
-            "a": action_value(&req.action),
-            "ctx": crate::backend_context(&req.context)
-        });
+        "a": action_value(&req.action),
+        "ctx": crate::backend_context(&req.context)
+    });
 
-        serde_json::to_string(&value).unwrap_or_default()
-    }
-
-    fn error_card(message: impl Into<String>) -> Card {
-        Card::Error(ErrorCard {
-            id: "c_backend_error".into(),
-            title: "Backend error".into(),
-            message: message.into(),
-            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
-        })
-    }
+    serde_json::to_string(&value).unwrap_or_default()
 }
 
 fn action_value(action: &crate::BackendAction) -> serde_json::Value {
@@ -244,7 +248,7 @@ fn backend_name(command: &str) -> String {
         .to_string()
 }
 
-fn parse_card(output: &str) -> Result<Card> {
+pub(crate) fn parse_card(output: &str) -> Result<Card> {
     if let Ok(card) = parse_json_card(output.trim()) {
         return Ok(card);
     }
@@ -266,7 +270,26 @@ fn parse_json_card(json: &str) -> Result<Card> {
         return Ok(op.into_card("c_agent"));
     }
 
-    Ok(serde_json::from_value(value)?)
+    match serde_json::from_value::<Card>(value.clone()) {
+        Ok(card) => Ok(card),
+        // Agents sometimes name the discriminator "kind" while otherwise
+        // emitting an op payload; retry the op parse under that reading.
+        Err(card_error) => match value.get("kind").cloned() {
+            Some(kind) => {
+                let mut value = value;
+                value["op"] = kind;
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("kind");
+                }
+
+                match serde_json::from_value::<AgentOp>(value) {
+                    Ok(op) => Ok(op.into_card("c_agent")),
+                    Err(op_error) => Err(op_error.into()),
+                }
+            }
+            None => Err(card_error.into()),
+        },
+    }
 }
 
 fn excerpt(output: &str) -> String {
@@ -357,8 +380,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_op_payload_with_kind_discriminator() {
+        let output = r#"{"kind":"hypothesis","title":"T","claim":"C","evidence":"src/work.ts:2 — no value returned"}"#;
+        let card = parse_card(output).unwrap();
+
+        let Card::Hypothesis(card) = card else {
+            panic!("expected hypothesis card");
+        };
+        assert_eq!(card.evidence.as_ref().unwrap().line, 2);
+    }
+
+    #[test]
     fn parses_deny_op() {
-        let output = r#"{"op":"deny","title":"Ambiguous prompt","reason":"Say which spec to write."}"#;
+        let output =
+            r#"{"op":"deny","title":"Ambiguous prompt","reason":"Say which spec to write."}"#;
         let card = parse_card(output).unwrap();
 
         assert!(matches!(card, Card::Deny(_)));

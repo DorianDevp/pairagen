@@ -48,6 +48,7 @@ pub enum AgentOp {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(from = "AgentLocationInput")]
 pub struct AgentLocation {
     pub file: PathBuf,
     pub line: usize,
@@ -55,6 +56,70 @@ pub struct AgentLocation {
     pub column: usize,
     #[serde(default)]
     pub annotation: Option<String>,
+}
+
+// Agents occasionally emit locations as "file:line[:column][ — note]" strings
+// instead of the location object; accept both so the op still parses.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AgentLocationInput {
+    Object {
+        file: PathBuf,
+        line: usize,
+        #[serde(default = "one")]
+        column: usize,
+        #[serde(default)]
+        annotation: Option<String>,
+    },
+    Text(String),
+}
+
+impl From<AgentLocationInput> for AgentLocation {
+    fn from(input: AgentLocationInput) -> Self {
+        match input {
+            AgentLocationInput::Object {
+                file,
+                line,
+                column,
+                annotation,
+            } => Self {
+                file,
+                line,
+                column,
+                annotation,
+            },
+            AgentLocationInput::Text(text) => parse_location_text(&text),
+        }
+    }
+}
+
+fn parse_location_text(text: &str) -> AgentLocation {
+    let (place, annotation) = [" — ", " – ", " - "]
+        .iter()
+        .find_map(|separator| text.split_once(separator))
+        .map(|(place, annotation)| (place.trim(), Some(annotation.trim().to_string())))
+        .unwrap_or((text.trim(), None));
+
+    let mut file = place;
+    let mut numbers = Vec::new();
+    while let Some((head, tail)) = file.rsplit_once(':') {
+        let Ok(number) = tail.parse::<usize>() else {
+            break;
+        };
+        if numbers.len() == 2 {
+            break;
+        }
+        numbers.push(number);
+        file = head;
+    }
+    numbers.reverse();
+
+    AgentLocation {
+        file: PathBuf::from(file),
+        line: numbers.first().copied().unwrap_or(1).max(1),
+        column: numbers.get(1).copied().unwrap_or(1).max(1),
+        annotation,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -263,6 +328,41 @@ fn one() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_location_given_as_string() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"hypothesis","title":"T","claim":"C","evidence":"src/work.ts:2:5 — the return has no value"}"#,
+        )
+        .unwrap();
+
+        let AgentOp::Hypothesis { evidence, .. } = op else {
+            panic!("expected hypothesis");
+        };
+        let evidence = evidence.unwrap();
+        assert_eq!(evidence.file, PathBuf::from("src/work.ts"));
+        assert_eq!(evidence.line, 2);
+        assert_eq!(evidence.column, 5);
+        assert_eq!(
+            evidence.annotation.as_deref(),
+            Some("the return has no value")
+        );
+    }
+
+    #[test]
+    fn parses_location_string_without_line() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"finding","title":"T","finding":"F","location":"src/work.ts"}"#,
+        )
+        .unwrap();
+
+        let AgentOp::Finding { location, .. } = op else {
+            panic!("expected finding");
+        };
+        let location = location.unwrap();
+        assert_eq!(location.file, PathBuf::from("src/work.ts"));
+        assert_eq!(location.line, 1);
+    }
 
     #[test]
     fn parses_choice_options_given_as_plain_strings() {

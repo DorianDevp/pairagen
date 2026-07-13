@@ -36,7 +36,7 @@ M.values = {
       args = { "dev", "stdio-agent" },
     },
     claude = {
-      kind = "generic",
+      kind = "claude_app",
       command = "claude",
       args = {},
     },
@@ -46,9 +46,9 @@ M.values = {
       args = {},
     },
     ["local"] = {
-      kind = "generic",
-      command = "ollama",
-      args = { "run", "qwen2.5-coder:7b" },
+      kind = "ollama",
+      model = "qwen2.5-coder:7b",
+      host = "http://127.0.0.1:11434",
     },
   },
   keymaps = {
@@ -313,6 +313,27 @@ function M.backend_env()
       PAIR_CODEX_ARGS_JSON = vim.json.encode(args),
       PAIR_CODEX_MODEL = agent.model or "",
       PAIR_CODEX_EFFORT = agent.effort or "low",
+    }
+  end
+
+  if agent.kind == "claude_app" then
+    local args = vim.deepcopy(agent.args or {})
+
+    return {
+      PAIR_BACKEND = "claude_app",
+      PAIR_CLAUDE_COMMAND = agent.command,
+      PAIR_CLAUDE_ARGS = table.concat(args, " "),
+      PAIR_CLAUDE_ARGS_JSON = vim.json.encode(args),
+      PAIR_CLAUDE_MODEL = agent.model or "",
+    }
+  end
+
+  if agent.kind == "ollama" then
+    return {
+      PAIR_BACKEND = "ollama",
+      PAIR_OLLAMA_MODEL = agent.model or "",
+      PAIR_OLLAMA_HOST = agent.host or "",
+      PAIR_OLLAMA_KEEP_ALIVE = agent.keep_alive or "",
     }
   end
 

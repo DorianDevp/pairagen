@@ -15,8 +15,9 @@ The editor experience stays the same.
 ## Status and compatibility
 
 Pairagen is beta software. It has been developed and tested primarily with the
-Codex CLI app-server backend. Generic CLI, stdio agent, and local model adapters
-are available, but currently receive less real-world testing than Codex.
+Codex CLI app-server backend. Persistent Claude CLI (stream-json), Ollama HTTP,
+generic CLI, and stdio agent adapters are available, but currently receive less
+real-world testing than Codex.
 
 Requirements:
 
@@ -36,6 +37,9 @@ Implemented capabilities include:
 - patch gate
 - mock backend
 - generic CLI backend
+- persistent Claude CLI backend (one stream-json process per session)
+- Ollama HTTP backend for local models (model stays loaded, JSON-forced output)
+- structured agent denial (`deny` op) rendered as a distinct card
 - deterministic token-budgeted project context with LSP hints and dependency ranking
 
 ## Installation

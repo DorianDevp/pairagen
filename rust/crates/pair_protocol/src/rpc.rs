@@ -21,6 +21,15 @@ impl TokenUsage {
         }
     }
 
+    pub fn reported(input: usize, output: usize) -> Self {
+        Self {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+            estimated: false,
+        }
+    }
+
     pub fn add(&mut self, other: &Self) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;

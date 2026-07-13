@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use pair_backends::{
-    BackendAdapter, CodexAppBackend, GenericCliBackend, MockBackend, ProgressReporter,
-    StdioAgentBackend,
+    BackendAdapter, ClaudeAppBackend, CodexAppBackend, GenericCliBackend, MockBackend,
+    OllamaBackend, ProgressReporter, StdioAgentBackend,
 };
 use pair_harness::Engine;
 use pair_protocol::{
@@ -53,6 +53,8 @@ async fn serve_stdio() -> Result<()> {
 fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
     match std::env::var("PAIR_BACKEND").as_deref() {
         Ok("codex_app") | Ok("codex") => Ok(Arc::new(CodexAppBackend::from_env()?)),
+        Ok("claude_app") | Ok("claude") => Ok(Arc::new(ClaudeAppBackend::from_env()?)),
+        Ok("ollama") => Ok(Arc::new(OllamaBackend::from_env()?)),
         Ok("agent") | Ok("agent_stdio") => Ok(Arc::new(StdioAgentBackend::from_env()?)),
         Ok("generic") | Ok("generic_cli") => Ok(Arc::new(GenericCliBackend::from_env()?)),
         _ => Ok(Arc::new(MockBackend)),
