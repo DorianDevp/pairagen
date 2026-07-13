@@ -112,7 +112,7 @@ state.goal = nil
 state.details_expanded = false
 
 local installer = require("pair.installer")
-assert(installer.artifact("x86_64-unknown-linux-musl") == "paird-v0.1.0-x86_64-unknown-linux-musl.tar.gz")
+assert(installer.artifact("x86_64-unknown-linux-musl") == "paird-v0.2.0-x86_64-unknown-linux-musl.tar.gz")
 
 local log = require("pair.log")
 local sanitized = log.sanitize({ buffer_text = "secret source", event = "kept" })

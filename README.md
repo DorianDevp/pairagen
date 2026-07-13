@@ -30,10 +30,10 @@ Implemented capabilities include:
 
 - Neovim labeled textarea prompt, card, navigation, annotation, diff, apply and reject UI
 - thinking spinner, resume and reset controls
-- session token usage and local error log
+- raw, cached, and non-cached session token usage plus a local error log
 - JSON-RPC over stdio
 - Rust session harness
-- one-card state machine
+- continuous goal state machine with local hunk-by-hunk review
 - patch gate
 - mock backend
 - generic CLI backend
@@ -158,16 +158,16 @@ and returns that agent to its own default.
 <leader>a
 Prompt
 Persistent agent goal
-Agent inspects the project and chooses the next edit
+Agent inspects the project and prepares the complete multi-file change
 One local editable hunk
 Edit the inline draft
 Accept, Reject, edit, message, or ask Why
 Why → explanation → Back to the same pending draft
-Accept → agent automatically continues the same goal
+Accept → advance to the next queued hunk without calling the agent
 Reject → agent automatically reworks the hunk
-Next file opens automatically inside the workspace
+Next file opens automatically inside the workspace without calling the agent
 Next editable hunk
-Repeat until completed-goal summary
+Repeat until completed-goal summary and local diagnostics check
 ```
 
 Cards stay anchored beside the source line and do not take focus. Use `<leader>pg`
@@ -176,10 +176,13 @@ focus the current Pair card. Long goals and draft explanations stay compact by
 default; press `z` while the card is focused to expand or collapse their full
 text (`keymaps.details` changes this key).
 
-When the running goal needs a different file, Pair opens that location
-automatically and resumes the same agent turn with its buffer. Automatic
-navigation is restricted to the current workspace; edits are still inert drafts
-until the user accepts the hunk.
+For a goal patch, Pair validates every returned file against its live editor
+buffer, queues the complete batch, and opens each location only when its hunk is
+ready for review. Navigation and acceptance are local operations and do not
+start another model turn. Automatic navigation is restricted to the current
+workspace; edits are still inert drafts until the user accepts each hunk. If
+the agent could not inspect a required file, `open_location` remains a fallback
+that supplies its buffer in a subsequent turn.
 
 By default the first card is whatever fits the prompt best: a hypothesis, a
 finding, or a clarifying choice when the prompt is ambiguous. Start the prompt
@@ -191,30 +194,36 @@ Unknown words after `/` are treated as normal prompt text, so paths like
 
 The goal and accepted-step count stay visible on cards and editable drafts. In
 the default `auto` mode the agent owns the complete process: it inspects the
-project and prepares the complete change for the current buffer in one turn.
-Pair then presents that result hunk by hunk; `Accept` advances locally without
+project and prepares the complete change across the required files in one turn.
+Pair then presents that batch hunk by hunk; `Accept` advances locally without
 another model call, and accepting the final complete hunk closes the goal
-locally. `Reject`, `Retry`, a required new file, or an explicit question can
-return control to the agent. User control is the hunk gate, not a repeated
-discovery/assess/draft ceremony. Asking `Why`
+locally. `Reject`, `Retry`, a file the agent could not inspect, or an explicit
+question can return control to the agent. User control is the hunk gate, not a
+repeated discovery/assess/draft ceremony. Asking `Why`
 opens a side conversation about the pending hunk and then returns to that exact
 draft without advancing or replacing it. Explicit
 `/{kind}` prompts and investigate/explain/review modes remain available for
 one-card workflows.
 
+When the goal completes, Pair automatically checks error-level diagnostics in
+the changed, loaded buffers after a short delay. `Check` repeats the same local
+operation without spending model tokens, saving buffers, or running shell test
+commands.
+
 Speculative patch prefetch is off by default because an unused draft still costs
 a full model turn. Set `backend.prefetch = "fix"` only when that latency/cost
 tradeoff is intentional.
 
-Cards show cumulative usage against `backend.token_budget` (50,000 by default).
+Cards show raw, cached, and non-cached turn and session usage against
+`backend.token_budget` (50,000 raw tokens by default).
 After the budget is reached, Pair asks before every additional agent turn; local
 navigation, patch review/apply, and stopping remain immediate. Set the budget to
 `0` to disable this guard.
 
 ## Context optimization
 
-Pair builds a small ranked context bundle before calling an agent. The current
-buffer around the cursor remains the source of truth for editable patches. Extra
+Pair builds a small ranked context bundle before calling an agent. Live editor
+buffers remain the source of truth when validating editable patches. Extra
 project fragments are selected deterministically from:
 
 - definitions, declarations, type definitions and implementations reported by
@@ -247,8 +256,8 @@ Codex app-server threads also fingerprint their supplied context. An unchanged
 buffer and unchanged ranked fragments are referenced from the preceding turn
 instead of being sent again. Stateless generic and stdio backends continue to
 receive a complete compact bundle. Contract retries reuse the current Codex
-thread, but accepting a patch rotates the patch thread before the next local
-step so accumulated conversation history does not grow without bound.
+thread. Reviewing queued hunks is entirely local, so it does not extend the
+agent conversation or resend the goal context.
 
 The defaults can be overridden during setup:
 

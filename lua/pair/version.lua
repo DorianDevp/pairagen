@@ -1,4 +1,4 @@
 return {
-  plugin = "0.1.0",
+  plugin = "0.2.0",
   protocol = 7,
 }

@@ -379,7 +379,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "pair_backends"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -392,14 +392,14 @@ dependencies = [
 
 [[package]]
 name = "pair_context"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pair_protocol",
 ]
 
 [[package]]
 name = "pair_harness"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "pair_patch"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "pair_protocol",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "pair_protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "paird"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "pair_backends",
