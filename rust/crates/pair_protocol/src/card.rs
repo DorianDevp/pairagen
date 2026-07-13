@@ -143,6 +143,10 @@ pub struct DenyCard {
     pub id: CardId,
     pub title: String,
     pub reason: String,
+    // Where the agent needs the editor to be before it can proceed; the
+    // editor offers to jump there and retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
     pub actions: Vec<Action>,
 }
 

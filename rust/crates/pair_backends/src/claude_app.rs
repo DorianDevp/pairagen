@@ -23,12 +23,13 @@ The discriminator field is named "op". Allowed ops, with exact shapes:
 - {"op":"finding","title":string,"finding":string,"location":LOC|null,"annotation":string|null}
 - {"op":"patch","title":string,"explanation":string,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}]}
 - {"op":"choice","title":string,"question":string,"options":[{"id":string,"label":string,"action":string}]}
-- {"op":"deny","title":string,"reason":string}
+- {"op":"deny","title":string,"reason":string,"location":LOC|null}
 - {"op":"summary","title":string,"summary":string,"changed_files":[string]}
 - {"op":"error","title":string,"message":string}
 LOC is an object {"file":string,"line":int,"column":int,"annotation":string|null} with 1-based line and column; never a plain string.
 choice option action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop.
 Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. error is only for technical failures.
+If you can only proceed from a different file or location — for example the change belongs in another file than the supplied buffer — deny IMMEDIATELY with location set to that exact place instead of attempting a patch; the editor offers a one-key jump there and retries. Never draft a patch against a file that is not the supplied buffer.
 limits.expected, when set, names the op you must return (deny is always allowed instead; a clarifying choice is also accepted for hypothesis and finding). When limits.expected is null, choose whichever op fits best and ask via choice when the request is ambiguous.
 Patch only for fix actions. patch.diff must be unified diff hunks starting with @@ against the supplied buffer.
 A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Never plan or complete a whole refactor in one response.

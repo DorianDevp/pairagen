@@ -521,7 +521,7 @@ impl Engine {
                         });
                     }
                     action = BackendAction::ContractRetry(format!(
-                        "The previous card failed the local patch contract: {detail}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card."
+                        "The previous card failed the local patch contract: {detail}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card. If the change belongs in a different file than the supplied buffer, return a deny op with location set to that place instead of another patch."
                     ));
                     continue;
                 }
@@ -1037,6 +1037,14 @@ fn validate_one_card(card: &Card) -> Result<()> {
         Card::Deny(card) => {
             require_text("card title", &card.title)?;
             require_text("deny reason", &card.reason)?;
+            if let Some(location) = &card.location {
+                validate_location(
+                    &location.file,
+                    location.line,
+                    location.column,
+                    "deny location",
+                )?;
+            }
         }
         Card::Summary(card) => {
             require_text("card title", &card.title)?;

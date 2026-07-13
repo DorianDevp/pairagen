@@ -1124,11 +1124,12 @@ fn summary_schema() -> Value {
 
 fn deny_schema() -> Value {
     object_schema(
-        &["op", "title", "reason"],
+        &["op", "title", "reason", "location"],
         json!({
             "op": {"type": "string", "enum": ["deny"]},
             "title": {"type": "string"},
-            "reason": {"type": "string"}
+            "reason": {"type": "string"},
+            "location": nullable_location_schema()
         }),
     )
 }

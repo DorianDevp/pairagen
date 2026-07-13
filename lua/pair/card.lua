@@ -255,6 +255,10 @@ function M.actions(card)
     table.insert(parts, M.hint(config.values.keymaps.go_to, "Go to line"))
   end
 
+  if card.kind == "deny" and type(card.location) == "table" then
+    table.insert(parts, M.hint("o", "Open & retry"))
+  end
+
   for _, action in ipairs(actions) do
     local name = type(action) == "table" and "apply_patch" or action
     local label = labels[name]
@@ -300,6 +304,12 @@ function M.bind(buf, card)
   vim.keymap.set("n", "g", function()
     require("pair").go_to()
   end, { buffer = buf, nowait = true, silent = true })
+
+  if card.kind == "deny" and type(card.location) == "table" then
+    vim.keymap.set("n", "o", function()
+      require("pair").open_and_retry()
+    end, { buffer = buf, nowait = true, silent = true })
+  end
 
   for _, action in ipairs(actions) do
     local name = type(action) == "table" and "apply" or action

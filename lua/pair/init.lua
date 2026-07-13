@@ -249,6 +249,25 @@ function M.resume()
   ui.notify("No Pair card to restore", vim.log.levels.WARN)
 end
 
+-- One-key continuation for a deny card that names a location: jump there, so
+-- the next context capture sees that buffer, then retry the denied step.
+function M.open_and_retry()
+  local active_card = state.card
+  if not (active_card and active_card.kind == "deny" and type(active_card.location) == "table") then
+    ui.notify("No location on this card", vim.log.levels.WARN)
+    return
+  end
+
+  if not navigation.open_location(active_card.location) then
+    ui.notify("Could not open " .. tostring(active_card.location.file), vim.log.levels.ERROR)
+    return
+  end
+
+  ui.close(state.card_win)
+  state.card_win = nil
+  M.action("retry")
+end
+
 function M.go_to()
   if state.card and state.card.kind == "patch" and require("pair.diff").focus_change() then
     return

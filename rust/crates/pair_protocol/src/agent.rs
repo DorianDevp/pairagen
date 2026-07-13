@@ -35,6 +35,8 @@ pub enum AgentOp {
     Deny {
         title: String,
         reason: String,
+        #[serde(default)]
+        location: Option<AgentLocation>,
     },
     Summary {
         title: String,
@@ -250,10 +252,15 @@ impl AgentOp {
                     .map(|(index, option)| option.choice(index + 1))
                     .collect(),
             }),
-            Self::Deny { title, reason } => Card::Deny(DenyCard {
+            Self::Deny {
+                title,
+                reason,
+                location,
+            } => Card::Deny(DenyCard {
                 id,
                 title,
                 reason,
+                location: location.map(AgentLocation::location),
                 actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
             }),
             Self::Summary {
@@ -413,6 +420,22 @@ mod tests {
             card.actions,
             vec![Action::Retry, Action::EditPrompt, Action::Stop]
         );
+    }
+
+    #[test]
+    fn maps_deny_location_for_editor_navigation() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"deny","title":"Wrong buffer","reason":"Open the component file first.","location":{"file":"libs/app/util/src/lib/vw-icon-button.component.ts","line":12,"column":1}}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::Deny(card) = card else {
+            panic!("expected deny card");
+        };
+        let location = card.location.expect("deny location");
+        assert_eq!(location.line, 12);
+        assert!(location.file.ends_with("vw-icon-button.component.ts"));
     }
 
     #[test]
