@@ -48,7 +48,7 @@ impl GenericCliBackend {
 
 pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     let value = json!({
-            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), deny(title,reason), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. error is only for technical failures. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
+            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), deny(title,reason), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. error is only for technical failures. limits.expected, when set, is the required op (deny always allowed; choice also allowed for hypothesis/finding); when null, choose the best fitting op and ask via choice when ambiguous. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
             "stream": {
                 "protocol": "ndjson",
                 "progress": {"t": "pair_progress", "phase": "short phase", "message": "short user-visible activity summary"},
@@ -74,7 +74,8 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
                 "patch_files": req.card_contract.max_patch_files,
                 "hunks_per_patch": req.card_contract.max_hunks_per_patch,
                 "changed_lines": req.card_contract.max_changed_lines,
-                "goal_completion": req.card_contract.allow_goal_completion
+                "goal_completion": req.card_contract.allow_goal_completion,
+                "expected": req.card_contract.expected_kind
             },
             "s": {
                 "id": req.session.id,

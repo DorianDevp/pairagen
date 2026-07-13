@@ -13,7 +13,7 @@ function M.open(mode)
 
   M.open_for({
     title = M.title("Prompt"),
-    footer = " Ctrl-s submit  Esc normal  q close ",
+    footer = " /kind forces card type  Ctrl-s submit  Esc normal  q close ",
     submit = function(text)
       require("pair").start(text, mode, source)
     end,

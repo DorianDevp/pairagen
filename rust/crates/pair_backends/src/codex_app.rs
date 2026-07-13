@@ -884,8 +884,76 @@ fn output_schema(req: &BackendRequest) -> Value {
         Some(pair_protocol::CardKind::Deny) => deny_schema(),
         Some(pair_protocol::CardKind::Summary) => summary_schema(),
         Some(pair_protocol::CardKind::Error) => error_schema(),
-        None => error_schema(),
+        None => any_op_schema(),
     }
+}
+
+/// Schema for turns without a demanded kind: the agent picks whichever op
+/// fits, including a clarifying choice or a deny. Mirrors
+/// schemas/pair-agent-op.schema.json (every field present, unused ones null).
+fn any_op_schema() -> Value {
+    object_schema(
+        &[
+            "op",
+            "title",
+            "claim",
+            "evidence",
+            "next",
+            "finding",
+            "location",
+            "annotation",
+            "explanation",
+            "patches",
+            "question",
+            "options",
+            "reason",
+            "summary",
+            "changed_files",
+            "message",
+        ],
+        json!({
+            "op": {"type": "string", "enum": ["hypothesis", "finding", "patch", "choice", "deny", "summary", "error"]},
+            "title": {"type": "string"},
+            "claim": {"type": ["string", "null"]},
+            "evidence": nullable_location_schema(),
+            "next": nullable_location_schema(),
+            "finding": {"type": ["string", "null"]},
+            "location": nullable_location_schema(),
+            "annotation": {"type": ["string", "null"]},
+            "explanation": {"type": ["string", "null"]},
+            "patches": {
+                "type": ["array", "null"],
+                "items": object_schema(
+                    &["id", "file", "diff", "explanation"],
+                    json!({
+                        "id": {"type": ["string", "null"]},
+                        "file": {"type": "string"},
+                        "diff": {"type": "string"},
+                        "explanation": {"type": "string"}
+                    })
+                )
+            },
+            "question": {"type": ["string", "null"]},
+            "options": {
+                "type": ["array", "null"],
+                "items": object_schema(
+                    &["id", "label", "action"],
+                    json!({
+                        "id": {"type": "string"},
+                        "label": {"type": "string"},
+                        "action": {
+                            "type": "string",
+                            "enum": ["follow", "why", "fix", "other_lead", "retry", "edit_prompt", "open", "run_check", "next", "stop"]
+                        }
+                    })
+                )
+            },
+            "reason": {"type": ["string", "null"]},
+            "summary": {"type": ["string", "null"]},
+            "changed_files": {"type": ["array", "null"], "items": {"type": "string"}},
+            "message": {"type": ["string", "null"]}
+        }),
+    )
 }
 
 fn goal_step_schema(contract: &crate::CardContract) -> Value {

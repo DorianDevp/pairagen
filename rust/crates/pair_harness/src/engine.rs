@@ -400,7 +400,7 @@ impl Engine {
             action,
             context,
             card_contract: CardContract {
-                expected_kind: Some(expected_kind),
+                expected_kind,
                 allow_goal_completion: matches!(expected, NextState::Continuation),
                 ..CardContract::default()
             },
@@ -1206,31 +1206,36 @@ fn expected_start_state(mode: &Mode) -> NextState {
     }
 }
 
+/// None means the agent may answer with whichever card kind fits, including a
+/// clarifying choice or a deny. A kind is only demanded when the user asked
+/// for one (a "/{kind}" prompt prefix, an explicit mode, or a concrete action
+/// such as Fix) or when the state machine requires it.
 fn expected_card_kind(
     session: &Session,
     action: &BackendAction,
     next_state: &NextState,
-) -> CardKind {
+) -> Option<CardKind> {
     match next_state {
-        NextState::Patch => return CardKind::Patch,
-        NextState::Continuation => return CardKind::Patch,
-        NextState::Summary | NextState::Finished => return CardKind::Summary,
+        NextState::Patch => return Some(CardKind::Patch),
+        NextState::Continuation => return Some(CardKind::Patch),
+        NextState::Summary | NextState::Finished => return Some(CardKind::Summary),
         NextState::Any | NextState::Card => {}
     }
 
     match action {
-        BackendAction::Start => match session.mode {
-            Mode::Fix | Mode::Propose => CardKind::Patch,
-            Mode::Explain | Mode::Review => CardKind::Finding,
-            Mode::Auto | Mode::Investigate => CardKind::Hypothesis,
-        },
-        BackendAction::Reply(_) => CardKind::Finding,
-        BackendAction::ContractRetry(_) => CardKind::Finding,
+        BackendAction::Start => session.forced_kind.or(match session.mode {
+            Mode::Fix | Mode::Propose => Some(CardKind::Patch),
+            Mode::Explain | Mode::Review => Some(CardKind::Finding),
+            Mode::Investigate => Some(CardKind::Hypothesis),
+            Mode::Auto => None,
+        }),
+        BackendAction::Reply(_) => None,
+        BackendAction::ContractRetry(_) => None,
         BackendAction::User(action) => match action {
-            Action::Fix => CardKind::Patch,
-            Action::OtherLead => CardKind::Hypothesis,
+            Action::Fix => Some(CardKind::Patch),
+            Action::OtherLead => Some(CardKind::Hypothesis),
             Action::Follow | Action::Why | Action::Open | Action::RunCheck | Action::Next => {
-                CardKind::Finding
+                Some(CardKind::Finding)
             }
             Action::Retry | Action::EditPrompt => session
                 .cards
@@ -1238,8 +1243,8 @@ fn expected_card_kind(
                 .rev()
                 .find(|card| !matches!(card, Card::Error(_) | Card::Deny(_)))
                 .map(Card::kind)
-                .unwrap_or(CardKind::Hypothesis),
-            Action::Apply | Action::ApplyPatch { .. } | Action::Stop => CardKind::Summary,
+                .or(session.forced_kind),
+            Action::Apply | Action::ApplyPatch { .. } | Action::Stop => Some(CardKind::Summary),
         },
     }
 }
@@ -2163,5 +2168,52 @@ mod tests {
         });
 
         assert_eq!(request_fingerprint(&request), request_fingerprint(&noisy));
+    }
+
+    #[derive(Default)]
+    struct ExpectationRecorder {
+        inner: MockBackend,
+        requests: std::sync::Mutex<Vec<(Option<CardKind>, String)>>,
+    }
+
+    #[async_trait]
+    impl BackendAdapter for ExpectationRecorder {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((req.card_contract.expected_kind, req.session.prompt.clone()));
+            self.inner.next_card(req).await
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            self.inner.capabilities()
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_auto_prompt_expects_any_kind() {
+        let backend = Arc::new(ExpectationRecorder::default());
+        let mut engine = Engine::new(backend.clone());
+
+        engine.start(params()).await.unwrap();
+
+        let requests = backend.requests.lock().unwrap().clone();
+        assert_eq!(requests[0].0, None);
+        assert_eq!(requests[0].1, "payload is empty");
+    }
+
+    #[tokio::test]
+    async fn kind_prefix_forces_the_expected_card() {
+        let backend = Arc::new(ExpectationRecorder::default());
+        let mut engine = Engine::new(backend.clone());
+        let mut start_params = params();
+        start_params.prompt = "/patch guard the payload".into();
+
+        engine.start(start_params).await.unwrap();
+
+        let requests = backend.requests.lock().unwrap().clone();
+        assert_eq!(requests[0].0, Some(CardKind::Patch));
+        assert_eq!(requests[0].1, "guard the payload");
     }
 }

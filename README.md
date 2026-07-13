@@ -174,6 +174,14 @@ Cards stay anchored beside the source line and do not take focus. Use `<leader>p
 to jump to a finding or the first line of an inline draft, and `<leader>pr` to
 focus the current Pair card.
 
+By default the first card is whatever fits the prompt best: a hypothesis, a
+finding, or a clarifying choice when the prompt is ambiguous. Start the prompt
+with `/{kind}` to demand a specific card instead — `/hypothesis`, `/finding`,
+`/patch` (alias `/fix`), `/choice`, or `/summary`. For example
+`/patch guard the payload here` skips discovery and drafts a patch directly.
+Unknown words after `/` are treated as normal prompt text, so paths like
+`/tmp/project` are safe.
+
 The goal and accepted-step count stay visible on cards and editable drafts. After
 accepting a patch, Pair shows a local receipt without calling the agent again.
 `Next` explicitly continues the same goal and must return either one local patch

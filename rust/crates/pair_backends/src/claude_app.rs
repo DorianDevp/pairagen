@@ -29,6 +29,7 @@ The discriminator field is named "op". Allowed ops, with exact shapes:
 LOC is an object {"file":string,"line":int,"column":int,"annotation":string|null} with 1-based line and column; never a plain string.
 choice option action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop.
 Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. error is only for technical failures.
+limits.expected, when set, names the op you must return (deny is always allowed instead; a clarifying choice is also accepted for hypothesis and finding). When limits.expected is null, choose whichever op fits best and ask via choice when the request is ambiguous.
 Patch only for fix actions. patch.diff must be unified diff hunks starting with @@ against the supplied buffer.
 A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Never plan or complete a whole refactor in one response.
 Prefer the supplied context; you may use at most two targeted read-only searches when it is insufficient. Never edit files or run commands."#;
@@ -593,7 +594,8 @@ fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
             "patch_files": req.card_contract.max_patch_files,
             "hunks_per_patch": req.card_contract.max_hunks_per_patch,
             "changed_lines": req.card_contract.max_changed_lines,
-            "goal_completion": req.card_contract.allow_goal_completion
+            "goal_completion": req.card_contract.allow_goal_completion,
+            "expected": req.card_contract.expected_kind
         }
     });
 

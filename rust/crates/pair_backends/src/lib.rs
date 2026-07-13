@@ -135,8 +135,13 @@ pub fn enforce_card_contract(
         return card;
     };
 
+    // A clarifying question is a legitimate alternative to guessing wherever a
+    // discovery card is expected; patch and summary requests stay strict.
+    let discovery_expected = matches!(expected_kind, CardKind::Hypothesis | CardKind::Finding);
+
     if matches!(card, Card::Error(_) | Card::Deny(_))
         || card.kind() == expected_kind
+        || (discovery_expected && matches!(card, Card::Choice(_)))
         || (contract.allow_goal_completion && matches!(card, Card::Summary(_)))
     {
         return card;
@@ -282,6 +287,44 @@ mod tests {
         assert!(matches!(
             enforce_card_contract(hypothesis(), &contract, "Codex", "{}"),
             Card::Hypothesis(_)
+        ));
+    }
+
+    #[test]
+    fn allows_choice_when_discovery_kind_is_expected() {
+        let contract = CardContract {
+            expected_kind: Some(CardKind::Hypothesis),
+            ..CardContract::default()
+        };
+        let choice = Card::Choice(pair_protocol::ChoiceCard {
+            id: "c_choice".into(),
+            title: "Clarify".into(),
+            question: "Which behavior do you want?".into(),
+            options: vec![],
+        });
+
+        assert!(matches!(
+            enforce_card_contract(choice, &contract, "Claude", "{}"),
+            Card::Choice(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_choice_when_patch_is_required() {
+        let contract = CardContract {
+            expected_kind: Some(CardKind::Patch),
+            ..CardContract::default()
+        };
+        let choice = Card::Choice(pair_protocol::ChoiceCard {
+            id: "c_choice".into(),
+            title: "Clarify".into(),
+            question: "Which behavior do you want?".into(),
+            options: vec![],
+        });
+
+        assert!(matches!(
+            enforce_card_contract(choice, &contract, "Claude", "{}"),
+            Card::Error(_)
         ));
     }
 
