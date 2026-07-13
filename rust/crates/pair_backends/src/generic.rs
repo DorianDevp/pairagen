@@ -48,7 +48,7 @@ impl GenericCliBackend {
 
 pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     let value = json!({
-            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), deny(title,reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. When the change belongs in a different file than the supplied buffer, deny immediately with location set to that place instead of attempting a patch. error is only for technical failures. limits.expected, when set, is the required op (deny always allowed; choice also allowed for hypothesis/finding); when null, choose the best fitting op and ask via choice when ambiguous. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
+            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. When the change belongs in a different file than the supplied buffer, return open_location immediately with that place instead of attempting a patch; the editor opens it with the user's permission and the same turn continues with a.kind location_granted and fresh ctx. error is only for technical failures. limits.expected, when set, is the required op (deny always allowed; choice also allowed for hypothesis/finding); when null, choose the best fitting op and ask via choice when ambiguous. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
             "stream": {
                 "protocol": "ndjson",
                 "progress": {"t": "pair_progress", "phase": "short phase", "message": "short user-visible activity summary"},
@@ -103,6 +103,7 @@ fn action_value(action: &crate::BackendAction) -> serde_json::Value {
         crate::BackendAction::ContractRetry(reason) => {
             json!({"kind": "contract_retry", "reason": reason})
         }
+        crate::BackendAction::LocationGranted => json!({"kind": "location_granted"}),
     }
 }
 

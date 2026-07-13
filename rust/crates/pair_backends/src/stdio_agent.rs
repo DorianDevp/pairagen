@@ -235,6 +235,7 @@ fn action_value(action: &BackendAction) -> serde_json::Value {
         BackendAction::ContractRetry(reason) => {
             json!({"kind": "contract_retry", "reason": reason})
         }
+        BackendAction::LocationGranted => json!({"kind": "location_granted"}),
     }
 }
 

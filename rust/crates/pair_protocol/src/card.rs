@@ -14,6 +14,7 @@ pub enum CardKind {
     Patch,
     Choice,
     Deny,
+    OpenLocation,
     Summary,
     Error,
 }
@@ -43,6 +44,7 @@ pub enum Card {
     Patch(PatchCard),
     Choice(ChoiceCard),
     Deny(DenyCard),
+    OpenLocation(OpenLocationCard),
     Summary(SummaryCard),
     Error(ErrorCard),
 }
@@ -55,6 +57,7 @@ impl Card {
             Card::Patch(_) => CardKind::Patch,
             Card::Choice(_) => CardKind::Choice,
             Card::Deny(_) => CardKind::Deny,
+            Card::OpenLocation(_) => CardKind::OpenLocation,
             Card::Summary(_) => CardKind::Summary,
             Card::Error(_) => CardKind::Error,
         }
@@ -67,6 +70,7 @@ impl Card {
             Card::Patch(card) => &card.id,
             Card::Choice(card) => &card.id,
             Card::Deny(card) => &card.id,
+            Card::OpenLocation(card) => &card.id,
             Card::Summary(card) => &card.id,
             Card::Error(card) => &card.id,
         }
@@ -79,6 +83,7 @@ impl Card {
             Card::Patch(card) => &card.actions,
             Card::Choice(_) => &[],
             Card::Deny(card) => &card.actions,
+            Card::OpenLocation(_) => &[],
             Card::Summary(card) => &card.next_actions,
             Card::Error(card) => &card.actions,
         }
@@ -148,6 +153,16 @@ pub struct DenyCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
     pub actions: Vec<Action>,
+}
+
+/// A mid-turn permission request: the agent can only proceed once the editor
+/// has this location open. The harness intercepts it, asks the user, and
+/// resumes the same turn with fresh context — it is never shown as a card.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenLocationCard {
+    pub id: CardId,
+    pub reason: String,
+    pub location: Location,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

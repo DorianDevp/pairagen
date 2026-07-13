@@ -16,6 +16,26 @@ rpc.on("agent/progress", function(progress)
   thinking.progress(progress)
 end)
 
+-- Mid-turn permission request: the agent can only continue once a different
+-- file is open. On approval the same agent turn resumes with fresh context —
+-- no card is shown and no extra request is spent.
+rpc.on_request("editor/open_location", function(params, respond)
+  local location = params.location or {}
+  local file = location.file or "?"
+  local question = string.format(
+    "Pair agent wants to open %s:%s\n%s",
+    vim.fn.fnamemodify(file, ":~:."),
+    location.line or 1,
+    params.reason or ""
+  )
+
+  if vim.fn.confirm(question, "&Open\n&Deny", 1, "Question") == 1 and navigation.open_location(location) then
+    respond({ granted = true, context = context.session() })
+  else
+    respond({ granted = false })
+  end
+end)
+
 function M.setup(opts)
   config.setup(opts)
   require("pair.commands").setup()

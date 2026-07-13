@@ -97,6 +97,9 @@ pub enum BackendAction {
     User(Action),
     Reply(String),
     ContractRetry(String),
+    // The editor granted an open_location request mid-turn; the request's
+    // context carries the freshly opened buffer.
+    LocationGranted,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -139,7 +142,7 @@ pub fn enforce_card_contract(
     // discovery card is expected; patch and summary requests stay strict.
     let discovery_expected = matches!(expected_kind, CardKind::Hypothesis | CardKind::Finding);
 
-    if matches!(card, Card::Error(_) | Card::Deny(_))
+    if matches!(card, Card::Error(_) | Card::Deny(_) | Card::OpenLocation(_))
         || card.kind() == expected_kind
         || (discovery_expected && matches!(card, Card::Choice(_)))
         || (contract.allow_goal_completion && matches!(card, Card::Summary(_)))

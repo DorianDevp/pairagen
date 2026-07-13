@@ -706,6 +706,7 @@ fn action_value(action: &BackendAction) -> Value {
         BackendAction::ContractRetry(reason) => {
             json!({"kind": "contract_retry", "reason": reason})
         }
+        BackendAction::LocationGranted => json!({"kind": "location_granted"}),
     }
 }
 
@@ -884,7 +885,7 @@ fn output_schema(req: &BackendRequest) -> Value {
         Some(pair_protocol::CardKind::Deny) => deny_schema(),
         Some(pair_protocol::CardKind::Summary) => summary_schema(),
         Some(pair_protocol::CardKind::Error) => error_schema(),
-        None => any_op_schema(),
+        Some(pair_protocol::CardKind::OpenLocation) | None => any_op_schema(),
     }
 }
 
@@ -912,7 +913,7 @@ fn any_op_schema() -> Value {
             "message",
         ],
         json!({
-            "op": {"type": "string", "enum": ["hypothesis", "finding", "patch", "choice", "deny", "summary", "error"]},
+            "op": {"type": "string", "enum": ["hypothesis", "finding", "patch", "choice", "deny", "open_location", "summary", "error"]},
             "title": {"type": "string"},
             "claim": {"type": ["string", "null"]},
             "evidence": nullable_location_schema(),

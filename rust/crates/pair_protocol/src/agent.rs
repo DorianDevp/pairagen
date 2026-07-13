@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Action, Card, ChoiceCard, ChoiceOption, DenyCard, ErrorCard, FilePatch, FindingCard,
-    HypothesisCard, Location, LocationEvidence, NextMove, PatchCard, SummaryCard,
+    HypothesisCard, Location, LocationEvidence, NextMove, OpenLocationCard, PatchCard, SummaryCard,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -37,6 +37,10 @@ pub enum AgentOp {
         reason: String,
         #[serde(default)]
         location: Option<AgentLocation>,
+    },
+    OpenLocation {
+        reason: String,
+        location: AgentLocation,
     },
     Summary {
         title: String,
@@ -262,6 +266,11 @@ impl AgentOp {
                 reason,
                 location: location.map(AgentLocation::location),
                 actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+            }),
+            Self::OpenLocation { reason, location } => Card::OpenLocation(OpenLocationCard {
+                id,
+                reason,
+                location: location.location(),
             }),
             Self::Summary {
                 title,

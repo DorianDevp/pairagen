@@ -23,7 +23,24 @@ pub struct Engine {
     context_optimizer: ContextOptimizer,
     prefetch_mode: PrefetchMode,
     prefetches: HashMap<String, Prefetch>,
+    location_granter: Option<LocationGranter>,
 }
+
+/// Most open_location grants honored within a single turn before the request
+/// is surfaced as a deny card instead.
+pub const MAX_LOCATION_GRANTS: usize = 2;
+
+/// Editor callback that asks the user to open a location mid-turn and, when
+/// granted, returns freshly captured context for that buffer.
+pub type LocationGranter = Arc<
+    dyn Fn(
+            pair_protocol::OpenLocationCard,
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ContextBundle>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Speculative prefetch of the likely next card. `Fix` requests the patch
 /// card in the background while the user is still reading a discovery card,
@@ -48,11 +65,16 @@ impl Engine {
             context_optimizer: ContextOptimizer::default(),
             prefetch_mode: PrefetchMode::Off,
             prefetches: HashMap::new(),
+            location_granter: None,
         }
     }
 
     pub fn set_prefetch_mode(&mut self, mode: PrefetchMode) {
         self.prefetch_mode = mode;
+    }
+
+    pub fn set_location_granter(&mut self, granter: LocationGranter) {
+        self.location_granter = Some(granter);
     }
 
     pub async fn start(&mut self, params: StartSessionParams) -> Result<StartSessionResult> {
@@ -417,10 +439,13 @@ impl Engine {
         mut prefetched: Option<BackendResponse>,
     ) -> BackendResponse {
         let mut action = action;
+        let mut context = context;
         let mut token_usage = None;
         let mut attempts = Vec::new();
+        let mut attempt = 0;
+        let mut grants = 0;
 
-        for attempt in 0..3 {
+        while attempt < 3 {
             let attempt_response = match prefetched.take() {
                 // A matching speculative response was computed for this exact
                 // request while the user was reading the previous card; it
@@ -456,6 +481,64 @@ impl Engine {
             let attempt_usage = response.metadata.token_usage.clone().unwrap_or_default();
             merge_usage(&mut token_usage, &response.metadata.token_usage);
 
+            // A mid-turn permission request: the agent needs another file open
+            // before it can produce the real card. Ask the editor; on grant the
+            // same turn continues with the freshly captured context. Grants do
+            // not consume retry attempts.
+            if let Card::OpenLocation(request) = &response.card {
+                let request = request.clone();
+
+                if grants < MAX_LOCATION_GRANTS
+                    && let Some(granter) = &self.location_granter
+                {
+                    if let Some(progress) = &progress {
+                        progress(BackendProgress {
+                            session_id: session.id.clone(),
+                            phase: "permission".into(),
+                            message: format!(
+                                "Agent asks to open {}",
+                                request.location.file.display()
+                            ),
+                        });
+                    }
+
+                    if let Some(granted) = granter(request.clone(), session.id.clone()).await {
+                        attempts.push(agent_attempt(
+                            attempt + 1,
+                            &response,
+                            "location_granted",
+                            Some(request.location.file.display().to_string()),
+                            attempt_usage,
+                            false,
+                        ));
+                        session.context = granted.clone();
+                        context = granted;
+                        action = BackendAction::LocationGranted;
+                        grants += 1;
+                        continue;
+                    }
+                }
+
+                attempts.push(agent_attempt(
+                    attempt + 1,
+                    &response,
+                    "location_declined",
+                    Some(request.location.file.display().to_string()),
+                    attempt_usage,
+                    false,
+                ));
+                response.card = Card::Deny(pair_protocol::DenyCard {
+                    id: session.next_card_id("deny"),
+                    title: "Agent needs another file".into(),
+                    reason: request.reason,
+                    location: Some(request.location),
+                    actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+                });
+                response.metadata.token_usage = token_usage;
+                response.metadata.attempts = attempts;
+                return response;
+            }
+
             if let Some((key, reason)) = duplicate_observation(session, &response.card) {
                 activate_observation(session, &key);
                 attempts.push(agent_attempt(
@@ -482,6 +565,7 @@ impl Engine {
                     action = BackendAction::ContractRetry(format!(
                         "{reason}. Return a distinct next observation; do not repeat known findings or signals."
                     ));
+                    attempt += 1;
                     continue;
                 }
 
@@ -521,8 +605,9 @@ impl Engine {
                         });
                     }
                     action = BackendAction::ContractRetry(format!(
-                        "The previous card failed the local patch contract: {detail}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card. If the change belongs in a different file than the supplied buffer, return a deny op with location set to that place instead of another patch."
+                        "The previous card failed the local patch contract: {detail}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card. If the change belongs in a different file than the supplied buffer, return an open_location op with that place instead of another patch."
                     ));
+                    attempt += 1;
                     continue;
                 }
 
@@ -1046,6 +1131,15 @@ fn validate_one_card(card: &Card) -> Result<()> {
                 )?;
             }
         }
+        Card::OpenLocation(card) => {
+            require_text("open_location reason", &card.reason)?;
+            validate_location(
+                &card.location.file,
+                card.location.line,
+                card.location.column,
+                "open_location",
+            )?;
+        }
         Card::Summary(card) => {
             require_text("card title", &card.title)?;
             require_text("summary", &card.summary)?;
@@ -1239,6 +1333,7 @@ fn expected_card_kind(
         }),
         BackendAction::Reply(_) => None,
         BackendAction::ContractRetry(_) => None,
+        BackendAction::LocationGranted => None,
         BackendAction::User(action) => match action {
             Action::Fix => Some(CardKind::Patch),
             Action::OtherLead => Some(CardKind::Hypothesis),
@@ -1276,6 +1371,7 @@ fn card_summary(card: &Card) -> String {
         Card::Patch(card) => format!("patch: {}", card.explanation),
         Card::Choice(card) => format!("choice: {}", card.question),
         Card::Deny(card) => format!("deny: {}", card.reason),
+        Card::OpenLocation(card) => format!("open_location: {}", card.reason),
         Card::Summary(card) => format!("summary: {}", card.summary),
         Card::Error(card) => format!("error: {}", card.message),
     }
@@ -2223,5 +2319,160 @@ mod tests {
         let requests = backend.requests.lock().unwrap().clone();
         assert_eq!(requests[0].0, Some(CardKind::Patch));
         assert_eq!(requests[0].1, "guard the payload");
+    }
+
+    #[derive(Default)]
+    struct NavigatingBackend {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl BackendAdapter for NavigatingBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            self.calls.lock().unwrap().push(format!("{:?}", req.action));
+
+            let card = match req.action {
+                BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                    id: "c_1".into(),
+                    title: "Wrong buffer suspected".into(),
+                    claim: "The sizing lives in the component file.".into(),
+                    evidence: None,
+                    next_move: None,
+                    actions: vec![Action::Fix, Action::Stop],
+                }),
+                BackendAction::User(Action::Fix) => {
+                    Card::OpenLocation(pair_protocol::OpenLocationCard {
+                        id: "c_nav".into(),
+                        reason: "The change belongs in the component file.".into(),
+                        location: pair_protocol::Location {
+                            file: "src/component.ts".into(),
+                            line: 3,
+                            column: 1,
+                        },
+                    })
+                }
+                BackendAction::LocationGranted => {
+                    let old_line = req.context.buffer_text.lines().next().unwrap_or_default();
+                    Card::Patch(PatchCard {
+                        id: "c_patch".into(),
+                        title: "Adjust icon size".into(),
+                        explanation: "Sets the icon size on the component.".into(),
+                        warnings: vec![],
+                        patches: vec![FilePatch {
+                            id: "p_1".into(),
+                            file: req.context.file.clone(),
+                            diff: format!("@@ -1,1 +1,1 @@\n-{old_line}\n+const size = 16\n"),
+                            explanation: "Shrinks the icon.".into(),
+                        }],
+                        actions: vec![
+                            Action::Apply,
+                            Action::Retry,
+                            Action::EditPrompt,
+                            Action::Stop,
+                        ],
+                    })
+                }
+                other => panic!("unexpected action {other:?}"),
+            };
+
+            Ok(BackendResponse {
+                card,
+                raw_output: None,
+                metadata: BackendMetadata {
+                    backend: "navigating".into(),
+                    model: None,
+                    token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
+                    activities: vec![],
+                    attempts: vec![],
+                },
+            })
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "navigating".into(),
+                streaming: false,
+                patches: true,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
+    }
+
+    fn granted_context() -> ContextBundle {
+        ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from("src/component.ts"),
+            cursor: Cursor { line: 3, column: 1 },
+            selection: None,
+            buffer_text: "const size = 24".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn open_location_grant_continues_the_same_turn() {
+        let backend = Arc::new(NavigatingBackend::default());
+        let granted: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let granted_log = granted.clone();
+        let mut engine = Engine::new(backend.clone());
+        engine.set_location_granter(Arc::new(move |request, _session| {
+            granted_log
+                .lock()
+                .unwrap()
+                .push(request.location.file.display().to_string());
+            Box::pin(async move { Some(granted_context()) })
+        }));
+
+        let start = engine.start(params()).await.unwrap();
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+        let Card::Patch(card) = result.card else {
+            panic!("expected patch card, got {:?}", result.card);
+        };
+        assert_eq!(card.patches[0].file, PathBuf::from("src/component.ts"));
+        assert!(card.patches[0].diff.contains("const size = 24"));
+        assert_eq!(granted.lock().unwrap().as_slice(), ["src/component.ts"]);
+        assert_eq!(
+            engine.get(&start.session_id).unwrap().context.file,
+            PathBuf::from("src/component.ts")
+        );
+
+        let calls = backend.calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|call| call.contains("LocationGranted")));
+    }
+
+    #[tokio::test]
+    async fn declined_open_location_surfaces_a_deny_card() {
+        let backend = Arc::new(NavigatingBackend::default());
+        let mut engine = Engine::new(backend);
+        engine.set_location_granter(Arc::new(|_, _| Box::pin(async { None })));
+
+        let start = engine.start(params()).await.unwrap();
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+        let Card::Deny(card) = result.card else {
+            panic!("expected deny card, got {:?}", result.card);
+        };
+        assert_eq!(
+            card.location.as_ref().map(|l| l.file.clone()),
+            Some(PathBuf::from("src/component.ts"))
+        );
+    }
+
+    #[tokio::test]
+    async fn open_location_without_granter_becomes_a_deny_card() {
+        let backend = Arc::new(NavigatingBackend::default());
+        let mut engine = Engine::new(backend);
+
+        let start = engine.start(params()).await.unwrap();
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+        assert!(matches!(result.card, Card::Deny(_)));
     }
 }

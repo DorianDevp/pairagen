@@ -174,6 +174,13 @@ Cards stay anchored beside the source line and do not take focus. Use `<leader>p
 to jump to a finding or the first line of an inline draft, and `<leader>pr` to
 focus the current Pair card.
 
+When the agent can only proceed from a different file — say the fix belongs in
+a component class while a template is open — it does not fail or deny. It asks
+mid-turn: Pair shows a permission prompt ("Pair agent wants to open …"), and on
+approval the file opens and the same agent turn continues with the new buffer.
+One request, no retry. Declining (or ignoring for two minutes) surfaces a deny
+card with the location and an `[o] Open & retry` shortcut instead.
+
 By default the first card is whatever fits the prompt best: a hypothesis, a
 finding, or a clarifying choice when the prompt is ambiguous. Start the prompt
 with `/{kind}` to demand a specific card instead — `/hypothesis`, `/finding`,

@@ -22,7 +22,7 @@
   ],
   "properties": {
     "op": {
-      "enum": ["hypothesis", "finding", "patch", "choice", "deny", "summary", "error"]
+      "enum": ["hypothesis", "finding", "patch", "choice", "deny", "open_location", "summary", "error"]
     },
     "title": {
       "type": "string"
