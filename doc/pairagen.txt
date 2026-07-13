@@ -20,6 +20,10 @@ Long goals and patch explanations are compact by default. Focus the Pair card
 and press `z` to expand or collapse the full text. Configure this with
 `keymaps.details`.
 
+The session token total is shown against `backend.token_budget` (50000 by
+default). Pair asks for confirmation before another agent turn after that
+budget is reached. Set it to 0 to disable the guard.
+
 Pairagen has been tested primarily with the Codex CLI app-server backend.
 
 ===============================================================================

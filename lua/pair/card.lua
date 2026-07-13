@@ -264,8 +264,17 @@ function M.tokens(lines)
   table.insert(lines, string.format("Turn  %s tokens%s", usage.total_tokens or 0, usage.estimated and " estimated" or ""))
 
   local total = state.token_usage
-  if total and total.total_tokens ~= usage.total_tokens then
-    table.insert(lines, string.format("Total %s tokens", total.total_tokens or 0))
+  if total then
+    local budget = tonumber(config.values.backend.token_budget) or 0
+    local used = total.total_tokens or 0
+    if budget > 0 then
+      table.insert(lines, string.format("Total %s/%s tokens", used, budget))
+      if used >= budget then
+        table.insert(lines, "Warning Session token budget exceeded")
+      end
+    elseif used ~= usage.total_tokens then
+      table.insert(lines, string.format("Total %s tokens", used))
+    end
   end
   local report = state.context_report
   if report and report.enabled then

@@ -14,6 +14,7 @@ config.setup({
   },
 })
 assert(config.values.backend.prefetch == "off")
+assert(config.values.backend.token_budget == 50000)
 
 local prompt = require("pair.prompt")
 assert(prompt.title("Prompt") == " Pair Prompt · codex / test-model ")
@@ -22,6 +23,9 @@ local state = require("pair.state")
 assert(vim.api.nvim_win_get_config(state.prompt_frame_win).zindex == 200)
 assert(vim.api.nvim_win_get_config(state.prompt_win).zindex == 201)
 prompt.close()
+state.token_usage = { total_tokens = 50000 }
+assert(require("pair").token_budget_exceeded())
+state.token_usage = nil
 
 local context = require("pair.context")
 local queries = context.workspace_queries("Replace preview_html using LayoutEditor template", 3)

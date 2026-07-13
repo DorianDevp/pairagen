@@ -204,6 +204,11 @@ Speculative patch prefetch is off by default because an unused draft still costs
 a full model turn. Set `backend.prefetch = "fix"` only when that latency/cost
 tradeoff is intentional.
 
+Cards show cumulative usage against `backend.token_budget` (50,000 by default).
+After the budget is reached, Pair asks before every additional agent turn; local
+navigation, patch review/apply, and stopping remain immediate. Set the budget to
+`0` to disable this guard.
+
 ## Context optimization
 
 Pair builds a small ranked context bundle before calling an agent. The current

@@ -135,6 +135,10 @@ function M.action(action)
     return
   end
 
+  if not M.confirm_agent_turn(action) then
+    return
+  end
+
   ui.notify("Pair: " .. action)
   status.hide()
   local session_id = state.session_id
@@ -204,6 +208,10 @@ function M.reply(text)
     return
   end
 
+  if not M.confirm_agent_turn("reply") then
+    return
+  end
+
   status.hide()
 
   local session_id = state.session_id
@@ -242,6 +250,32 @@ function M.reply(text)
     state.goal = message.result.goal or state.goal
     card.show(message.result.card)
   end)
+end
+
+function M.token_budget_exceeded()
+  local budget = tonumber(config.values.backend.token_budget) or 0
+  local used = state.token_usage and tonumber(state.token_usage.total_tokens) or 0
+
+  return budget > 0 and used >= budget, used, budget
+end
+
+function M.confirm_agent_turn(action)
+  if action == "apply" or action == "open" or action == "stop" then
+    return true
+  end
+
+  local exceeded, used, budget = M.token_budget_exceeded()
+  if not exceeded then
+    return true
+  end
+
+  local question = string.format(
+    "Pair session used %s tokens (budget %s).\nStart another agent turn?",
+    used,
+    budget
+  )
+
+  return vim.fn.confirm(question, "&Continue\n&Cancel", 2, "Warning") == 1
 end
 
 function M.stop()

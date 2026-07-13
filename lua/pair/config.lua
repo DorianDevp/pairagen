@@ -9,6 +9,9 @@ M.values = {
     -- Speculative prefetch spends a patch turn before the user asks for it.
     -- Keep it opt-in with "fix"; "off" never starts speculative model work.
     prefetch = "off",
+    -- Ask before starting another model turn after this session total.
+    -- Set to 0 to disable the guard.
+    token_budget = 50000,
   },
   distribution = {
     repository = "DorianDevp/pairagen",
