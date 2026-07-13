@@ -41,7 +41,10 @@ pub enum AgentOp {
         location: Option<AgentLocation>,
     },
     OpenLocation {
-        reason: String,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
         location: AgentLocation,
     },
     Summary {
@@ -272,11 +275,20 @@ impl AgentOp {
                 location: location.map(AgentLocation::location),
                 actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
             }),
-            Self::OpenLocation { reason, location } => Card::OpenLocation(OpenLocationCard {
-                id,
+            Self::OpenLocation {
                 reason,
-                location: location.location(),
-            }),
+                message,
+                location,
+            } => {
+                let fallback = location.annotation.clone();
+                Card::OpenLocation(OpenLocationCard {
+                    id,
+                    reason: first_text(reason, message)
+                        .or(fallback)
+                        .unwrap_or_else(|| "Open the requested location to continue.".into()),
+                    location: location.location(),
+                })
+            }
             Self::Summary {
                 title,
                 summary,
@@ -344,6 +356,12 @@ impl AgentChoice {
 
 fn one() -> usize {
     1
+}
+
+fn first_text(first: Option<String>, second: Option<String>) -> Option<String> {
+    first
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| second.filter(|value| !value.trim().is_empty()))
 }
 
 #[cfg(test)]
@@ -450,6 +468,27 @@ mod tests {
         let location = card.location.expect("deny location");
         assert_eq!(location.line, 12);
         assert!(location.file.ends_with("vw-icon-button.component.ts"));
+    }
+
+    #[test]
+    fn maps_flat_schema_open_location_message_to_reason() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"annotation":"A new exception is required.","changed_files":null,"claim":null,"evidence":null,"explanation":null,"finding":null,"goal_complete":false,"location":{"annotation":"Create a dedicated inactive-account error.","column":1,"file":"src/Exception/OAuth/OAuthAccountNotActiveException.php","line":1},"message":"The next change requires a new exception file.","next":null,"op":"open_location","options":null,"patches":null,"question":null,"reason":null,"summary":null,"title":"Open inactive-account exception"}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::OpenLocation(card) = card else {
+            panic!("expected open_location card");
+        };
+        assert_eq!(
+            card.reason,
+            "The next change requires a new exception file."
+        );
+        assert_eq!(
+            card.location.file,
+            PathBuf::from("src/Exception/OAuth/OAuthAccountNotActiveException.php")
+        );
     }
 
     #[test]
