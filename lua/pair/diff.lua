@@ -1,6 +1,7 @@
 local apply = require("pair.apply")
 local context = require("pair.context")
 local log = require("pair.log")
+local navigation = require("pair.navigation")
 local rpc = require("pair.rpc")
 local state = require("pair.state")
 local thinking = require("pair.thinking")
@@ -18,7 +19,11 @@ function M.show(card, opts)
     return false
   end
 
-  local source_buf = state.source_buf or apply.buffer(patch.file)
+  local source_buf = apply.buffer(patch.file)
+  if not source_buf then
+    navigation.open_location({ file = patch.file, line = 1, column = 1 })
+    source_buf = apply.buffer(patch.file)
+  end
   if not source_buf or not vim.api.nvim_buf_is_valid(source_buf) then
     ui.notify("Open the proposed location before editing the patch", vim.log.levels.WARN)
     return false
@@ -32,6 +37,10 @@ function M.show(card, opts)
   end
 
   local source_win = context.buffer_window(source_buf)
+  if not source_win then
+    navigation.open_location({ file = patch.file, line = 1, column = 1 })
+    source_win = context.buffer_window(source_buf)
+  end
   if not source_win then
     ui.notify("Source location is not visible", vim.log.levels.WARN)
     return false

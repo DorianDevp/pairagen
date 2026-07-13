@@ -102,7 +102,7 @@ end
 
 function M.resolve_start(source, hunk)
   if hunk.old_len == 0 then
-    if #source == 0 then
+    if #source == 0 or (#source == 1 and source[1] == "") then
       return 0
     end
     error("A patch without source context can only create an empty file")

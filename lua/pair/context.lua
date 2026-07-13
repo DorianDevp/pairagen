@@ -21,6 +21,19 @@ function M.session()
   return value
 end
 
+function M.new_file(file)
+  return {
+    cwd = vim.fn.getcwd(),
+    file = vim.fn.fnamemodify(file, ":."),
+    cursor = { line = 1, column = 1 },
+    selection = nil,
+    buffer_text = "",
+    buffer_start_line = 1,
+    diagnostics = {},
+    hints = {},
+  }
+end
+
 function M.capture(preferred_buf)
   local buf = M.source_buffer(preferred_buf)
   local win = M.buffer_window(buf)

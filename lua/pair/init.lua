@@ -22,8 +22,12 @@ end)
 rpc.on_request("editor/open_location", function(params, respond)
   local location = params.location or {}
   local file = location.file or "?"
+  local target = vim.fn.fnamemodify(file, ":p")
+  local missing = vim.uv.fs_stat(target) == nil and vim.fn.bufloaded(target) == 0
 
-  if M.workspace_location(file) and navigation.open_location(location) then
+  if M.workspace_location(file) and missing then
+    respond({ granted = true, context = context.new_file(file) })
+  elseif M.workspace_location(file) and navigation.open_location(location) then
     respond({ granted = true, context = context.session() })
   else
     respond({ granted = false })

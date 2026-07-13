@@ -32,6 +32,14 @@ assert(not require("pair").workspace_location("/tmp/outside-pairagen.txt"))
 local context = require("pair.context")
 local queries = context.workspace_queries("Replace preview_html using LayoutEditor template", 3)
 assert(queries[1] == "preview_html")
+local new_file = context.new_file("src/Exception/NewException.php")
+assert(new_file.buffer_text == "")
+assert(new_file.buffer_start_line == 1)
+
+local apply = require("pair.apply")
+local new_lines = apply.apply_diff({ "" }, "@@ -1,0 +1,2 @@\n+<?php\n+final class NewException {}\n")
+assert(new_lines[1] == "<?php")
+assert(new_lines[2] == "final class NewException {}")
 
 local navigation = require("pair.navigation")
 local location = navigation.card_location({
