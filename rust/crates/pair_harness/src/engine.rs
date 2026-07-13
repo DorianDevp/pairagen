@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -10,8 +10,9 @@ use pair_context::ContextOptimizer;
 use pair_patch::{PatchCoherence, PatchNormalizer, PatchValidator};
 use pair_protocol::{
     Action, ActionResult, AgentAttempt, Card, CardKind, ContextBundle, ErrorCard, GoalProgress,
-    MAX_GOAL_CHANGED_LINES, MAX_GOAL_HUNKS_PER_PATCH, Mode, ObservationKind, ObservationProgress,
-    PatchApplyResult, StartSessionParams, StartSessionResult, SummaryCard, TokenUsage,
+    MAX_GOAL_CHANGED_LINES, MAX_GOAL_HUNKS_PER_PATCH, MAX_GOAL_PATCH_FILES, Mode, ObservationKind,
+    ObservationProgress, PatchApplyResult, StartSessionParams, StartSessionResult, SummaryCard,
+    TokenUsage,
 };
 
 use crate::session::Session;
@@ -24,6 +25,7 @@ pub struct Engine {
     prefetch_mode: PrefetchMode,
     prefetches: HashMap<String, Prefetch>,
     location_granter: Option<LocationGranter>,
+    source_context_provider: Option<SourceContextProvider>,
 }
 
 /// Most open_location grants honored within a single turn before the request
@@ -35,6 +37,18 @@ pub const MAX_LOCATION_GRANTS: usize = 2;
 pub type LocationGranter = Arc<
     dyn Fn(
             pair_protocol::OpenLocationCard,
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ContextBundle>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Editor callback that snapshots a patch target without changing the active
+/// window. Goal batches use it to validate every file before review begins.
+pub type SourceContextProvider = Arc<
+    dyn Fn(
+            std::path::PathBuf,
             String,
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ContextBundle>> + Send>>
@@ -66,6 +80,7 @@ impl Engine {
             prefetch_mode: PrefetchMode::Off,
             prefetches: HashMap::new(),
             location_granter: None,
+            source_context_provider: None,
         }
     }
 
@@ -75,6 +90,10 @@ impl Engine {
 
     pub fn set_location_granter(&mut self, granter: LocationGranter) {
         self.location_granter = Some(granter);
+    }
+
+    pub fn set_source_context_provider(&mut self, provider: SourceContextProvider) {
+        self.source_context_provider = Some(provider);
     }
 
     pub async fn start(&mut self, params: StartSessionParams) -> Result<StartSessionResult> {
@@ -535,6 +554,7 @@ impl Engine {
             ..CardContract::default()
         };
         if allow_goal_completion && !matches!(expected, NextState::GoalWhy) {
+            card_contract.max_patch_files = MAX_GOAL_PATCH_FILES;
             card_contract.max_hunks_per_patch = MAX_GOAL_HUNKS_PER_PATCH;
             card_contract.max_changed_lines = MAX_GOAL_CHANGED_LINES;
         }
@@ -743,11 +763,14 @@ impl Engine {
             }
 
             let mut candidate = response.card.clone();
-            let validation =
-                PatchNormalizer::normalize_card(&mut candidate, &context).and_then(|()| {
-                    PatchCoherence::annotate(&mut candidate);
-                    validate_backend_card(&candidate, expected, &context)
-                });
+            let validation = if matches!(expected, NextState::GoalLoop) {
+                self.normalize_goal_batch(&mut candidate, &context, &session.id)
+                    .await
+            } else {
+                PatchNormalizer::normalize_card(&mut candidate, &context)
+                    .and_then(|()| validate_backend_card(&candidate, expected, &context))
+            }
+            .map(|()| PatchCoherence::annotate(&mut candidate));
             if let Err(error) = validation {
                 let detail = error.to_string();
                 attempts.push(agent_attempt(
@@ -771,8 +794,13 @@ impl Engine {
                                 .into(),
                         });
                     }
+                    let instruction = if matches!(expected, NextState::GoalLoop) {
+                        "Re-read every affected file with read-only tools and return the corrected complete multi-file batch. Context/remove lines must be exact and contiguous in each corresponding source. Do not split the goal into another model turn; use open_location only if a required source cannot be inspected."
+                    } else {
+                        "Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card. If the change belongs in a different file than the supplied buffer, return an open_location op with that place instead of another patch."
+                    };
                     action = BackendAction::ContractRetry(format!(
-                        "The previous card failed the local patch contract: {detail}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card. If the change belongs in a different file than the supplied buffer, return an open_location op with that place instead of another patch."
+                        "The previous card failed the local patch contract: {detail}. {instruction}"
                     ));
                     attempt += 1;
                     continue;
@@ -800,6 +828,69 @@ impl Engine {
         }
 
         unreachable!()
+    }
+
+    async fn normalize_goal_batch(
+        &self,
+        candidate: &mut Card,
+        current: &ContextBundle,
+        session_id: &str,
+    ) -> Result<()> {
+        if !matches!(candidate, Card::Patch(_)) {
+            return validate_backend_card(candidate, &NextState::GoalLoop, current);
+        }
+
+        validate_one_card(candidate)?;
+        PatchValidator::validate_card_with_limits(
+            candidate,
+            MAX_GOAL_PATCH_FILES,
+            MAX_GOAL_HUNKS_PER_PATCH,
+            MAX_GOAL_CHANGED_LINES,
+        )?;
+        let Card::Patch(card) = candidate else {
+            unreachable!();
+        };
+
+        for index in 0..card.patches.len() {
+            let file = card.patches[index].file.clone();
+            let source = if let Some(provider) = &self.source_context_provider {
+                provider(file.clone(), session_id.to_string()).await
+            } else if context_targets(current, &file) {
+                Some(current.clone())
+            } else {
+                None
+            }
+            .ok_or_else(|| anyhow!("editor source is unavailable for {}", file.display()))?;
+
+            if !context_targets(&source, &file) {
+                return Err(anyhow!(
+                    "editor returned {} while validating {}",
+                    source.file.display(),
+                    file.display()
+                ));
+            }
+
+            let mut single = Card::Patch(pair_protocol::PatchCard {
+                id: card.id.clone(),
+                title: card.title.clone(),
+                explanation: card.explanation.clone(),
+                warnings: vec![],
+                goal_complete: card.goal_complete,
+                patches: vec![card.patches[index].clone()],
+                actions: card.actions.clone(),
+            });
+            PatchNormalizer::normalize_card(&mut single, &source)
+                .map_err(|error| anyhow!("{}: {error}", file.display()))?;
+            PatchValidator::validate_card_against_context(&single, &source)
+                .map_err(|error| anyhow!("{}: {error}", file.display()))?;
+
+            let Card::Patch(single) = single else {
+                unreachable!();
+            };
+            card.patches[index] = single.patches.into_iter().next().unwrap();
+        }
+
+        NextState::GoalLoop.validate(candidate)
     }
 
     fn accept_response(
@@ -835,23 +926,14 @@ impl Engine {
         if !matches!(next_state, NextState::GoalWhy) {
             prepare_observation_card(session, &mut received);
         }
-        let validation =
-            PatchNormalizer::normalize_card(&mut received, &session.context).and_then(|()| {
-                PatchCoherence::annotate(&mut received);
-                validate_backend_card(&received, &next_state, &session.context)
-            });
-        let card = match validation {
-            Ok(()) => {
-                if !matches!(next_state, NextState::GoalWhy) {
-                    record_observations(session, &received);
-                }
-                if matches!(next_state, NextState::GoalLoop) {
-                    queue_goal_patch_cards(session, received)?
-                } else {
-                    received
-                }
-            }
-            Err(error) => rejected_card(session, &received, error, response.raw_output.as_deref()),
+        PatchCoherence::annotate(&mut received);
+        if !matches!(next_state, NextState::GoalWhy) {
+            record_observations(session, &received);
+        }
+        let card = if matches!(next_state, NextState::GoalLoop) {
+            queue_goal_patch_cards(session, received)?
+        } else {
+            received
         };
 
         update_goal_state(session, &card, &next_state);
@@ -1354,7 +1436,7 @@ fn validate_backend_card(
     if matches!(next_state, NextState::GoalLoop) {
         PatchValidator::validate_card_with_limits(
             card,
-            1,
+            MAX_GOAL_PATCH_FILES,
             MAX_GOAL_HUNKS_PER_PATCH,
             MAX_GOAL_CHANGED_LINES,
         )?;
@@ -1392,6 +1474,19 @@ fn validate_patch_target(card: &Card, context: &ContextBundle) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn context_targets(context: &ContextBundle, file: &std::path::Path) -> bool {
+    let actual = if context.file.is_absolute() {
+        context
+            .file
+            .strip_prefix(&context.cwd)
+            .unwrap_or(&context.file)
+    } else {
+        &context.file
+    };
+
+    actual == file
 }
 
 fn validate_one_card(card: &Card) -> Result<()> {
@@ -1577,7 +1672,6 @@ fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Result<Card> {
         let diff = pair_patch::UnifiedDiff::parse(&patch.diff)?;
         let hunk_count = diff.hunks.len();
         for (index, hunk) in diff.hunks.into_iter().enumerate() {
-            let last_hunk = index + 1 == hunk_count;
             let suffix = if hunk_count == 1 {
                 String::new()
             } else {
@@ -1593,7 +1687,7 @@ fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Result<Card> {
                 title: format!("{}{}", card.title, suffix),
                 explanation: explanation.clone(),
                 warnings: card.warnings.clone(),
-                goal_complete: card.goal_complete && last_hunk,
+                goal_complete: false,
                 patches: vec![pair_protocol::FilePatch {
                     id: format!("{}_h{}", patch.id, index + 1),
                     file: patch.file.clone(),
@@ -1606,10 +1700,18 @@ fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Result<Card> {
     }
 
     let mut cards = cards.into_iter();
-    let first = cards
+    let mut first = cards
         .next()
         .ok_or_else(|| anyhow!("goal patch contains no reviewable hunks"))?;
-    session.pending_patch_cards = cards.collect();
+    let mut pending = cards.collect::<VecDeque<_>>();
+    if card.goal_complete {
+        if let Some(last) = pending.back_mut() {
+            last.goal_complete = true;
+        } else {
+            first.goal_complete = true;
+        }
+    }
+    session.pending_patch_cards = pending;
 
     Ok(Card::Patch(first))
 }
@@ -1944,6 +2046,83 @@ mod tests {
         assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
         assert_eq!(complete.goal.status, pair_protocol::GoalStatus::Complete);
         assert_eq!(complete.goal.completed_steps.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn continuous_goal_reviews_a_multi_file_batch_without_more_model_turns() {
+        let backend = Arc::new(MultiFileGoalBackend::default());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut engine = Engine::new(backend.clone());
+        let observed_reads = reads.clone();
+        engine.set_source_context_provider(Arc::new(move |file, _session_id| {
+            let observed_reads = observed_reads.clone();
+            Box::pin(async move {
+                observed_reads.fetch_add(1, Ordering::SeqCst);
+                let text = if file == PathBuf::from("src/work.ts") {
+                    "first"
+                } else {
+                    "other"
+                };
+                let mut context = editor_context(text);
+                context.file = file;
+                Some(context)
+            })
+        }));
+        let mut goal = params();
+        goal.mode = Mode::Auto;
+        goal.buffer_text = "first".into();
+
+        let first = engine.start(goal).await.unwrap();
+        let Card::Patch(first_patch) = &first.card else {
+            panic!(
+                "expected first file hunk, got {:?}; attempts {:?}",
+                first.card, first.attempts
+            );
+        };
+        assert_eq!(first_patch.patches[0].file, PathBuf::from("src/work.ts"));
+        assert!(!first_patch.goal_complete);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+
+        let second = engine
+            .apply_result(PatchApplyResult {
+                session_id: first.session_id,
+                card_id: first.card.id().into(),
+                accepted: true,
+                patch_ids: vec![first_patch.patches[0].id.clone()],
+                changed_files: vec![PathBuf::from("src/work.ts")],
+                error: None,
+                context: editor_context("FIRST"),
+            })
+            .await
+            .unwrap();
+        let Card::Patch(second_patch) = &second.card else {
+            panic!("expected second file hunk");
+        };
+        assert_eq!(second_patch.patches[0].file, PathBuf::from("src/other.ts"));
+        assert!(second_patch.goal_complete);
+        assert_eq!(second.turn_token_usage.total_tokens, 0);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+
+        let mut other_context = editor_context("OTHER");
+        other_context.file = PathBuf::from("src/other.ts");
+        let complete = engine
+            .apply_result(PatchApplyResult {
+                session_id: second.session_id,
+                card_id: second.card.id().into(),
+                accepted: true,
+                patch_ids: vec![second_patch.patches[0].id.clone()],
+                changed_files: vec![PathBuf::from("src/other.ts")],
+                error: None,
+                context: other_context,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(complete.card, Card::Summary(_)));
+        assert_eq!(complete.goal.status, pair_protocol::GoalStatus::Complete);
+        assert_eq!(complete.turn_token_usage.total_tokens, 0);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -2355,6 +2534,7 @@ mod tests {
         async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert!(req.card_contract.allow_goal_completion);
+            assert_eq!(req.card_contract.max_patch_files, MAX_GOAL_PATCH_FILES);
             assert_eq!(
                 req.card_contract.max_hunks_per_patch,
                 MAX_GOAL_HUNKS_PER_PATCH
@@ -2379,6 +2559,56 @@ mod tests {
                 raw_output: None,
                 metadata: BackendMetadata {
                     backend: "batch_goal".into(),
+                    model: None,
+                    token_usage: Some(TokenUsage::estimated(100, 20)),
+                    activities: vec![],
+                    attempts: vec![],
+                },
+            })
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            MockBackend::info()
+        }
+    }
+
+    #[derive(Default)]
+    struct MultiFileGoalBackend {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl BackendAdapter for MultiFileGoalBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(req.card_contract.max_patch_files, MAX_GOAL_PATCH_FILES);
+
+            Ok(BackendResponse {
+                card: Card::Patch(PatchCard {
+                    id: "c_multi".into(),
+                    title: "Complete workspace change".into(),
+                    explanation: "Update both required files.".into(),
+                    warnings: vec![],
+                    goal_complete: true,
+                    patches: vec![
+                        FilePatch {
+                            id: "p_work".into(),
+                            file: "src/work.ts".into(),
+                            diff: "@@ -1,1 +1,1 @@\n-first\n+FIRST\n".into(),
+                            explanation: "Update the producer.".into(),
+                        },
+                        FilePatch {
+                            id: "p_other".into(),
+                            file: "src/other.ts".into(),
+                            diff: "@@ -1,1 +1,1 @@\n-other\n+OTHER\n".into(),
+                            explanation: "Update the consumer.".into(),
+                        },
+                    ],
+                    actions: vec![Action::Apply, Action::Why, Action::Retry, Action::Stop],
+                }),
+                raw_output: None,
+                metadata: BackendMetadata {
+                    backend: "multi_file_goal".into(),
                     model: None,
                     token_usage: Some(TokenUsage::estimated(100, 20)),
                     activities: vec![],

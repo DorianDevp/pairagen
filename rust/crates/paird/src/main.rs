@@ -9,7 +9,7 @@ use pair_backends::{
     BackendAdapter, ClaudeAppBackend, CodexAppBackend, GenericCliBackend, MockBackend,
     OllamaBackend, ProgressReporter, StdioAgentBackend,
 };
-use pair_harness::{Engine, LocationGranter, PrefetchMode};
+use pair_harness::{Engine, LocationGranter, PrefetchMode, SourceContextProvider};
 use pair_protocol::{
     ActionParams, BackendInfo, ContextBundle, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
     PatchApplyResult, ReplyParams, StartSessionParams,
@@ -18,6 +18,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
 const OPEN_LOCATION_TIMEOUT: Duration = Duration::from_secs(120);
+const READ_FILE_TIMEOUT: Duration = Duration::from_secs(10);
+static NEXT_EDITOR_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -65,6 +67,13 @@ async fn serve_stdio() -> Result<()> {
         lines.clone(),
         deferred.clone(),
     ));
+    server
+        .engine
+        .set_source_context_provider(source_context_provider(
+            stdout.clone(),
+            lines.clone(),
+            deferred.clone(),
+        ));
 
     loop {
         let line = {
@@ -114,69 +123,109 @@ fn location_granter(
     lines: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     deferred: Arc<Mutex<VecDeque<String>>>,
 ) -> LocationGranter {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
     Arc::new(move |request, session_id| {
         let stdout = stdout.clone();
         let lines = lines.clone();
         let deferred = deferred.clone();
 
         Box::pin(async move {
-            let id = format!("paird_{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
-            let message = json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": "editor/open_location",
-                "params": {
+            request_editor_context(
+                &stdout,
+                &lines,
+                &deferred,
+                "editor/open_location",
+                json!({
                     "session_id": session_id,
                     "reason": request.reason,
                     "location": request.location,
-                },
-            });
-
-            if write_json(&stdout, &message).is_err() {
-                return None;
-            }
-
-            let deadline = tokio::time::Instant::now() + OPEN_LOCATION_TIMEOUT;
-
-            loop {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    return None;
-                }
-
-                let line = {
-                    let mut lines = lines.lock().await;
-                    match tokio::time::timeout(remaining, lines.recv()).await {
-                        Err(_) => return None,
-                        Ok(None) => return None,
-                        Ok(Some(line)) => line,
-                    }
-                };
-
-                let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-
-                if value.get("id").and_then(Value::as_str) == Some(id.as_str())
-                    && value.get("method").is_none()
-                {
-                    let result = value.get("result")?;
-                    if result.get("granted").and_then(Value::as_bool) != Some(true) {
-                        return None;
-                    }
-
-                    return result
-                        .get("context")
-                        .cloned()
-                        .and_then(|context| serde_json::from_value::<ContextBundle>(context).ok());
-                }
-
-                deferred.lock().expect("deferred lock").push_back(line);
-            }
+                }),
+                OPEN_LOCATION_TIMEOUT,
+            )
+            .await
         })
     })
+}
+
+fn source_context_provider(
+    stdout: Arc<Mutex<io::Stdout>>,
+    lines: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+    deferred: Arc<Mutex<VecDeque<String>>>,
+) -> SourceContextProvider {
+    Arc::new(move |file, session_id| {
+        let stdout = stdout.clone();
+        let lines = lines.clone();
+        let deferred = deferred.clone();
+
+        Box::pin(async move {
+            request_editor_context(
+                &stdout,
+                &lines,
+                &deferred,
+                "editor/read_file",
+                json!({
+                    "session_id": session_id,
+                    "file": file,
+                }),
+                READ_FILE_TIMEOUT,
+            )
+            .await
+        })
+    })
+}
+
+async fn request_editor_context(
+    stdout: &Arc<Mutex<io::Stdout>>,
+    lines: &Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+    deferred: &Arc<Mutex<VecDeque<String>>>,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Option<ContextBundle> {
+    let id = format!(
+        "paird_{}",
+        NEXT_EDITOR_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let message = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    if write_json(stdout, &message).is_err() {
+        return None;
+    }
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let line = {
+            let mut lines = lines.lock().await;
+            match tokio::time::timeout(remaining, lines.recv()).await {
+                Err(_) => return None,
+                Ok(None) => return None,
+                Ok(Some(line)) => line,
+            }
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("id").and_then(Value::as_str) == Some(id.as_str())
+            && value.get("method").is_none()
+        {
+            let result = value.get("result")?;
+            if result.get("granted").and_then(Value::as_bool) != Some(true) {
+                return None;
+            }
+            return result
+                .get("context")
+                .cloned()
+                .and_then(|context| serde_json::from_value::<ContextBundle>(context).ok());
+        }
+        deferred.lock().expect("deferred lock").push_back(line);
+    }
 }
 
 fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {

@@ -208,7 +208,7 @@ impl CodexAppBackend {
             "You are a local Pairagen pair-programming partner. You may use at most two targeted read-only project tool calls to find the next relevant code block. Stop searching once the supplied context supports an exact location. Never edit files. Return exactly one final JSON object matching the supplied output schema and no prose."
         };
         let developer_instructions = if goal_loop {
-            "Drive the original goal from start to finish. At each work turn return exactly one coherent patch hunk for user review, or a summary only when the whole goal is complete. When the user asks why, explain the pending hunk without advancing or replacing it. Preserve progress across turns, do not repeat accepted work, and request open_location when the next hunk belongs in another buffer."
+            "Drive the original goal from start to finish. In one work turn inspect every required file and return the complete multi-file patch batch; Pairagen reviews its hunks locally. When the user asks why, explain the pending hunk without advancing or replacing it. Preserve progress across turns and do not repeat accepted work."
         } else if patch_turn {
             "Work as an equal pair-programming partner. Propose one coherent local block at the supplied location and explain why this is the useful next move. Do not take over the whole task. Return one structured patch hunk as an editable draft, not a finished agenda."
         } else {
@@ -674,15 +674,16 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
     } else if goal_loop {
         format!(
             "- Continue executing the original session goal from the accepted progress; never restart or repeat a completed step.\n\
-             - Inspect the project as needed with targeted read-only tools and prepare the complete change for the supplied buffer in this turn.\n\
-             - If the next edit is outside the supplied buffer, return open_location immediately and continue after the editor supplies that buffer.\n\
-             - Tool output is evidence only: never draft a hunk from lines outside the supplied Buffer excerpt. Return open_location to the first uncovered line instead.\n\
-             - Create a missing file or symbol before returning a patch that references it; use open_location to establish that dependency first.\n\
-             - If the goal is unresolved and the correct buffer is supplied, return exactly one structured patch with one file, up to {} hunks, and at most {} added/removed lines per hunk. Include every required edit in this buffer; review granularity is handled locally.\n\
+             - Inspect every required project file with targeted read-only tools and prepare the complete change in this turn.\n\
+             - Tool reads are valid patch source. Pairagen verifies every returned hunk against the corresponding live editor buffer before review.\n\
+             - Return one structured patch batch with up to {} files, up to {} hunks per file, and at most {} added/removed lines per hunk. Include every required edit; review granularity is handled locally.\n\
+             - Create missing files directly in the same batch before patches that reference them.\n\
+             - Use open_location only when a required source cannot be inspected with read-only project tools.\n\
              - Set goal_complete=true when accepting the complete returned patch finishes the original goal. Set it false only when another file or independently inspected stage remains.\n\
              - Return summary only when every requirement in the original goal is satisfied; cite the completed result.\n\
              - Return choice only when a genuine user decision blocks all safe progress.\n\
              - Do not return a finding, an assessment, a plan, or instructions for the user to request another draft.",
+            req.card_contract.max_patch_files,
             req.card_contract.max_hunks_per_patch,
             req.card_contract.max_changed_lines,
         )
@@ -1613,6 +1614,7 @@ mod tests {
     #[test]
     fn goal_loop_schema_allows_structured_patch_or_summary() {
         let contract = crate::CardContract {
+            max_patch_files: pair_protocol::MAX_GOAL_PATCH_FILES,
             max_hunks_per_patch: pair_protocol::MAX_GOAL_HUNKS_PER_PATCH,
             max_changed_lines: pair_protocol::MAX_GOAL_CHANGED_LINES,
             ..Default::default()
@@ -1623,6 +1625,10 @@ mod tests {
         assert!(ops.contains(&json!("patch")));
         assert!(ops.contains(&json!("summary")));
         assert!(!ops.contains(&json!("finding")));
+        assert_eq!(
+            schema["properties"]["patches"]["maxItems"],
+            pair_protocol::MAX_GOAL_PATCH_FILES
+        );
         assert!(schema["properties"]["patches"]["items"]["properties"]["hunks"].is_object());
         assert_eq!(
             schema["properties"]["patches"]["items"]["properties"]["hunks"]["maxItems"],
@@ -1645,14 +1651,15 @@ mod tests {
     }
 
     #[test]
-    fn goal_prompt_navigates_before_out_of_excerpt_or_missing_dependency_edits() {
+    fn goal_prompt_requests_one_verified_multi_file_batch() {
         let mut request = request();
         request.card_contract.allow_goal_completion = true;
         request.card_contract.expected_kind = None;
         let prompt = prompt(&request, true);
 
-        assert!(prompt.contains("never draft a hunk from lines outside"));
-        assert!(prompt.contains("Create a missing file or symbol before"));
+        assert!(prompt.contains("Tool reads are valid patch source"));
+        assert!(prompt.contains("complete change in this turn"));
+        assert!(prompt.contains("Create missing files directly in the same batch"));
     }
 
     #[test]

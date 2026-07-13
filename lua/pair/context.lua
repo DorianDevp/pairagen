@@ -34,6 +34,37 @@ function M.new_file(file)
   }
 end
 
+function M.file(file)
+  local target = vim.fn.fnamemodify(file, ":p")
+  local buf = vim.fn.bufnr(target)
+  local lines
+  local diagnostics = {}
+
+  if buf >= 0 and vim.api.nvim_buf_is_loaded(buf) then
+    lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    diagnostics = M.diagnostics(target, buf)
+  elseif vim.uv.fs_stat(target) then
+    local ok, result = pcall(vim.fn.readfile, target, "b")
+    if not ok then
+      return nil
+    end
+    lines = result
+  else
+    return M.new_file(file)
+  end
+
+  return {
+    cwd = vim.fn.getcwd(),
+    file = vim.fn.fnamemodify(target, ":."),
+    cursor = { line = 1, column = 1 },
+    selection = nil,
+    buffer_text = table.concat(lines, "\n"),
+    buffer_start_line = 1,
+    diagnostics = diagnostics,
+    hints = {},
+  }
+end
+
 function M.capture(preferred_buf)
   local buf = M.source_buffer(preferred_buf)
   local win = M.buffer_window(buf)

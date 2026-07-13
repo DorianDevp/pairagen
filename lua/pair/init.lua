@@ -16,6 +16,17 @@ rpc.on("agent/progress", function(progress)
   thinking.progress(progress)
 end)
 
+rpc.on_request("editor/read_file", function(params, respond)
+  local file = params.file or "?"
+  if not M.workspace_location(file) then
+    respond({ granted = false })
+    return
+  end
+
+  local value = context.file(file)
+  respond({ granted = value ~= nil, context = value })
+end)
+
 -- A running goal may need its next buffer. Opening a workspace file is
 -- reversible and the resulting hunk still requires explicit acceptance, so
 -- navigation itself does not interrupt the process with another prompt.
