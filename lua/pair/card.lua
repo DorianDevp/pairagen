@@ -262,19 +262,52 @@ function M.tokens(lines)
   end
 
   table.insert(lines, "")
-  table.insert(lines, string.format("Turn  %s tokens%s", usage.total_tokens or 0, usage.estimated and " estimated" or ""))
+  local turn_raw = tonumber(usage.total_tokens) or 0
+  local turn_cached = tonumber(usage.cached_input_tokens) or 0
+  local turn_suffix = usage.estimated and " estimated" or ""
+  if turn_cached > 0 then
+    table.insert(lines, string.format(
+      "Turn  %s raw · %s cached · %s non-cached%s",
+      turn_raw,
+      turn_cached,
+      math.max(turn_raw - turn_cached, 0),
+      turn_suffix
+    ))
+  else
+    table.insert(lines, string.format("Turn  %s tokens%s", turn_raw, turn_suffix))
+  end
 
   local total = state.token_usage
   if total then
     local budget = tonumber(config.values.backend.token_budget) or 0
     local used = total.total_tokens or 0
+    local cached = tonumber(total.cached_input_tokens) or 0
     if budget > 0 then
-      table.insert(lines, string.format("Total %s/%s tokens", used, budget))
+      if cached > 0 then
+        table.insert(lines, string.format(
+          "Total %s/%s raw · %s cached · %s non-cached",
+          used,
+          budget,
+          cached,
+          math.max(used - cached, 0)
+        ))
+      else
+        table.insert(lines, string.format("Total %s/%s tokens", used, budget))
+      end
       if used >= budget then
         table.insert(lines, "Warning Session token budget exceeded")
       end
     elseif used ~= usage.total_tokens then
-      table.insert(lines, string.format("Total %s tokens", used))
+      if cached > 0 then
+        table.insert(lines, string.format(
+          "Total %s raw · %s cached · %s non-cached",
+          used,
+          cached,
+          math.max(used - cached, 0)
+        ))
+      else
+        table.insert(lines, string.format("Total %s tokens", used))
+      end
     end
   end
   local report = state.context_report

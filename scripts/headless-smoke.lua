@@ -45,6 +45,16 @@ local new_lines = apply.apply_diff({ "" }, "@@ -1,0 +1,2 @@\n+<?php\n+final clas
 assert(new_lines[1] == "<?php")
 assert(new_lines[2] == "final class NewException {}")
 
+local state = require("pair.state")
+state.turn_token_usage = { total_tokens = 100, input_tokens = 90, cached_input_tokens = 80, output_tokens = 10 }
+state.token_usage = vim.deepcopy(state.turn_token_usage)
+local token_lines = {}
+require("pair.card").tokens(token_lines)
+assert(table.concat(token_lines, "\n"):find("80 cached", 1, true))
+assert(table.concat(token_lines, "\n"):find("20 non-cached", 1, true))
+state.turn_token_usage = nil
+state.token_usage = nil
+
 local navigation = require("pair.navigation")
 local location = navigation.card_location({
   evidence = { file = "old.rs" },

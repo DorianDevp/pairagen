@@ -6,6 +6,8 @@ use crate::{Action, Card, ContextBundle};
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TokenUsage {
     pub input_tokens: usize,
+    #[serde(default)]
+    pub cached_input_tokens: usize,
     pub output_tokens: usize,
     pub total_tokens: usize,
     pub estimated: bool,
@@ -15,6 +17,7 @@ impl TokenUsage {
     pub fn estimated(input: usize, output: usize) -> Self {
         Self {
             input_tokens: input,
+            cached_input_tokens: 0,
             output_tokens: output,
             total_tokens: input + output,
             estimated: true,
@@ -24,6 +27,7 @@ impl TokenUsage {
     pub fn reported(input: usize, output: usize) -> Self {
         Self {
             input_tokens: input,
+            cached_input_tokens: 0,
             output_tokens: output,
             total_tokens: input + output,
             estimated: false,
@@ -32,6 +36,7 @@ impl TokenUsage {
 
     pub fn add(&mut self, other: &Self) {
         self.input_tokens += other.input_tokens;
+        self.cached_input_tokens += other.cached_input_tokens;
         self.output_tokens += other.output_tokens;
         self.total_tokens += other.total_tokens;
         self.estimated = self.estimated || other.estimated;

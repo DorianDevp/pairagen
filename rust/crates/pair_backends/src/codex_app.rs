@@ -1214,11 +1214,16 @@ fn error_schema() -> Value {
 fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
     let last = value?.get("last")?;
     let input = last.get("inputTokens")?.as_u64()? as usize;
+    let cached_input = last
+        .get("cachedInputTokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as usize;
     let output = last.get("outputTokens")?.as_u64()? as usize;
     let total = last.get("totalTokens")?.as_u64()? as usize;
 
     Some(TokenUsage {
         input_tokens: input,
+        cached_input_tokens: cached_input,
         output_tokens: output,
         total_tokens: total,
         estimated: false,
@@ -1678,6 +1683,7 @@ mod tests {
         let value = json!({
             "last": {
                 "inputTokens": 10,
+                "cachedInputTokens": 8,
                 "outputTokens": 5,
                 "totalTokens": 15
             }
@@ -1685,6 +1691,7 @@ mod tests {
         let usage = parse_usage(Some(&value)).unwrap();
 
         assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.cached_input_tokens, 8);
         assert_eq!(usage.output_tokens, 5);
         assert!(!usage.estimated);
     }
