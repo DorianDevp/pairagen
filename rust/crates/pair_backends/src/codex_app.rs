@@ -676,6 +676,8 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             "- Continue executing the original session goal from the accepted progress; never restart or repeat a completed step.\n\
              - Inspect the project as needed with targeted read-only tools and prepare the complete change for the supplied buffer in this turn.\n\
              - If the next edit is outside the supplied buffer, return open_location immediately and continue after the editor supplies that buffer.\n\
+             - Tool output is evidence only: never draft a hunk from lines outside the supplied Buffer excerpt. Return open_location to the first uncovered line instead.\n\
+             - Create a missing file or symbol before returning a patch that references it; use open_location to establish that dependency first.\n\
              - If the goal is unresolved and the correct buffer is supplied, return exactly one structured patch with one file, up to {} hunks, and at most {} added/removed lines per hunk. Include every required edit in this buffer; review granularity is handled locally.\n\
              - Set goal_complete=true when accepting the complete returned patch finishes the original goal. Set it false only when another file or independently inspected stage remains.\n\
              - Return summary only when every requirement in the original goal is satisfied; cite the completed result.\n\
@@ -1640,6 +1642,17 @@ mod tests {
         assert_eq!(thread_key(&request), "s_1:goal");
         assert_eq!(schema["properties"]["op"]["enum"][0], "finding");
         assert!(prompt(&request, true).contains("pending patch remains"));
+    }
+
+    #[test]
+    fn goal_prompt_navigates_before_out_of_excerpt_or_missing_dependency_edits() {
+        let mut request = request();
+        request.card_contract.allow_goal_completion = true;
+        request.card_contract.expected_kind = None;
+        let prompt = prompt(&request, true);
+
+        assert!(prompt.contains("never draft a hunk from lines outside"));
+        assert!(prompt.contains("Create a missing file or symbol before"));
     }
 
     #[test]
