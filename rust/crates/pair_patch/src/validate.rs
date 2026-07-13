@@ -76,7 +76,14 @@ impl PatchNormalizer {
                     })
                     .collect::<Vec<_>>();
                 if expected.is_empty() {
-                    return Err(anyhow!("patch hunk has no source context"));
+                    if hunk.old_len == 0 && source.is_empty() {
+                        hunk.old_start = context.buffer_start_line;
+                        hunk.new_start = context.buffer_start_line;
+                        continue;
+                    }
+                    return Err(anyhow!(
+                        "patch hunk without source context can only create an empty file"
+                    ));
                 }
 
                 let declared = hunk.old_start.checked_sub(context.buffer_start_line);
@@ -208,12 +215,25 @@ impl PatchValidator {
                     .ok_or_else(|| {
                         anyhow!("patch hunk starts before the supplied buffer excerpt")
                     })?;
-                let expected = hunk.lines.iter().filter_map(|line| match line {
-                    DiffLine::Context(text) | DiffLine::Remove(text) => Some(text.as_str()),
-                    DiffLine::Add(_) => None,
-                });
+                let expected = hunk
+                    .lines
+                    .iter()
+                    .filter_map(|line| match line {
+                        DiffLine::Context(text) | DiffLine::Remove(text) => Some(text.as_str()),
+                        DiffLine::Add(_) => None,
+                    })
+                    .collect::<Vec<_>>();
 
-                for (offset, expected) in expected.enumerate() {
+                if expected.is_empty() {
+                    if hunk.old_len == 0 && source.is_empty() && start == 0 {
+                        continue;
+                    }
+                    return Err(anyhow!(
+                        "patch hunk without source context can only create an empty file"
+                    ));
+                }
+
+                for (offset, expected) in expected.into_iter().enumerate() {
                     let line = context.buffer_start_line + start + offset;
                     let actual = source.get(start + offset).copied().ok_or_else(|| {
                         anyhow!(
@@ -246,7 +266,16 @@ fn validate_hunk_counts(hunk: &crate::Hunk, max_changed_lines: usize) -> Result<
         .count();
 
     if old_count == 0 {
-        return Err(anyhow!("hunk has no source context"));
+        if hunk.old_len != 0 {
+            return Err(anyhow!("hunk has no source context"));
+        }
+        if !hunk
+            .lines
+            .iter()
+            .any(|line| matches!(line, DiffLine::Add(_)))
+        {
+            return Err(anyhow!("new-file hunk has no added lines"));
+        }
     }
     if old_count != hunk.old_len || new_count != hunk.new_len {
         return Err(anyhow!("hunk header counts do not match its lines"));
@@ -411,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_hunk_without_source_context() {
+    fn accepts_new_file_hunk_syntax() {
         let patch = FilePatch {
             id: "p_1".into(),
             file: PathBuf::from("src/work.ts"),
@@ -419,9 +448,73 @@ mod tests {
             explanation: "Insert a line.".into(),
         };
 
-        let error = PatchValidator::validate_file_patch(&patch).unwrap_err();
+        PatchValidator::validate_file_patch(&patch).unwrap();
+    }
 
-        assert!(error.to_string().contains("no source context"));
+    #[test]
+    fn validates_new_file_hunk_against_an_empty_buffer() {
+        let mut card = Card::Patch(pair_protocol::PatchCard {
+            id: "c_new".into(),
+            title: "Create exception".into(),
+            explanation: "Add the missing exception type.".into(),
+            warnings: vec![],
+            goal_complete: false,
+            patches: vec![FilePatch {
+                id: "p_new".into(),
+                file: PathBuf::from("src/Exception/NewException.php"),
+                diff: "@@ -1,0 +1,3 @@\n+<?php\n+\n+final class NewException {}\n".into(),
+                explanation: "Create the exception.".into(),
+            }],
+            actions: vec![pair_protocol::Action::Apply],
+        });
+        let context = ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from("src/Exception/NewException.php"),
+            cursor: pair_protocol::Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: String::new(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        };
+
+        PatchNormalizer::normalize_card(&mut card, &context).unwrap();
+        PatchValidator::validate_card_against_context(&card, &context).unwrap();
+    }
+
+    #[test]
+    fn rejects_context_free_insert_into_an_existing_buffer() {
+        let mut card = Card::Patch(pair_protocol::PatchCard {
+            id: "c_insert".into(),
+            title: "Insert".into(),
+            explanation: "Insert without an anchor.".into(),
+            warnings: vec![],
+            goal_complete: false,
+            patches: vec![FilePatch {
+                id: "p_insert".into(),
+                file: PathBuf::from("src/work.ts"),
+                diff: "@@ -1,0 +1,1 @@\n+new\n".into(),
+                explanation: "Insert a line.".into(),
+            }],
+            actions: vec![pair_protocol::Action::Apply],
+        });
+        let context = ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from("src/work.ts"),
+            cursor: pair_protocol::Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: "existing".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        };
+
+        let error = PatchNormalizer::normalize_card(&mut card, &context).unwrap_err();
+        assert!(error.to_string().contains("empty file"));
     }
 
     #[test]

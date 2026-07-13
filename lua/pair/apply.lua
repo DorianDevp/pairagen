@@ -34,8 +34,11 @@ function M.buffer(file)
 end
 
 function M.apply_diff(source, diff)
-  local output = vim.deepcopy(source)
   local hunk = M.parse_hunk(diff)
+  if hunk.old_len == 0 and #source == 1 and source[1] == "" then
+    source = {}
+  end
+  local output = vim.deepcopy(source)
   local offset = M.resolve_start(source, hunk)
 
   for _, line in ipairs(hunk.lines) do
@@ -59,16 +62,21 @@ function M.apply_diff(source, diff)
 end
 
 function M.parse_hunk(diff)
-  local hunk = { old_start = nil, lines = {}, old_lines = {} }
+  local hunk = { old_start = nil, old_len = nil, lines = {}, old_lines = {} }
 
   for line in diff:gmatch("[^\n]+") do
-    local old_start = line:match("^@@ %-(%d+)")
+    local old_start, old_len = line:match("^@@ %-(%d+),(%d+)")
+    if not old_start then
+      old_start = line:match("^@@ %-(%d+)")
+      old_len = old_start and "1" or nil
+    end
 
     if old_start then
       if hunk.old_start then
         error("Patch must contain exactly one hunk")
       end
       hunk.old_start = tonumber(old_start)
+      hunk.old_len = tonumber(old_len)
     elseif hunk.old_start then
       local prefix = line:sub(1, 1)
       local text = line:sub(2)
@@ -85,7 +93,7 @@ function M.parse_hunk(diff)
     end
   end
 
-  if not hunk.old_start or #hunk.old_lines == 0 then
+  if not hunk.old_start or (#hunk.old_lines == 0 and hunk.old_len ~= 0) then
     error("Patch has no source context")
   end
 
@@ -93,6 +101,13 @@ function M.parse_hunk(diff)
 end
 
 function M.resolve_start(source, hunk)
+  if hunk.old_len == 0 then
+    if #source == 0 then
+      return 0
+    end
+    error("A patch without source context can only create an empty file")
+  end
+
   local expected = hunk.old_start - 1
   if M.matches_at(source, expected, hunk.old_lines) then
     return expected

@@ -712,7 +712,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
         "- finding: concise explanation of the pending hunk"
     } else if goal_loop {
         "- patch: one complete structured patch for local hunk-by-hunk review; include goal_complete\n\
-- open_location: when the next hunk belongs in another buffer\n\
+- open_location: when the next hunk belongs in another buffer; put the explanation in reason, not message\n\
 - choice: only for a blocking user decision\n\
 - summary: only when the complete original goal is satisfied"
     } else {
