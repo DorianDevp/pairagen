@@ -6,9 +6,9 @@ M.values = {
     args = {},
     mode = "auto",
     agent = "mock",
-    -- Speculative prefetch of the likely next card: "fix" requests the patch
-    -- in the background while you read a discovery card; "off" disables it.
-    prefetch = "fix",
+    -- Speculative prefetch spends a patch turn before the user asks for it.
+    -- Keep it opt-in with "fix"; "off" never starts speculative model work.
+    prefetch = "off",
   },
   distribution = {
     repository = "DorianDevp/pairagen",
@@ -295,7 +295,7 @@ end
 function M.backend_env()
   local _, agent = M.agent_config()
   local env = M.agent_env(agent)
-  env.PAIR_PREFETCH = M.values.backend.prefetch or "fix"
+  env.PAIR_PREFETCH = M.values.backend.prefetch or "off"
 
   return env
 end

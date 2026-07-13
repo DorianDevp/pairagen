@@ -323,8 +323,8 @@ impl Server {
 
 fn prefetch_mode_from_env() -> PrefetchMode {
     match std::env::var("PAIR_PREFETCH").as_deref() {
-        Ok("off") => PrefetchMode::Off,
-        _ => PrefetchMode::Fix,
+        Ok("fix") => PrefetchMode::Fix,
+        _ => PrefetchMode::Off,
     }
 }
 

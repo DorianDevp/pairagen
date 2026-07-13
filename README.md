@@ -200,6 +200,10 @@ never drafts a patch. `Draft` remains a separate explicit action, so continuing
 cannot silently rewrite the current buffer. `:PairNext` remains as a compatibility
 alias for `:PairAssess`.
 
+Speculative patch prefetch is off by default because an unused draft still costs
+a full model turn. Set `backend.prefetch = "fix"` only when that latency/cost
+tradeoff is intentional.
+
 ## Context optimization
 
 Pair builds a small ranked context bundle before calling an agent. The current

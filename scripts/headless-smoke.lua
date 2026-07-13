@@ -13,6 +13,7 @@ config.setup({
     },
   },
 })
+assert(config.values.backend.prefetch == "off")
 
 local prompt = require("pair.prompt")
 assert(prompt.title("Prompt") == " Pair Prompt · codex / test-model ")
