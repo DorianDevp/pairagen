@@ -32,8 +32,9 @@ choice option action is one of follow|why|fix|other_lead|retry|edit_prompt|open|
 Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. error is only for technical failures.
 If you can only proceed from a different file or location — for example the change belongs in another file than the supplied buffer — return open_location IMMEDIATELY with that exact place instead of attempting a patch. The editor asks the user for permission, opens the file, and the next message continues this same turn with a.kind "location_granted" and fresh ctx for that buffer; then produce the real op. Never draft a patch against a file that is not the supplied buffer. Use deny only for refusals that navigation cannot solve.
 limits.expected, when set, names the op you must return (deny is always allowed instead; a clarifying choice is also accepted for hypothesis and finding). When limits.expected is null, choose whichever op fits best and ask via choice when the request is ambiguous.
-Patch only for fix actions. patch.diff must be unified diff hunks starting with @@ against the supplied buffer.
-When limits.goal_completion is true, assess the whole original goal. Never return a patch. Return summary only when every stated requirement is satisfied; otherwise return one finding with the next unresolved requirement and a concrete location. Do not repeat a completed step.
+Patch only for fix actions or when limits.goal_completion is true. patch.diff must be unified diff hunks starting with @@ against the supplied buffer.
+When limits.goal_completion is true, drive the original goal from start to finish. Return one patch hunk whenever work remains, request open_location when the next hunk belongs in another buffer, and return summary only when every stated requirement is satisfied. Continue automatically from completed_steps and never repeat accepted work.
+When limits.goal_completion is true and limits.expected is finding because the user asked why, explain the currently pending hunk without replacing it or advancing the goal. The same draft remains pending after the answer.
 A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Never plan or complete a whole refactor in one response.
 Prefer the supplied context; you may use at most two targeted read-only searches when it is insufficient. Never edit files or run commands."#;
 
@@ -570,7 +571,9 @@ impl BackendAdapter for ClaudeAppBackend {
 }
 
 fn turn_phase(req: &BackendRequest) -> Phase {
-    if req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch) {
+    if req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch)
+        || req.card_contract.allow_goal_completion
+    {
         Phase::Patch
     } else {
         Phase::Discovery
@@ -873,7 +876,7 @@ mod tests {
 
         req.card_contract.expected_kind = None;
         req.card_contract.allow_goal_completion = true;
-        assert!(matches!(turn_phase(&req), Phase::Discovery));
+        assert!(matches!(turn_phase(&req), Phase::Patch));
     }
 
     #[test]

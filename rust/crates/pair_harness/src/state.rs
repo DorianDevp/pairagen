@@ -7,8 +7,9 @@ pub enum SessionState {
     Thinking,
     CardShown,
     PatchShown,
+    PatchExplained,
     PatchFailed,
-    GoalReviewFailed,
+    GoalLoopFailed,
     Applying,
     Applied,
     Summary,
@@ -21,7 +22,8 @@ pub enum NextState {
     Any,
     Card,
     Patch,
-    GoalReview,
+    GoalLoop,
+    GoalWhy,
     Summary,
     Finished,
 }
@@ -36,15 +38,19 @@ impl SessionState {
             (Self::CardShown, Action::Fix) => Ok(NextState::Patch),
             (Self::CardShown, Action::Stop) => Ok(NextState::Finished),
             (Self::PatchShown, Action::Apply | Action::ApplyPatch { .. }) => Ok(NextState::Summary),
+            (Self::PatchShown, Action::Why) => Ok(NextState::GoalWhy),
             (Self::PatchShown, Action::Retry | Action::EditPrompt) => Ok(NextState::Patch),
             (Self::PatchShown, Action::Stop) => Ok(NextState::Finished),
             (Self::PatchFailed, Action::Retry | Action::EditPrompt) => Ok(NextState::Patch),
             (Self::PatchFailed, Action::Stop) => Ok(NextState::Finished),
-            (Self::GoalReviewFailed, Action::Retry | Action::EditPrompt) => {
-                Ok(NextState::GoalReview)
+            (Self::PatchExplained, Action::ResumeDraft) => Ok(NextState::Patch),
+            (Self::PatchExplained, Action::Why | Action::Retry | Action::EditPrompt) => {
+                Ok(NextState::GoalWhy)
             }
-            (Self::GoalReviewFailed, Action::Stop) => Ok(NextState::Finished),
-            (Self::Summary, Action::Next) => Ok(NextState::GoalReview),
+            (Self::PatchExplained, Action::Stop) => Ok(NextState::Finished),
+            (Self::GoalLoopFailed, Action::Retry | Action::EditPrompt) => Ok(NextState::GoalLoop),
+            (Self::GoalLoopFailed, Action::Stop) => Ok(NextState::Finished),
+            (Self::Summary, Action::Next) => Ok(NextState::GoalLoop),
             (Self::Summary, Action::RunCheck) => Ok(NextState::Card),
             (Self::Summary, Action::Stop) => Ok(NextState::Finished),
             (Self::Finished, _) => Err(anyhow!("session is finished")),
@@ -79,14 +85,12 @@ impl NextState {
             (Self::Card, _) => Ok(()),
             (Self::Patch, Card::Patch(_)) => Ok(()),
             (Self::Patch, _) => Err(anyhow!("expected patch card")),
-            (Self::GoalReview, Card::Patch(_)) => Err(anyhow!(
-                "goal review cannot draft a patch; use Fix explicitly"
+            (Self::GoalLoop, Card::Patch(_) | Card::Summary(_) | Card::Choice(_)) => Ok(()),
+            (Self::GoalLoop, _) => Err(anyhow!(
+                "expected the next goal patch, a blocking choice, or a completed goal summary"
             )),
-            (Self::GoalReview, Card::Summary(_)) => Ok(()),
-            (Self::GoalReview, Card::Hypothesis(_) | Card::Finding(_) | Card::Choice(_)) => Ok(()),
-            (Self::GoalReview, _) => Err(anyhow!(
-                "expected a next-step finding, choice, or completed goal summary"
-            )),
+            (Self::GoalWhy, Card::Finding(_)) => Ok(()),
+            (Self::GoalWhy, _) => Err(anyhow!("expected an explanation of the pending patch")),
             (Self::Summary, Card::Summary(_)) => Ok(()),
             (Self::Summary, _) => Err(anyhow!("expected summary card")),
             (Self::Finished, Card::Summary(_)) => Ok(()),

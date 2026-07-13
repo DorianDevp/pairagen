@@ -237,6 +237,7 @@ impl AgentOp {
                     .collect(),
                 actions: vec![
                     Action::Apply,
+                    Action::Why,
                     Action::Retry,
                     Action::EditPrompt,
                     Action::Stop,

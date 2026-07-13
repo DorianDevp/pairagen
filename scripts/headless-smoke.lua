@@ -26,6 +26,8 @@ prompt.close()
 state.token_usage = { total_tokens = 50000 }
 assert(require("pair").token_budget_exceeded())
 state.token_usage = nil
+assert(require("pair").workspace_location("README.md"))
+assert(not require("pair").workspace_location("/tmp/outside-pairagen.txt"))
 
 local context = require("pair.context")
 local queries = context.workspace_queries("Replace preview_html using LayoutEditor template", 3)
@@ -61,6 +63,7 @@ local compact = diff.control_lines(patch_card, config.values.keymaps)
 assert(compact[1]:match("%.%.%.$"))
 assert(table.concat(compact, "\n"):find("Expand details", 1, true))
 assert(table.concat(compact, "\n"):find("Now   Przenieś model", 1, true))
+assert(table.concat(compact, "\n"):find("Why this hunk", 1, true))
 assert(not table.concat(compact, "\n"):find(long_explanation, 1, true))
 
 state.details_expanded = true

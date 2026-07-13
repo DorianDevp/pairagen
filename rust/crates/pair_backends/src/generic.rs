@@ -62,8 +62,9 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
             "rules": [
                 "If a.kind is user and a.action is fix, return a patch op unless a patch is impossible.",
                 "If s.mode is fix and a.kind is start, return a patch op unless a patch is impossible.",
-                "For non-fix actions, do not return a patch op.",
-                "If limits.goal_completion is true, assess the whole original goal. Return summary only when every requirement is satisfied; otherwise return one finding with the next unresolved step and its concrete location. Never return a patch for this action.",
+                "For non-fix actions, do not return a patch op unless limits.goal_completion is true.",
+                "If limits.goal_completion is true, drive the original goal continuously: return one patch hunk whenever work remains, open_location when the next hunk needs another buffer, and summary only when every requirement is satisfied. Never repeat an accepted step.",
+                "If limits.goal_completion is true and limits.expected is finding, explain why the pending hunk is the right next step without replacing it or advancing the goal.",
                 "A patch is one small local pair-programming step: one file, one hunk, and no more changed lines than the supplied limit.",
                 "Do not complete or plan a whole refactor in one response.",
                 "Explain why the next coherent block matters and return control to the user after that step."

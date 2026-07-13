@@ -157,18 +157,17 @@ and returns that agent to its own default.
 ```text
 <leader>a
 Prompt
-Persistent goal
-Hypothesis
-Follow, Why, Fix, Other, Stop
-One local patch
+Persistent agent goal
+Agent inspects the project and chooses the next edit
+One local editable hunk
 Edit the inline draft
-<leader>pa Accept, <leader>pd Reject, <leader>pr Retry
-Accepted local step
-Local applied receipt
-Explicit Assess goal, Check, or Stop
-Completed-goal summary or one located unresolved step
-Explicit Draft/Fix at that location
-One local patch
+Accept, Reject, edit, message, or ask Why
+Why → explanation → Back to the same pending draft
+Accept → agent automatically continues the same goal
+Reject → agent automatically reworks the hunk
+Next file opens automatically inside the workspace
+Next editable hunk
+Repeat until completed-goal summary
 ```
 
 Cards stay anchored beside the source line and do not take focus. Use `<leader>pg`
@@ -177,12 +176,10 @@ focus the current Pair card. Long goals and draft explanations stay compact by
 default; press `z` while the card is focused to expand or collapse their full
 text (`keymaps.details` changes this key).
 
-When the agent can only proceed from a different file — say the fix belongs in
-a component class while a template is open — it does not fail or deny. It asks
-mid-turn: Pair shows a permission prompt ("Pair agent wants to open …"), and on
-approval the file opens and the same agent turn continues with the new buffer.
-One request, no retry. Declining (or ignoring for two minutes) surfaces a deny
-card with the location and an `[o] Open & retry` shortcut instead.
+When the running goal needs a different file, Pair opens that location
+automatically and resumes the same agent turn with its buffer. Automatic
+navigation is restricted to the current workspace; edits are still inert drafts
+until the user accepts the hunk.
 
 By default the first card is whatever fits the prompt best: a hypothesis, a
 finding, or a clarifying choice when the prompt is ambiguous. Start the prompt
@@ -192,13 +189,15 @@ with `/{kind}` to demand a specific card instead — `/hypothesis`, `/finding`,
 Unknown words after `/` are treated as normal prompt text, so paths like
 `/tmp/project` are safe.
 
-The goal and accepted-step count stay visible on cards and editable drafts. After
-accepting a patch, Pair shows a local receipt without calling the agent again.
-`Assess goal` checks the original goal against accepted steps and current project
-state. It either marks the goal complete or locates one unresolved next step; it
-never drafts a patch. `Draft` remains a separate explicit action, so continuing
-cannot silently rewrite the current buffer. `:PairNext` remains as a compatibility
-alias for `:PairAssess`.
+The goal and accepted-step count stay visible on cards and editable drafts. In
+the default `auto` mode the agent owns the complete process: it inspects the
+project, proposes one hunk, waits for `Accept` or `Reject`, and immediately
+continues after that decision until the whole goal is complete. User control is
+the hunk gate, not a repeated discovery/assess/draft ceremony. Asking `Why`
+opens a side conversation about the pending hunk and then returns to that exact
+draft without advancing or replacing it. Explicit
+`/{kind}` prompts and investigate/explain/review modes remain available for
+one-card workflows.
 
 Speculative patch prefetch is off by default because an unused draft still costs
 a full model turn. Set `backend.prefetch = "fix"` only when that latency/cost

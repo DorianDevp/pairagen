@@ -10,6 +10,7 @@ local labels = {
   reply = { "m", "Message", "reply" },
   follow = { "f", "Follow", "follow" },
   why = { "w", "Why", "why" },
+  resume_draft = { "b", "Back to draft", nil },
   fix = { "x", "Draft", "fix" },
   other_lead = { "n", "Other", "other_lead" },
   apply = { "a", "Review", "draft_accept" },

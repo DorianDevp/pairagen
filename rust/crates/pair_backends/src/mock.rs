@@ -17,20 +17,28 @@ pub struct MockBackend;
 #[async_trait]
 impl BackendAdapter for MockBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
-        let card = match req.action {
-            BackendAction::Start => first_card(),
-            BackendAction::User(Action::Follow) => finding_card(),
-            BackendAction::User(Action::Why) => why_card(),
-            BackendAction::User(Action::Fix) => patch_card(&req),
-            BackendAction::User(Action::OtherLead) => other_card(),
-            BackendAction::User(Action::Retry) => patch_card(&req),
-            BackendAction::User(Action::RunCheck) => check_card(),
-            BackendAction::User(Action::Next) => next_step_card(),
-            BackendAction::User(Action::Stop) => stop_card(),
-            BackendAction::User(action) => unsupported_card(action),
-            BackendAction::Reply(text) => reply_card(text),
-            BackendAction::ContractRetry(_) => finding_card(),
-            BackendAction::LocationGranted => patch_card(&req),
+        let card = if req.card_contract.allow_goal_completion
+            && req.card_contract.expected_kind == Some(pair_protocol::CardKind::Finding)
+        {
+            why_card()
+        } else if req.card_contract.allow_goal_completion {
+            goal_card(&req)
+        } else {
+            match req.action {
+                BackendAction::Start => first_card(),
+                BackendAction::User(Action::Follow) => finding_card(),
+                BackendAction::User(Action::Why) => why_card(),
+                BackendAction::User(Action::Fix) => patch_card(&req),
+                BackendAction::User(Action::OtherLead) => other_card(),
+                BackendAction::User(Action::Retry) => patch_card(&req),
+                BackendAction::User(Action::RunCheck) => check_card(),
+                BackendAction::User(Action::Next) => next_step_card(),
+                BackendAction::User(Action::Stop) => stop_card(),
+                BackendAction::User(action) => unsupported_card(action),
+                BackendAction::Reply(text) => reply_card(text),
+                BackendAction::ContractRetry(_) => finding_card(),
+                BackendAction::LocationGranted => patch_card(&req),
+            }
         };
 
         Ok(BackendResponse {
@@ -51,6 +59,28 @@ impl BackendAdapter for MockBackend {
 
     fn capabilities(&self) -> BackendInfo {
         Self::info()
+    }
+}
+
+fn goal_card(req: &BackendRequest) -> Card {
+    if req.session.completed_steps.len() >= 2 {
+        Card::Summary(SummaryCard {
+            id: "c_complete".into(),
+            title: "Goal complete".into(),
+            summary: "The payload and its caller now preserve the required shape.".into(),
+            changed_files: vec!["src/work.ts".into()],
+            next_actions: vec![Action::RunCheck, Action::Stop],
+        })
+    } else {
+        let mut card = patch_card(req);
+        if req.session.completed_steps.len() == 1
+            && let Card::Patch(patch) = &mut card
+        {
+            patch.title = "Complete payload shape".into();
+            patch.explanation = "Add the data member required by the caller.".into();
+            patch.patches[0].explanation = "Provides the caller-visible data member.".into();
+        }
+        card
     }
 }
 
@@ -177,6 +207,7 @@ fn patch_card(req: &BackendRequest) -> Card {
         }],
         actions: vec![
             Action::Apply,
+            Action::Why,
             Action::Retry,
             Action::EditPrompt,
             Action::Stop,

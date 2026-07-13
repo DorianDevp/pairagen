@@ -16,6 +16,14 @@ Pairagen presents one hypothesis, finding, or editable patch at a time. It is
 designed for explicit user-controlled pair-programming steps rather than an
 open-ended chat session.
 
+In the default auto mode, one prompt starts a persistent goal loop. The agent
+inspects the project and proposes one editable hunk. Accepting it immediately
+continues to the next hunk; rejecting it immediately requests a rework. The
+loop ends only with a completed-goal summary. Navigation between files inside
+the workspace is automatic, while every code change remains gated by explicit
+Accept or Reject. Use `keymaps.why` (`<leader>pw` by default) on a draft to ask
+why; the answer keeps that exact hunk pending and offers `Back to draft`.
+
 Long goals and patch explanations are compact by default. Focus the Pair card
 and press `z` to expand or collapse the full text. Configure this with
 `keymaps.details`.

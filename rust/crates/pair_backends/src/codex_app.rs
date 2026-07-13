@@ -191,18 +191,23 @@ impl CodexAppBackend {
         model: &Option<String>,
     ) -> Result<String> {
         let patch_turn = turn_phase(req) == Phase::Patch;
+        let goal_loop = req.card_contract.allow_goal_completion;
         let thread_key = thread_key(req);
 
         if let Some(thread_id) = state.threads.get(&thread_key) {
             return Ok(thread_id.clone());
         }
 
-        let base_instructions = if patch_turn {
+        let base_instructions = if goal_loop {
+            "You are a local Pairagen coding agent executing one persistent goal. You may use targeted read-only project tools to inspect the repository and choose the next edit. Never edit files yourself. Return exactly one final JSON object matching the supplied output schema and no prose."
+        } else if patch_turn {
             "You are a local Pairagen pair-programming partner. Do not use tools, commands, file reads, or repo inspection. Never edit files. Return exactly one final JSON object matching the supplied output schema and no prose."
         } else {
             "You are a local Pairagen pair-programming partner. You may use at most two targeted read-only project tool calls to find the next relevant code block. Stop searching once the supplied context supports an exact location. Never edit files. Return exactly one final JSON object matching the supplied output schema and no prose."
         };
-        let developer_instructions = if patch_turn {
+        let developer_instructions = if goal_loop {
+            "Drive the original goal from start to finish. At each work turn return exactly one coherent patch hunk for user review, or a summary only when the whole goal is complete. When the user asks why, explain the pending hunk without advancing or replacing it. Preserve progress across turns, do not repeat accepted work, and request open_location when the next hunk belongs in another buffer."
+        } else if patch_turn {
             "Work as an equal pair-programming partner. Propose one coherent local block at the supplied location and explain why this is the useful next move. Do not take over the whole task. Return one structured patch hunk as an editable draft, not a finished agenda."
         } else {
             "Work as an equal pair-programming partner. Inspect only enough code to identify one coherent next move. Explain what you noticed, why it matters, and how the code reveals it. Do not dictate line-by-line work or plan the whole task. Return one exact location so the keyboard can pass back to the user."
@@ -348,7 +353,9 @@ impl CodexAppBackend {
 }
 
 fn turn_phase(req: &BackendRequest) -> Phase {
-    if req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch) {
+    if req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch)
+        || req.card_contract.allow_goal_completion
+    {
         Phase::Patch
     } else {
         Phase::Discovery
@@ -356,6 +363,9 @@ fn turn_phase(req: &BackendRequest) -> Phase {
 }
 
 fn thread_key(req: &BackendRequest) -> String {
+    if req.card_contract.allow_goal_completion {
+        return format!("{}:goal", req.session.id);
+    }
     let patch_turn = turn_phase(req) == Phase::Patch;
     format!(
         "{}:{}:{}",
@@ -650,15 +660,26 @@ impl BackendAdapter for CodexAppBackend {
 
 fn prompt(req: &BackendRequest, include_context: bool) -> String {
     let patch_turn = turn_phase(req) == Phase::Patch;
-    let goal_review = req.card_contract.allow_goal_completion;
-    let turn_rules = if goal_review {
-        "- Assess the whole original session goal against the completed local steps and current project state.\n\
-         - Never return a patch. Patch drafting requires a separate explicit Fix action.\n\
-         - Return summary only when every requirement stated by the goal is satisfied; name the evidence in the summary.\n\
-         - Otherwise return exactly one finding for the next unresolved requirement with a concrete file and line.\n\
-         - A choice is allowed only when a user decision genuinely blocks the next step.\n\
-         - Inspect the supplied ranked context first and use at most two targeted read-only searches when needed.\n\
-         - Do not repeat a completed step or merely rephrase the preceding card."
+    let goal_loop = req.card_contract.allow_goal_completion;
+    let goal_question =
+        goal_loop && req.card_contract.expected_kind == Some(pair_protocol::CardKind::Finding);
+    let turn_rules = if goal_question {
+        "- Explain why the currently pending patch is the right next step for the original goal.\n\
+         - Address its behavior, tradeoffs, and relevant evidence from the code.\n\
+         - Return one concise finding. Do not draft, replace, advance, or complete the goal.\n\
+         - The exact pending patch remains awaiting user acceptance after this answer."
+            .into()
+    } else if goal_loop {
+        format!(
+            "- Continue executing the original session goal from the accepted progress; never restart or repeat a completed step.\n\
+             - Inspect the project as needed with targeted read-only tools and decide the next coherent edit yourself.\n\
+             - If the next edit is outside the supplied buffer, return open_location immediately and continue after the editor supplies that buffer.\n\
+             - If the goal is unresolved and the correct buffer is supplied, return exactly one structured patch with one file and one hunk changing at most {} added/removed lines.\n\
+             - Return summary only when every requirement in the original goal is satisfied; cite the completed result.\n\
+             - Return choice only when a genuine user decision blocks all safe progress.\n\
+             - Do not return a finding, an assessment, a plan, or instructions for the user to request another draft.",
+            req.card_contract.max_changed_lines
+        )
             .into()
     } else if patch_turn {
         format!(
@@ -683,9 +704,12 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             .into()
     };
 
-    let output_contract = if goal_review {
-        "- finding: next unresolved goal step with a concrete location\n\
-- choice: only when the next step requires a user decision\n\
+    let output_contract = if goal_question {
+        "- finding: concise explanation of the pending hunk"
+    } else if goal_loop {
+        "- patch: exactly one structured hunk for the next goal step\n\
+- open_location: when the next hunk belongs in another buffer\n\
+- choice: only for a blocking user decision\n\
 - summary: only when the complete original goal is satisfied"
     } else {
         "- hypothesis: {\"op\":\"hypothesis\",\"title\":string,\"claim\":string,\"evidence\":object|null,\"next\":object|null}\n\
@@ -694,7 +718,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
 - error: {\"op\":\"error\",\"title\":string,\"message\":string}"
     };
 
-    let ranked_context = if patch_turn || req.context.artifacts.is_empty() {
+    let ranked_context = if (patch_turn && !goal_loop) || req.context.artifacts.is_empty() {
         "none".into()
     } else {
         req.context
@@ -801,6 +825,12 @@ fn action_value(action: &BackendAction) -> Value {
 }
 
 fn parse_card(output: &str, contract: &crate::CardContract) -> Result<Card> {
+    if contract.allow_goal_completion {
+        let value = serde_json::from_str::<Value>(output.trim())?;
+        if value.get("op").and_then(Value::as_str) == Some("patch") {
+            return parse_structured_patch(output);
+        }
+    }
     if contract.expected_kind == Some(pair_protocol::CardKind::Patch) {
         return parse_structured_patch(output);
     }
@@ -838,6 +868,7 @@ fn parse_structured_patch(output: &str) -> Result<Card> {
         patches,
         actions: vec![
             Action::Apply,
+            Action::Why,
             Action::Retry,
             Action::EditPrompt,
             Action::Stop,
@@ -892,8 +923,13 @@ fn render_structured_diff(hunks: &[StructuredHunk]) -> Result<String> {
 }
 
 fn output_schema(req: &BackendRequest) -> Value {
+    if req.card_contract.allow_goal_completion
+        && req.card_contract.expected_kind == Some(pair_protocol::CardKind::Finding)
+    {
+        return finding_schema();
+    }
     if req.card_contract.allow_goal_completion {
-        return goal_review_schema();
+        return goal_loop_schema(&req.card_contract);
     }
 
     match req.card_contract.expected_kind {
@@ -976,16 +1012,19 @@ fn any_op_schema() -> Value {
     )
 }
 
-fn goal_review_schema() -> Value {
+fn goal_loop_schema(contract: &crate::CardContract) -> Value {
     let mut schema = any_op_schema();
     schema["properties"]["op"]["enum"] = json!([
-        "finding",
+        "patch",
         "choice",
         "deny",
         "open_location",
         "summary",
         "error"
     ]);
+    let mut patches = patch_schema(contract)["properties"]["patches"].clone();
+    patches["type"] = json!(["array", "null"]);
+    schema["properties"]["patches"] = patches;
     schema
 }
 
@@ -1348,8 +1387,8 @@ mod tests {
 
         request.card_contract.expected_kind = None;
         request.card_contract.allow_goal_completion = true;
-        assert_eq!(turn_phase(&request), Phase::Discovery);
-        assert_eq!(thread_key(&request), "s_1:discover:0");
+        assert_eq!(turn_phase(&request), Phase::Patch);
+        assert_eq!(thread_key(&request), "s_1:goal");
     }
 
     #[tokio::test]
@@ -1467,6 +1506,49 @@ mod tests {
     }
 
     #[test]
+    fn goal_loop_dispatches_structured_patch_output() {
+        let output = json!({
+            "op": "patch",
+            "title": "Continue the goal",
+            "explanation": "Apply the next accepted requirement.",
+            "patches": [{
+                "id": null,
+                "file": "src/main.rs",
+                "explanation": "Update the next local block.",
+                "hunks": [{
+                    "old_start": 1,
+                    "new_start": 1,
+                    "lines": [
+                        {"kind": "remove", "text": "old"},
+                        {"kind": "add", "text": "new"}
+                    ]
+                }]
+            }],
+            "claim": null,
+            "evidence": null,
+            "next": null,
+            "finding": null,
+            "location": null,
+            "annotation": null,
+            "question": null,
+            "options": null,
+            "reason": null,
+            "summary": null,
+            "changed_files": null,
+            "message": null
+        });
+        let contract = crate::CardContract {
+            allow_goal_completion: true,
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            parse_card(&output.to_string(), &contract).unwrap(),
+            Card::Patch(_)
+        ));
+    }
+
+    #[test]
     fn strict_parser_rejects_prose_around_json() {
         let output = r#"Here is the result: {"op":"finding","title":"T","finding":"F","location":null,"annotation":null}"#;
         let contract = crate::CardContract {
@@ -1489,13 +1571,27 @@ mod tests {
     }
 
     #[test]
-    fn goal_review_schema_forbids_patch_ops() {
-        let schema = goal_review_schema();
+    fn goal_loop_schema_allows_structured_patch_or_summary() {
+        let schema = goal_loop_schema(&crate::CardContract::default());
         let ops = schema["properties"]["op"]["enum"].as_array().unwrap();
 
-        assert!(ops.contains(&json!("finding")));
+        assert!(ops.contains(&json!("patch")));
         assert!(ops.contains(&json!("summary")));
-        assert!(!ops.contains(&json!("patch")));
+        assert!(!ops.contains(&json!("finding")));
+        assert!(schema["properties"]["patches"]["items"]["properties"]["hunks"].is_object());
+    }
+
+    #[test]
+    fn why_uses_finding_schema_inside_the_goal_thread() {
+        let mut request = request();
+        request.card_contract.expected_kind = Some(pair_protocol::CardKind::Finding);
+        request.card_contract.allow_goal_completion = true;
+        request.action = BackendAction::User(Action::Why);
+        let schema = output_schema(&request);
+
+        assert_eq!(thread_key(&request), "s_1:goal");
+        assert_eq!(schema["properties"]["op"]["enum"][0], "finding");
+        assert!(prompt(&request, true).contains("pending patch remains"));
     }
 
     #[test]

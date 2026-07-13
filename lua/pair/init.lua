@@ -16,25 +16,31 @@ rpc.on("agent/progress", function(progress)
   thinking.progress(progress)
 end)
 
--- Mid-turn permission request: the agent can only continue once a different
--- file is open. On approval the same agent turn resumes with fresh context —
--- no card is shown and no extra request is spent.
+-- A running goal may need its next buffer. Opening a workspace file is
+-- reversible and the resulting hunk still requires explicit acceptance, so
+-- navigation itself does not interrupt the process with another prompt.
 rpc.on_request("editor/open_location", function(params, respond)
   local location = params.location or {}
   local file = location.file or "?"
-  local question = string.format(
-    "Pair agent wants to open %s:%s\n%s",
-    vim.fn.fnamemodify(file, ":~:."),
-    location.line or 1,
-    params.reason or ""
-  )
 
-  if vim.fn.confirm(question, "&Open\n&Deny", 1, "Question") == 1 and navigation.open_location(location) then
+  if M.workspace_location(file) and navigation.open_location(location) then
     respond({ granted = true, context = context.session() })
   else
     respond({ granted = false })
   end
 end)
+
+function M.workspace_location(file)
+  if type(file) ~= "string" or file == "" then
+    return false
+  end
+
+  local root = vim.uv.fs_realpath(vim.fn.getcwd()) or vim.fs.normalize(vim.fn.getcwd())
+  local target = vim.fn.fnamemodify(file, ":p")
+  target = vim.uv.fs_realpath(target) or vim.fs.normalize(target)
+
+  return target == root or vim.startswith(target, root .. "/")
+end
 
 function M.setup(opts)
   config.setup(opts)
@@ -115,6 +121,13 @@ function M.action(action)
     ui.notify("No active session", vim.log.levels.WARN)
 
     return
+  end
+
+  if action == "why" then
+    local diff = require("pair.diff")
+    if diff.valid_preview() then
+      diff.restore_source()
+    end
   end
 
   if action == "apply" and state.card and state.card.kind == "patch" then
@@ -260,7 +273,7 @@ function M.token_budget_exceeded()
 end
 
 function M.confirm_agent_turn(action)
-  if action == "apply" or action == "open" or action == "stop" then
+  if action == "apply" or action == "open" or action == "resume_draft" or action == "stop" then
     return true
   end
 

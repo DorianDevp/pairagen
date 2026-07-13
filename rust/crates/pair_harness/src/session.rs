@@ -32,6 +32,7 @@ pub struct Session {
     pub completed_step_signatures: Vec<(PathBuf, String)>,
     pub goal_status: GoalStatus,
     pub next_step: Option<String>,
+    pub continuous_goal: bool,
     pub known_observations: Vec<ObservationProgress>,
     pub observation_index: HashMap<String, usize>,
     pub state: SessionState,
@@ -44,6 +45,9 @@ impl Session {
     pub fn new(params: StartSessionParams) -> Self {
         let context = ContextBundle::from_start(params.clone());
         let (forced_kind, prompt) = parse_kind_prefix(&params.prompt);
+
+        let continuous_goal =
+            forced_kind.is_none() && matches!(params.mode, Mode::Auto | Mode::Fix);
 
         Self {
             id: format!("s_{}", Uuid::new_v4().simple()),
@@ -63,6 +67,7 @@ impl Session {
             completed_step_signatures: vec![],
             goal_status: GoalStatus::Active,
             next_step: None,
+            continuous_goal,
             known_observations: vec![],
             observation_index: HashMap::new(),
             state: SessionState::Thinking,

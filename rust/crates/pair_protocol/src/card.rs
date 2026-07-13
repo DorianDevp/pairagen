@@ -24,6 +24,7 @@ pub enum CardKind {
 pub enum Action {
     Follow,
     Why,
+    ResumeDraft,
     Fix,
     OtherLead,
     Apply,

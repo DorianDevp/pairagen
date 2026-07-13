@@ -93,7 +93,7 @@ impl Engine {
             &session.context_policy,
         );
         session.context = context.clone();
-        let expected = expected_start_state(&session.mode);
+        let expected = expected_start_state(&session);
         let response = self
             .next_distinct_response(
                 &mut session,
@@ -185,6 +185,32 @@ impl Engine {
         progress: Option<ProgressReporter>,
         prefetched: Option<BackendResponse>,
     ) -> Result<ActionResult> {
+        if action == Action::ResumeDraft {
+            if session.state != SessionState::PatchExplained {
+                return Err(anyhow!("no explained patch is waiting to resume"));
+            }
+            let card = session
+                .cards
+                .iter()
+                .rev()
+                .find(|card| matches!(card, Card::Patch(_)))
+                .cloned()
+                .ok_or_else(|| anyhow!("pending patch is unavailable"))?;
+            session.state = SessionState::PatchShown;
+            session.cards.push(card.clone());
+
+            return Ok(ActionResult {
+                session_id: session_id.into(),
+                card,
+                goal: goal_progress(session),
+                token_usage: session.token_usage.clone(),
+                turn_token_usage: TokenUsage::default(),
+                context_report: session.context.report.clone(),
+                model: None,
+                attempts: vec![],
+            });
+        }
+
         let state = session.state.next(&action)?;
         if action == Action::Stop {
             session.state = SessionState::Finished;
@@ -254,7 +280,13 @@ impl Engine {
         }
 
         let context = session.context.clone();
-        let expected = NextState::Any;
+        let expected = if session.state == SessionState::PatchExplained {
+            NextState::GoalWhy
+        } else if session.continuous_goal {
+            NextState::GoalLoop
+        } else {
+            NextState::Any
+        };
 
         session.state = SessionState::Thinking;
 
@@ -337,6 +369,16 @@ impl Engine {
             session.state = SessionState::Summary;
             session.goal_status = pair_protocol::GoalStatus::NeedsReview;
             session.next_step = None;
+            if session.continuous_goal {
+                return self
+                    .goal_turn_taken(
+                        &session_id,
+                        session,
+                        BackendAction::User(Action::Next),
+                        progress,
+                    )
+                    .await;
+            }
             let changed_files = result.changed_files;
             let summary = if changed_files.is_empty() {
                 "The local patch was applied. Continue only if the goal needs another change."
@@ -375,8 +417,50 @@ impl Engine {
         session.rejected_patches.extend(result.patch_ids.clone());
         session.state = SessionState::PatchShown;
 
+        if session.continuous_goal {
+            return self
+                .goal_turn_taken(
+                    &session_id,
+                    session,
+                    BackendAction::User(Action::Retry),
+                    progress,
+                )
+                .await;
+        }
+
         self.action_taken(&session_id, session, Action::Retry, progress, None)
             .await
+    }
+
+    async fn goal_turn_taken(
+        &self,
+        session_id: &str,
+        session: &mut Session,
+        action: BackendAction,
+        progress: Option<ProgressReporter>,
+    ) -> Result<ActionResult> {
+        let expected = NextState::GoalLoop;
+        let context = session.context.clone();
+        session.state = SessionState::Thinking;
+        let response = self
+            .next_distinct_response(session, action, context, &expected, progress, None)
+            .await;
+        let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
+        let attempts = response.metadata.attempts.clone();
+        let model = response.metadata.model.clone();
+        self.add_usage(session, &response.metadata.token_usage);
+        let card = self.accept_response(session, response, expected)?;
+
+        Ok(ActionResult {
+            session_id: session_id.into(),
+            card,
+            goal: goal_progress(session),
+            token_usage: session.token_usage.clone(),
+            turn_token_usage,
+            context_report: session.context.report.clone(),
+            model,
+            attempts,
+        })
     }
 
     pub fn get(&self, session_id: &str) -> Option<&Session> {
@@ -431,7 +515,7 @@ impl Engine {
             context,
             card_contract: CardContract {
                 expected_kind,
-                allow_goal_completion: matches!(expected, NextState::GoalReview),
+                allow_goal_completion: matches!(expected, NextState::GoalLoop | NextState::GoalWhy),
                 ..CardContract::default()
             },
         }
@@ -547,7 +631,9 @@ impl Engine {
                 return response;
             }
 
-            if let Some((key, reason)) = duplicate_observation(session, &response.card) {
+            if !matches!(expected, NextState::GoalWhy)
+                && let Some((key, reason)) = duplicate_observation(session, &response.card)
+            {
                 activate_observation(session, &key);
                 attempts.push(agent_attempt(
                     attempt + 1,
@@ -684,7 +770,17 @@ impl Engine {
         next_state: NextState,
     ) -> Result<Card> {
         let mut received = response.card;
-        if matches!(next_state, NextState::GoalReview)
+        if let Card::Patch(patch) = &mut received
+            && !patch.actions.contains(&Action::Why)
+        {
+            patch.actions.insert(1, Action::Why);
+        }
+        if matches!(next_state, NextState::GoalWhy)
+            && let Card::Finding(finding) = &mut received
+        {
+            finding.actions = vec![Action::ResumeDraft, Action::Stop];
+        }
+        if matches!(next_state, NextState::GoalLoop)
             && let Card::Summary(summary) = &mut received
         {
             summary
@@ -697,7 +793,9 @@ impl Engine {
                 summary.next_actions.push(Action::Stop);
             }
         }
-        prepare_observation_card(session, &mut received);
+        if !matches!(next_state, NextState::GoalWhy) {
+            prepare_observation_card(session, &mut received);
+        }
         let validation =
             PatchNormalizer::normalize_card(&mut received, &session.context).and_then(|()| {
                 PatchCoherence::annotate(&mut received);
@@ -705,7 +803,9 @@ impl Engine {
             });
         let card = match validation {
             Ok(()) => {
-                record_observations(session, &received);
+                if !matches!(next_state, NextState::GoalWhy) {
+                    record_observations(session, &received);
+                }
                 received
             }
             Err(error) => rejected_card(session, &received, error, response.raw_output.as_deref()),
@@ -892,11 +992,15 @@ fn goal_progress(session: &Session) -> GoalProgress {
 }
 
 fn update_goal_state(session: &mut Session, card: &Card, next_state: &NextState) {
-    if !matches!(next_state, NextState::GoalReview) {
+    if !matches!(next_state, NextState::GoalLoop) {
         return;
     }
 
     match card {
+        Card::Patch(card) => {
+            session.goal_status = pair_protocol::GoalStatus::Active;
+            session.next_step = Some(card.explanation.clone());
+        }
         Card::Summary(_) => {
             session.goal_status = pair_protocol::GoalStatus::Complete;
             session.next_step = None;
@@ -1444,8 +1548,10 @@ fn duplicate_failure_response(session: &Session, reason: String) -> BackendRespo
     }
 }
 
-fn expected_start_state(mode: &Mode) -> NextState {
-    if *mode == Mode::Fix {
+fn expected_start_state(session: &Session) -> NextState {
+    if session.continuous_goal {
+        NextState::GoalLoop
+    } else if session.mode == Mode::Fix {
         NextState::Patch
     } else {
         NextState::Any
@@ -1463,7 +1569,8 @@ fn expected_card_kind(
 ) -> Option<CardKind> {
     match next_state {
         NextState::Patch => return Some(CardKind::Patch),
-        NextState::GoalReview => return None,
+        NextState::GoalLoop => return None,
+        NextState::GoalWhy => return Some(CardKind::Finding),
         NextState::Summary | NextState::Finished => return Some(CardKind::Summary),
         NextState::Any | NextState::Card => {}
     }
@@ -1491,7 +1598,9 @@ fn expected_card_kind(
                 .find(|card| !matches!(card, Card::Error(_) | Card::Deny(_)))
                 .map(Card::kind)
                 .or(session.forced_kind),
-            Action::Apply | Action::ApplyPatch { .. } | Action::Stop => Some(CardKind::Summary),
+            Action::Apply | Action::ApplyPatch { .. } | Action::ResumeDraft | Action::Stop => {
+                Some(CardKind::Summary)
+            }
         },
     }
 }
@@ -1501,8 +1610,14 @@ fn state_after_card(card: &Card, next_state: &NextState) -> SessionState {
     if refused && matches!(next_state, NextState::Patch) {
         return SessionState::PatchFailed;
     }
-    if refused && matches!(next_state, NextState::GoalReview) {
-        return SessionState::GoalReviewFailed;
+    if refused && matches!(next_state, NextState::GoalLoop) {
+        return SessionState::GoalLoopFailed;
+    }
+    if refused && matches!(next_state, NextState::GoalWhy) {
+        return SessionState::PatchExplained;
+    }
+    if matches!(next_state, NextState::GoalWhy) && matches!(card, Card::Finding(_)) {
+        return SessionState::PatchExplained;
     }
 
     SessionState::from_card(card)
@@ -1556,7 +1671,7 @@ mod tests {
             cursor: Cursor { line: 1, column: 1 },
             selection: None,
             prompt: "payload is empty".into(),
-            mode: Mode::Auto,
+            mode: Mode::Investigate,
             buffer_text: "placeholder".into(),
             buffer_start_line: 1,
             diagnostics: vec![],
@@ -1629,17 +1744,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_patch_returns_a_local_receipt_before_optional_continuation() {
+    async fn continuous_goal_advances_after_each_accepted_hunk_until_complete() {
         let backend = Arc::new(MockBackend);
         let mut engine = Engine::new(backend);
-        let start = engine.start(params()).await.unwrap();
-        let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        let mut goal = params();
+        goal.mode = Mode::Auto;
+        let first = engine.start(goal).await.unwrap();
 
-        assert!(matches!(patch.card, Card::Patch(_)));
+        assert!(matches!(first.card, Card::Patch(_)));
 
         let result = PatchApplyResult {
-            session_id: start.session_id,
-            card_id: patch.card.id().into(),
+            session_id: first.session_id,
+            card_id: first.card.id().into(),
             accepted: true,
             patch_ids: vec!["p_1".into()],
             changed_files: vec![PathBuf::from("src/work.ts")],
@@ -1647,29 +1763,88 @@ mod tests {
             context: editor_context("payload = payload or {}"),
         };
 
-        let applied = engine.apply_result(result).await.unwrap();
+        let second = engine.apply_result(result).await.unwrap();
 
-        let Card::Summary(receipt) = &applied.card else {
-            panic!("expected local applied receipt");
-        };
-        assert!(receipt.next_actions.contains(&Action::Next));
-        assert_eq!(applied.turn_token_usage, TokenUsage::default());
-        assert_eq!(applied.goal.status, pair_protocol::GoalStatus::NeedsReview);
-        assert!(applied.goal.next_step.is_none());
+        assert!(matches!(second.card, Card::Patch(_)));
+        assert!(second.turn_token_usage.total_tokens > 0);
+        assert_eq!(second.goal.status, pair_protocol::GoalStatus::Active);
         assert_eq!(
-            engine.get(&applied.session_id).unwrap().completed_steps,
+            engine.get(&second.session_id).unwrap().completed_steps,
             vec!["src/work.ts: Keeps body present for callers."]
         );
 
-        let next = engine
-            .action(&applied.session_id, Action::Next)
+        let result = PatchApplyResult {
+            session_id: second.session_id,
+            card_id: second.card.id().into(),
+            accepted: true,
+            patch_ids: vec!["p_1".into()],
+            changed_files: vec![PathBuf::from("src/work.ts")],
+            error: None,
+            context: editor_context("payload = payload or { data = {} }"),
+        };
+        let complete = engine.apply_result(result).await.unwrap();
+
+        assert!(matches!(complete.card, Card::Summary(_)));
+        assert_eq!(complete.goal.status, pair_protocol::GoalStatus::Complete);
+        assert_eq!(complete.goal.completed_steps.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn continuous_goal_reworks_a_rejected_hunk_without_leaving_the_loop() {
+        let backend = Arc::new(MockBackend);
+        let mut engine = Engine::new(backend);
+        let mut goal = params();
+        goal.mode = Mode::Auto;
+        let first = engine.start(goal).await.unwrap();
+        let result = PatchApplyResult {
+            session_id: first.session_id,
+            card_id: first.card.id().into(),
+            accepted: false,
+            patch_ids: vec!["p_1".into()],
+            changed_files: vec![],
+            error: None,
+            context: editor_context("placeholder"),
+        };
+
+        let reworked = engine.apply_result(result).await.unwrap();
+
+        assert!(matches!(reworked.card, Card::Patch(_)));
+        assert!(reworked.turn_token_usage.total_tokens > 0);
+        assert!(reworked.goal.completed_steps.is_empty());
+        assert_eq!(reworked.goal.status, pair_protocol::GoalStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn why_explains_and_restores_the_same_pending_hunk() {
+        let backend = Arc::new(MockBackend);
+        let mut engine = Engine::new(backend);
+        let mut goal = params();
+        goal.mode = Mode::Auto;
+        let first = engine.start(goal).await.unwrap();
+        let patch_id = first.card.id().to_string();
+
+        let explained = engine.action(&first.session_id, Action::Why).await.unwrap();
+
+        let Card::Finding(explanation) = explained.card else {
+            panic!("expected patch explanation");
+        };
+        assert!(explanation.actions.contains(&Action::ResumeDraft));
+        assert_eq!(
+            engine.get(&first.session_id).unwrap().state,
+            SessionState::PatchExplained
+        );
+
+        let resumed = engine
+            .action(&first.session_id, Action::ResumeDraft)
             .await
             .unwrap();
-        assert!(matches!(next.card, Card::Finding(_)));
-        assert_eq!(next.goal.status, pair_protocol::GoalStatus::Active);
+
+        assert!(matches!(resumed.card, Card::Patch(_)));
+        assert_eq!(resumed.card.id(), patch_id);
+        assert_eq!(resumed.turn_token_usage, TokenUsage::default());
         assert_eq!(
-            next.goal.next_step.as_deref(),
-            Some("The payload producer is fixed; inspect the caller that consumes body.data next.")
+            engine.get(&first.session_id).unwrap().state,
+            SessionState::PatchShown
         );
     }
 
@@ -1857,10 +2032,10 @@ mod tests {
             panic!("expected error card");
         };
 
-        assert!(card.message.contains("expected patch card"));
+        assert!(card.message.contains("expected the next goal patch"));
         assert_eq!(
             engine.get(&result.session_id).unwrap().state,
-            SessionState::PatchFailed
+            SessionState::GoalLoopFailed
         );
         let apply_error = engine
             .action(&result.session_id, Action::Apply)
@@ -2475,7 +2650,9 @@ mod tests {
         let backend = Arc::new(ExpectationRecorder::default());
         let mut engine = Engine::new(backend.clone());
 
-        engine.start(params()).await.unwrap();
+        let mut auto = params();
+        auto.mode = Mode::Auto;
+        engine.start(auto).await.unwrap();
 
         let requests = backend.requests.lock().unwrap().clone();
         assert_eq!(requests[0].0, None);
