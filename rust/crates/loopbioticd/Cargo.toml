@@ -1,0 +1,19 @@
+[package]
+name = "loopbioticd"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Local backend daemon for the Loopbiotic Neovim pair-programming interface"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+loopbiotic_backends = { path = "../loopbiotic_backends" }
+loopbiotic_harness = { path = "../loopbiotic_harness" }
+loopbiotic_protocol = { path = "../loopbiotic_protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

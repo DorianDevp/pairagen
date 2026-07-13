@@ -1,0 +1,21 @@
+[package]
+name = "loopbiotic_harness"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+loopbiotic_backends = { path = "../loopbiotic_backends" }
+loopbiotic_context = { path = "../loopbiotic_context" }
+loopbiotic_patch = { path = "../loopbiotic_patch" }
+loopbiotic_protocol = { path = "../loopbiotic_protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true

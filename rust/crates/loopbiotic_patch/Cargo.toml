@@ -1,0 +1,14 @@
+[package]
+name = "loopbiotic_patch"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+loopbiotic_protocol = { path = "../loopbiotic_protocol" }
+thiserror.workspace = true

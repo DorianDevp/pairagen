@@ -1,9 +1,9 @@
 Repo ready for desloppification. I had fun with vibing this project,
 but because of growing size and complexity it's time take the steer.
 
-# Pairagen
+# Loopbiotic
 
-Pairagen is an interactive pair-programming stepper for Neovim.
+Loopbiotic is an interactive pair-programming stepper for Neovim.
 
 It is not a chat.
 It is not autocomplete.
@@ -14,7 +14,7 @@ The editor experience stays the same.
 
 ## Status and compatibility
 
-Pairagen is beta software. It has been developed and tested primarily with the
+Loopbiotic is beta software. It has been developed and tested primarily with the
 Codex CLI app-server backend. Persistent Claude CLI (stream-json), Ollama HTTP,
 generic CLI, and stdio agent adapters are available, but currently receive less
 real-world testing than Codex.
@@ -24,7 +24,7 @@ Requirements:
 - Neovim 0.10 or newer,
 - `curl`, `tar`, and either `sha256sum` or `shasum` for managed installation,
 - Codex CLI for the tested Codex backend,
-- Linux x86_64/aarch64 or macOS Intel/Apple Silicon for managed `paird` binaries.
+- Linux x86_64/aarch64 or macOS Intel/Apple Silicon for managed `loopbioticd` binaries.
 
 Implemented capabilities include:
 
@@ -48,9 +48,9 @@ With lazy.nvim:
 
 ```lua
 {
-  "DorianDevp/pairagen",
+  "DorianDevp/loopbiotic",
   config = function()
-    require("pair").setup({
+    require("loopbiotic").setup({
       backend = {
         agent = "codex",
       },
@@ -59,20 +59,20 @@ With lazy.nvim:
 }
 ```
 
-On the first Pair request, the plugin downloads the matching versioned `paird`
+On the first Loopbiotic request, the plugin downloads the matching versioned `loopbioticd`
 archive from GitHub Releases, verifies its SHA-256 checksum, and installs it
-under `stdpath("data")/pairagen/bin`. No global installation is required.
+under `stdpath("data")/loopbiotic/bin`. No global installation is required.
 
-Run `:checkhealth pair` after installation.
+Run `:checkhealth loopbiotic` after installation.
 
 ### Manual backend
 
 Automatic installation can be disabled or replaced with a custom binary:
 
 ```lua
-require("pair").setup({
+require("loopbiotic").setup({
   backend = {
-    command = "/absolute/path/to/paird",
+    command = "/absolute/path/to/loopbioticd",
     args = { "--stdio" },
     agent = "codex",
     mode = "auto",
@@ -86,25 +86,25 @@ require("pair").setup({
 For local development:
 
 ```lua
-require("pair").setup({
+require("loopbiotic").setup({
   backend = {
     command = "cargo",
-    args = { "run", "-p", "paird", "--", "--stdio" },
+    args = { "run", "-p", "loopbioticd", "--", "--stdio" },
     agent = "mock",
     mode = "auto",
   },
 })
 ```
 
-When using a built `target/debug/paird`, run `cargo build -p paird` after protocol
+When using a built `target/debug/loopbioticd`, run `cargo build -p loopbioticd` after protocol
 changes. `cargo test` only refreshes test executables under
-`target/debug/deps`. The client rejects stale `paird` protocol versions before
+`target/debug/deps`. The client rejects stale `loopbioticd` protocol versions before
 starting a session.
 
 ## Agents
 
 ```lua
-require("pair").setup({
+require("loopbiotic").setup({
   backend = {
     agent = "codex",
   },
@@ -119,7 +119,7 @@ require("pair").setup({
     },
     agent = {
       kind = "agent",
-      command = "paird",
+      command = "loopbioticd",
       args = { "dev", "stdio-agent" },
     },
     claude = {
@@ -139,17 +139,17 @@ require("pair").setup({
 Switch at runtime:
 
 ```vim
-:PairAgent codex
-:PairAgent agent
-:PairAgent claude
-:PairAgent local
-:PairModel <model>
+:LoopbioticAgent codex
+:LoopbioticAgent agent
+:LoopbioticAgent claude
+:LoopbioticAgent local
+:LoopbioticModel <model>
 ```
 
-If the active agent has no `model` set in `setup()`, `:PairModel <model>` stores
-the selection per agent in `stdpath("state")/pairagen/preferences.json` and
+If the active agent has no `model` set in `setup()`, `:LoopbioticModel <model>` stores
+the selection per agent in `stdpath("state")/loopbiotic/preferences.json` and
 restores it on the next Neovim start. A model explicitly configured in
-`setup()` always takes precedence. `:PairModel default` clears the stored model
+`setup()` always takes precedence. `:LoopbioticModel default` clears the stored model
 and returns that agent to its own default.
 
 ## Flow
@@ -172,11 +172,11 @@ Repeat until completed-goal summary and local diagnostics check
 
 Cards stay anchored beside the source line and do not take focus. Use `<leader>pg`
 to jump to a finding or the first line of an inline draft, and `<leader>pr` to
-focus the current Pair card. Long goals and draft explanations stay compact by
+focus the current Loopbiotic card. Long goals and draft explanations stay compact by
 default; press `z` while the card is focused to expand or collapse their full
 text (`keymaps.details` changes this key).
 
-For a goal patch, Pair validates every returned file against its live editor
+For a goal patch, Loopbiotic validates every returned file against its live editor
 buffer, queues the complete batch, and opens each location only when its hunk is
 ready for review. Navigation and acceptance are local operations and do not
 start another model turn. Automatic navigation is restricted to the current
@@ -184,7 +184,7 @@ workspace; edits are still inert drafts until the user accepts each hunk. If
 the agent could not inspect a required file, `open_location` remains a fallback
 that supplies its buffer in a subsequent turn.
 
-Pair moves directly to the evidence for a location-bearing card and to the
+Loopbiotic moves directly to the evidence for a location-bearing card and to the
 first non-blank character of the first added line for a draft, including drafts
 in the current file. It stays at that destination while the action card follows
 the active tab; it does not bounce through an older window that happens to show
@@ -201,7 +201,7 @@ Unknown words after `/` are treated as normal prompt text, so paths like
 The goal and accepted-step count stay visible on cards and editable drafts. In
 the default `auto` mode the agent owns the complete process: it inspects the
 project and prepares the complete change across the required files in one turn.
-Pair then presents that batch hunk by hunk; `Accept` advances locally without
+Loopbiotic then presents that batch hunk by hunk; `Accept` advances locally without
 another model call, and accepting the final complete hunk closes the goal
 locally. `Reject`, `Retry`, a file the agent could not inspect, or an explicit
 question can return control to the agent. User control is the hunk gate, not a
@@ -211,7 +211,7 @@ draft without advancing or replacing it. Explicit
 `/{kind}` prompts and investigate/explain/review modes remain available for
 one-card workflows.
 
-When the goal completes, Pair automatically checks error-level diagnostics in
+When the goal completes, Loopbiotic automatically checks error-level diagnostics in
 the changed, loaded buffers after a short delay. `Check` repeats the same local
 operation without spending model tokens, saving buffers, or running shell test
 commands.
@@ -222,13 +222,13 @@ tradeoff is intentional.
 
 Cards show raw, cached, and non-cached turn and session usage against
 `backend.token_budget` (50,000 raw tokens by default).
-After the budget is reached, Pair asks before every additional agent turn; local
+After the budget is reached, Loopbiotic asks before every additional agent turn; local
 navigation, patch review/apply, and stopping remain immediate. Set the budget to
 `0` to disable this guard.
 
 ## Context optimization
 
-Pair builds a small ranked context bundle before calling an agent. Live editor
+Loopbiotic builds a small ranked context bundle before calling an agent. Live editor
 buffers remain the source of truth when validating editable patches. Extra
 project fragments are selected deterministically from:
 
@@ -247,8 +247,8 @@ Askama/Jinja/Handlebars/Tera/Twig templates, Astro and GraphQL) are indexed too.
 An exact prompt path or basename receives the strongest deterministic signal;
 rare compound identifiers such as `preview_html` are favored while terms found
 throughout the repository are down-ranked. Candidates below
-`min_artifact_score` are omitted. The project index is incremental, cached in the `paird`
-process and invalidated after an applied Pair patch. Ranked fragments are packed
+`min_artifact_score` are omitted. The project index is incremental, cached in the `loopbioticd`
+process and invalidated after an applied Loopbiotic patch. Ranked fragments are packed
 into a hard token budget; candidates which do not fit are omitted.
 
 Cursor LSP queries and prompt-driven `workspace/symbol` queries share small,
@@ -268,9 +268,9 @@ agent conversation or resend the goal context.
 The defaults can be overridden during setup:
 
 ```lua
-require("pair").setup({
+require("loopbiotic").setup({
   prompt = {
-    -- Prompt and reply windows stay above Pair cards.
+    -- Prompt and reply windows stay above Loopbiotic cards.
     zindex = 200,
   },
   context = {
@@ -324,26 +324,26 @@ The current implementation does not train or run an ML model.
 ## Commands
 
 ```vim
-:Pair
-:PairReply
-:PairFix
-:PairWhy
-:PairFollow
-:PairOther
-:PairAssess
-:PairNext
-:PairStop
-:PairHide
-:PairResume
-:PairReset
-:PairLog
-:PairLogClear
-:PairBackend
-:PairAgent
-:PairModel
+:Loopbiotic
+:LoopbioticReply
+:LoopbioticFix
+:LoopbioticWhy
+:LoopbioticFollow
+:LoopbioticOther
+:LoopbioticAssess
+:LoopbioticNext
+:LoopbioticStop
+:LoopbioticHide
+:LoopbioticResume
+:LoopbioticReset
+:LoopbioticLog
+:LoopbioticLogClear
+:LoopbioticBackend
+:LoopbioticAgent
+:LoopbioticModel
 ```
 
-`:PairLog` prints the current JSONL session trace. It records the backend command
+`:LoopbioticLog` prints the current JSONL session trace. It records the backend command
 and protocol handshake, structured RPC requests/responses, progress events,
 cards, goals, token usage, and backend errors. Every completed backend turn also
 emits an `agent_attempts` event. Each attempt records its
@@ -354,7 +354,7 @@ metadata unless full-content logging is explicitly enabled.
 The default trace location is:
 
 ```text
-~/.local/state/nvim/pairagen/sessions/<timestamp>-<pid>.jsonl
+~/.local/state/nvim/loopbiotic/sessions/<timestamp>-<pid>.jsonl
 ```
 
 Logs redact prompts, source excerpts, diffs, findings, and model content by
@@ -362,7 +362,7 @@ default. At most 20 trace files are retained. Logging can be disabled or full
 content can be enabled explicitly:
 
 ```lua
-require("pair").setup({
+require("loopbiotic").setup({
   logging = {
     enabled = true,
     include_content = false,
@@ -379,43 +379,43 @@ public issues without review.
 Run:
 
 ```vim
-:checkhealth pair
+:checkhealth loopbiotic
 ```
 
-It reports the plugin and protocol versions, release target, managed `paird`
+It reports the plugin and protocol versions, release target, managed `loopbioticd`
 state, downloader prerequisites, active agent/model, logging privacy, and LSP
-clients. A protocol mismatch means the Lua plugin and `paird` come from
+clients. A protocol mismatch means the Lua plugin and `loopbioticd` come from
 different releases; remove the managed version directory or update the plugin.
 
 ## License
 
-Pairagen is available under the [MIT License](LICENSE).
+Loopbiotic is available under the [MIT License](LICENSE).
 
-## paird
+## loopbioticd
 
 ```bash
-paird --stdio
-paird backend list
-paird backend check
-paird schema card
-paird dev mock-session
+loopbioticd --stdio
+loopbioticd backend list
+loopbioticd backend check
+loopbioticd schema card
+loopbioticd dev mock-session
 ```
 
 ## Generic Backend
 
 ```bash
-PAIR_BACKEND=generic \
-PAIR_GENERIC_COMMAND=codex \
-paird --stdio
+LOOPBIOTIC_BACKEND=generic \
+LOOPBIOTIC_GENERIC_COMMAND=codex \
+loopbioticd --stdio
 ```
 
-`PAIR_GENERIC_ARGS` is split on whitespace.
+`LOOPBIOTIC_GENERIC_ARGS` is split on whitespace.
 
 The generic backend sends a strict JSON card contract to stdin. It accepts a raw final JSON card for backwards compatibility, or an NDJSON stream:
 
 ```json
-{"t":"pair_progress","phase":"reviewing","message":"Reviewing the supplied context"}
-{"t":"pair_result","result":{"op":"hypothesis","title":"...","claim":"..."}}
+{"t":"loopbiotic_progress","phase":"reviewing","message":"Reviewing the supplied context"}
+{"t":"loopbiotic_result","result":{"op":"hypothesis","title":"...","claim":"..."}}
 ```
 
-`pair_progress.message` is user-visible feedback. It must be a concise status summary, never raw model reasoning. Claude and local agents that do not emit this protocol still show lifecycle feedback from Pair while their process is running.
+`loopbiotic_progress.message` is user-visible feedback. It must be a concise status summary, never raw model reasoning. Claude and local agents that do not emit this protocol still show lifecycle feedback from Loopbiotic while their process is running.

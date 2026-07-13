@@ -36,16 +36,16 @@ jobs:
           scripts/check-versions.sh
           expected="v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
           test "$GITHUB_REF_NAME" = "$expected"
-      - name: Build paird
-        run: cargo build --release --locked --target ${{ matrix.target }} -p paird
-      - name: Package paird
-        run: scripts/package-release.sh ${{ matrix.target }} target/${{ matrix.target }}/release/paird
+      - name: Build loopbioticd
+        run: cargo build --release --locked --target ${{ matrix.target }} -p loopbioticd
+      - name: Package loopbioticd
+        run: scripts/package-release.sh ${{ matrix.target }} target/${{ matrix.target }}/release/loopbioticd
       - uses: actions/upload-artifact@v7
         with:
-          name: paird-${{ matrix.target }}
+          name: loopbioticd-${{ matrix.target }}
           path: |
-            paird-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
-            paird-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+            loopbioticd-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            loopbioticd-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
   publish:
@@ -72,5 +72,5 @@ jobs:
             dist/*.tar.gz dist/checksums.txt \
             --verify-tag \
             --generate-notes \
-            --title "Pairagen $GITHUB_REF_NAME" \
+            --title "Loopbiotic $GITHUB_REF_NAME" \
             $prerelease

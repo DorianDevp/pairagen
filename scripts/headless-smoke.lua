@@ -1,9 +1,9 @@
 local root = vim.fn.getcwd()
 vim.opt.runtimepath:append(root)
 
-local config = require("pair.config")
-require("pair").setup({
-  backend = { agent = "codex", command = "/tmp/paird-test" },
+local config = require("loopbiotic.config")
+require("loopbiotic").setup({
+  backend = { agent = "codex", command = "/tmp/loopbioticd-test" },
   agents = {
     codex = {
       kind = "codex_app",
@@ -16,20 +16,27 @@ require("pair").setup({
 assert(config.values.backend.prefetch == "off")
 assert(config.values.backend.token_budget == 50000)
 
-local prompt = require("pair.prompt")
-assert(prompt.title("Prompt") == " Pair Prompt · codex / test-model ")
+local legacy_preferences = vim.fn.stdpath("state") .. "/pairagen/preferences.json"
+vim.fn.delete(config.preferences_path())
+vim.fn.mkdir(vim.fn.fnamemodify(legacy_preferences, ":h"), "p")
+vim.fn.writefile({ vim.json.encode({ models = { codex = "legacy-model" } }) }, legacy_preferences)
+assert(config.read_preferences().models.codex == "legacy-model")
+vim.fn.delete(legacy_preferences)
+
+local prompt = require("loopbiotic.prompt")
+assert(prompt.title("Prompt") == " Loopbiotic Prompt · codex / test-model ")
 prompt.open_for({ title = prompt.title("Reply"), footer = " Test ", submit = function() end })
-local state = require("pair.state")
+local state = require("loopbiotic.state")
 assert(vim.api.nvim_win_get_config(state.prompt_frame_win).zindex == 200)
 assert(vim.api.nvim_win_get_config(state.prompt_win).zindex == 201)
 prompt.close()
 state.token_usage = { total_tokens = 50000 }
-assert(require("pair").token_budget_exceeded())
+assert(require("loopbiotic").token_budget_exceeded())
 state.token_usage = nil
-assert(require("pair").workspace_location("README.md"))
-assert(not require("pair").workspace_location("/tmp/outside-pairagen.txt"))
+assert(require("loopbiotic").workspace_location("README.md"))
+assert(not require("loopbiotic").workspace_location("/tmp/outside-loopbiotic.txt"))
 
-local context = require("pair.context")
+local context = require("loopbiotic.context")
 local queries = context.workspace_queries("Replace preview_html using LayoutEditor template", 3)
 assert(queries[1] == "preview_html")
 local new_file = context.new_file("src/Exception/NewException.php")
@@ -38,18 +45,18 @@ assert(new_file.buffer_start_line == 1)
 local current_file = context.file("scripts/headless-smoke.lua")
 assert(current_file.file == "scripts/headless-smoke.lua")
 assert(current_file.buffer_start_line == 1)
-assert(current_file.buffer_text:find("Pairagen headless smoke test passed", 1, true))
+assert(current_file.buffer_text:find("Loopbiotic headless smoke test passed", 1, true))
 
-local apply = require("pair.apply")
+local apply = require("loopbiotic.apply")
 local new_lines = apply.apply_diff({ "" }, "@@ -1,0 +1,2 @@\n+<?php\n+final class NewException {}\n")
 assert(new_lines[1] == "<?php")
 assert(new_lines[2] == "final class NewException {}")
 
-local state = require("pair.state")
+local state = require("loopbiotic.state")
 state.turn_token_usage = { total_tokens = 100, input_tokens = 90, cached_input_tokens = 80, output_tokens = 10 }
 state.token_usage = vim.deepcopy(state.turn_token_usage)
 local token_lines = {}
-require("pair.card").tokens(token_lines)
+require("loopbiotic.card").tokens(token_lines)
 assert(table.concat(token_lines, "\n"):find("80 cached", 1, true))
 assert(table.concat(token_lines, "\n"):find("20 non-cached", 1, true))
 state.turn_token_usage = nil
@@ -57,26 +64,26 @@ state.token_usage = nil
 
 local check_buf = vim.fn.bufadd(vim.fn.getcwd() .. "/src/check-test.lua")
 vim.fn.bufload(check_buf)
-local check_namespace = vim.api.nvim_create_namespace("pairagen-headless-check")
+local check_namespace = vim.api.nvim_create_namespace("loopbiotic-headless-check")
 vim.diagnostic.set(check_namespace, check_buf, {
   { lnum = 2, col = 0, severity = vim.diagnostic.severity.ERROR, message = "broken check" },
 })
-local check = require("pair").editor_check({ "src/check-test.lua" })
+local check = require("loopbiotic").editor_check({ "src/check-test.lua" })
 assert(check.checked_files == 1)
 assert(#check.errors == 1)
 assert(check.errors[1].line == 3)
 vim.diagnostic.reset(check_namespace, check_buf)
 vim.api.nvim_buf_delete(check_buf, { force = true })
 
-local navigation = require("pair.navigation")
+local navigation = require("loopbiotic.navigation")
 local location = navigation.card_location({
   evidence = { file = "old.rs" },
   next_move = { kind = "open_location", file = "templates/layout_editor.html" },
 })
 assert(location.file == "templates/layout_editor.html")
 
-local card = require("pair.card")
-local diff = require("pair.diff")
+local card = require("loopbiotic.card")
+local diff = require("loopbiotic.diff")
 local change_cursor = diff.change_cursor({ "before", "  inserted", "after" }, {
   first_row = 0,
   added = { 1 },
@@ -85,7 +92,7 @@ assert(change_cursor[1] == 2)
 assert(change_cursor[2] == 2)
 vim.cmd("enew")
 local focus_source = vim.api.nvim_get_current_buf()
-vim.api.nvim_buf_set_name(focus_source, root .. "/pairagen-focus-test.lua")
+vim.api.nvim_buf_set_name(focus_source, root .. "/loopbiotic-focus-test.lua")
 vim.api.nvim_buf_set_lines(focus_source, 0, -1, false, { "local before = true", "return before" })
 local focus_card = {
   id = "focus-card",
@@ -95,7 +102,7 @@ local focus_card = {
   patches = {
     {
       id = "focus-patch",
-      file = "pairagen-focus-test.lua",
+      file = "loopbiotic-focus-test.lua",
       diff = "@@ -1,2 +1,2 @@\n local before = true\n-return before\n+  return not before\n",
     },
   },
@@ -115,8 +122,8 @@ local patch_card = {
   title = "Preview root",
   explanation = long_explanation,
 }
-require("pair.commands").setup()
-assert(vim.fn.exists(":PairAssess") == 2)
+require("loopbiotic.commands").setup()
+assert(vim.fn.exists(":LoopbioticAssess") == 2)
 state.goal = {
   statement = long_goal,
   completed_steps = { "first", "second" },
@@ -142,10 +149,10 @@ assert(vim.fn.strchars(card.short("Zażółć gęślą jaźń i dłuższy opis",
 state.goal = nil
 state.details_expanded = false
 
-local installer = require("pair.installer")
-assert(installer.artifact("x86_64-unknown-linux-musl") == "paird-v0.2.0-x86_64-unknown-linux-musl.tar.gz")
+local installer = require("loopbiotic.installer")
+assert(installer.artifact("x86_64-unknown-linux-musl") == "loopbioticd-v0.3.0-x86_64-unknown-linux-musl.tar.gz")
 
-local log = require("pair.log")
+local log = require("loopbiotic.log")
 local sanitized = log.sanitize({ buffer_text = "secret source", event = "kept" })
 assert(sanitized.buffer_text.redacted == true)
 assert(sanitized.buffer_text.bytes > 0)
@@ -178,7 +185,7 @@ vim.wait(1000, function()
 end)
 assert(vim.api.nvim_win_get_tabpage(state.card_win) == vim.api.nvim_get_current_tabpage())
 assert(not vim.api.nvim_win_is_valid(previous_float_win))
-require("pair.ui").close(state.card_win)
+require("loopbiotic.ui").close(state.card_win)
 state.card_win = nil
 state.card = nil
 state.last_card = nil
@@ -186,4 +193,4 @@ state.session_id = nil
 state.navigated_card = nil
 vim.cmd("tabonly")
 
-print("Pairagen headless smoke test passed")
+print("Loopbiotic headless smoke test passed")

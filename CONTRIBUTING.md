@@ -1,6 +1,6 @@
 # Contributing
 
-Pairagen accepts focused bug fixes, tests, documentation improvements, and
+Loopbiotic accepts focused bug fixes, tests, documentation improvements, and
 backend integrations.
 
 ## Development setup
@@ -18,9 +18,9 @@ scripts/check-versions.sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
-XDG_STATE_HOME=/tmp/pairagen-state \
-XDG_DATA_HOME=/tmp/pairagen-data \
-XDG_CACHE_HOME=/tmp/pairagen-cache \
+XDG_STATE_HOME=/tmp/loopbiotic-state \
+XDG_DATA_HOME=/tmp/loopbiotic-data \
+XDG_CACHE_HOME=/tmp/loopbiotic-cache \
 nvim --headless -u NONE -i NONE -l scripts/headless-smoke.lua
 ```
 
@@ -30,12 +30,12 @@ nvim --headless -u NONE -i NONE -l scripts/headless-smoke.lua
 - Add a regression test for behavior changes.
 - Keep source code, UI text, comments, and documentation in English.
 - Do not include session traces, private source code, credentials, or generated
-  `paird` binaries in commits.
+  `loopbioticd` binaries in commits.
 - Update `CHANGELOG.md` for user-visible changes.
 
 ## Releases
 
-1. Set the same version in `Cargo.toml`, `lua/pair/version.lua`, and the README.
+1. Set the same version in `Cargo.toml`, `lua/loopbiotic/version.lua`, and the README.
 2. Move changelog entries from `Unreleased` into the versioned section.
 3. Run the complete validation suite.
 4. Create and push an annotated `vMAJOR.MINOR.PATCH` tag.

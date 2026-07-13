@@ -355,6 +355,72 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "loopbiotic_backends"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "loopbiotic_protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "loopbiotic_context"
+version = "0.3.0"
+dependencies = [
+ "loopbiotic_protocol",
+]
+
+[[package]]
+name = "loopbiotic_harness"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "loopbiotic_backends",
+ "loopbiotic_context",
+ "loopbiotic_patch",
+ "loopbiotic_protocol",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "loopbiotic_patch"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "loopbiotic_protocol",
+ "thiserror",
+]
+
+[[package]]
+name = "loopbiotic_protocol"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "loopbioticd"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "loopbiotic_backends",
+ "loopbiotic_harness",
+ "loopbiotic_protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -376,72 +442,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "pair_backends"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "pair_protocol",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "pair_context"
-version = "0.2.0"
-dependencies = [
- "pair_protocol",
-]
-
-[[package]]
-name = "pair_harness"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "pair_backends",
- "pair_context",
- "pair_patch",
- "pair_protocol",
- "serde_json",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "pair_patch"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "pair_protocol",
- "thiserror",
-]
-
-[[package]]
-name = "pair_protocol"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "paird"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "pair_backends",
- "pair_harness",
- "pair_protocol",
- "serde",
- "serde_json",
- "tokio",
-]
 
 [[package]]
 name = "percent-encoding"

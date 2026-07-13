@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LoopbioticAgentOp",
+  "type": "object",
+  "required": [
+    "op",
+    "title",
+    "claim",
+    "evidence",
+    "next",
+    "finding",
+    "location",
+    "annotation",
+    "explanation",
+    "goal_complete",
+    "patches",
+    "question",
+    "options",
+    "reason",
+    "summary",
+    "changed_files",
+    "message"
+  ],
+  "properties": {
+    "op": {
+      "enum": ["hypothesis", "finding", "patch", "choice", "deny", "open_location", "summary", "error"]
+    },
+    "title": {
+      "type": "string"
+    },
+    "claim": {
+      "type": ["string", "null"]
+    },
+    "evidence": {
+      "type": ["object", "null"],
+      "required": ["file", "line", "column", "annotation"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "column": { "type": "integer" },
+        "annotation": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "next": {
+      "type": ["object", "null"],
+      "required": ["file", "line", "column", "annotation"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "column": { "type": "integer" },
+        "annotation": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "finding": {
+      "type": ["string", "null"]
+    },
+    "location": {
+      "type": ["object", "null"],
+      "required": ["file", "line", "column", "annotation"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "column": { "type": "integer" },
+        "annotation": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "annotation": {
+      "type": ["string", "null"]
+    },
+    "explanation": {
+      "type": ["string", "null"]
+    },
+    "goal_complete": {
+      "type": ["boolean", "null"]
+    },
+    "patches": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["id", "file", "diff", "explanation"],
+        "properties": {
+          "id": { "type": ["string", "null"] },
+          "file": { "type": "string" },
+          "diff": { "type": "string" },
+          "explanation": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "question": {
+      "type": ["string", "null"]
+    },
+    "options": {
+      "type": ["array", "null"],
+      "items": {
+        "anyOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "required": ["label"],
+            "properties": {
+              "id": { "type": ["string", "null"] },
+              "label": { "type": "string" },
+              "action": {
+                "enum": [
+                  "follow",
+                  "why",
+                  "fix",
+                  "other_lead",
+                  "retry",
+                  "edit_prompt",
+                  "open",
+                  "run_check",
+                  "next",
+                  "stop",
+                  null
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "reason": {
+      "type": ["string", "null"]
+    },
+    "summary": {
+      "type": ["string", "null"]
+    },
+    "changed_files": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "string"
+      }
+    },
+    "message": {
+      "type": ["string", "null"]
+    }
+  },
+  "additionalProperties": false
+}

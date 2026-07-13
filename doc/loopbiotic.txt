@@ -1,0 +1,111 @@
+*loopbiotic.txt*                Loopbiotic pair programming for Neovim
+
+===============================================================================
+CONTENTS                                                     *loopbiotic-contents*
+
+1. Introduction .............................................. |loopbiotic|
+2. Setup ................................................ |loopbiotic-setup|
+3. Commands ............................................ |loopbiotic-commands|
+4. Privacy .............................................. |loopbiotic-privacy|
+5. Health ................................................ |loopbiotic-health|
+
+===============================================================================
+INTRODUCTION                                                     *loopbiotic*
+
+Loopbiotic presents one hypothesis, finding, or editable patch at a time. It is
+designed for explicit user-controlled pair-programming steps rather than an
+open-ended chat session.
+
+In the default auto mode, one prompt starts a persistent goal loop. The agent
+inspects the project and returns the complete multi-file change as one batch.
+Loopbiotic validates that batch against live editor buffers and presents it one
+hunk at a time. Accepting a hunk advances through the local queue without a new
+model turn; rejecting or retrying returns control to the agent. The loop ends
+only after the complete batch is accepted and local diagnostics are checked.
+Use `keymaps.why` (`<leader>pw` by default) on a draft to ask why; the answer
+keeps that exact hunk pending and offers `Back to draft`.
+
+Navigation stays inside the current workspace. A location-bearing card moves
+the cursor to its evidence, while a draft moves it to the first non-blank
+character of the first added line. The action card follows the active tab and
+does not move the cursor back to an older window.
+
+Long goals and patch explanations are compact by default. Focus the Loopbiotic card
+and press `z` to expand or collapse the full text. Configure this with
+`keymaps.details`.
+
+The session token total is shown against `backend.token_budget` (50000 by
+default). Loopbiotic asks for confirmation before another agent turn after that
+budget is reached. Set it to 0 to disable the guard.
+
+Loopbiotic has been tested primarily with the Codex CLI app-server backend.
+
+===============================================================================
+SETUP                                                       *loopbiotic-setup*
+
+Minimum setup: >lua
+
+  require("loopbiotic").setup({
+    backend = { agent = "codex" },
+  })
+<
+The matching `loopbioticd` release binary is downloaded and checksum-verified on the
+first request. Set `backend.command` to use a manually installed binary.
+
+===============================================================================
+COMMANDS                                                 *loopbiotic-commands*
+
+                                                       *:Loopbiotic*
+:Loopbiotic                  Open a new Loopbiotic prompt.
+                                                       *:LoopbioticReply*
+:LoopbioticReply             Send a message in the active session.
+                                                       *:LoopbioticFix*
+:LoopbioticFix               Request one local editable patch.
+                                                       *:LoopbioticFollow*
+:LoopbioticFollow            Follow the current observation.
+                                                       *:LoopbioticWhy*
+:LoopbioticWhy               Ask for the reasoning behind the current observation.
+                                                       *:LoopbioticOther*
+:LoopbioticOther             Request another lead.
+                                                       *:LoopbioticAssess*
+:LoopbioticAssess            Assess the whole goal and locate one unresolved step.
+                                                       *:LoopbioticNext*
+:LoopbioticNext              Compatibility alias for |:LoopbioticAssess|.
+                                                       *:LoopbioticStop*
+:LoopbioticStop              Finish the active session.
+                                                       *:LoopbioticHide*
+:LoopbioticHide              Hide the current Loopbiotic UI.
+                                                       *:LoopbioticResume*
+:LoopbioticResume            Show and focus the current Loopbiotic UI.
+                                                       *:LoopbioticReset*
+:LoopbioticReset             Stop the backend and clear local session state.
+                                                       *:LoopbioticAgent*
+:LoopbioticAgent [name]      Show or select the active agent.
+                                                       *:LoopbioticModel*
+:LoopbioticModel [model]     Show or select the active model. Use `default` to clear
+                       a persisted model choice.
+                                                       *:LoopbioticLog*
+:LoopbioticLog               Print the current local trace path.
+                                                       *:LoopbioticLogClear*
+:LoopbioticLogClear          Delete Loopbiotic session traces.
+
+===============================================================================
+PRIVACY                                                   *loopbiotic-privacy*
+
+Session traces are local, content-redacted by default, and subject to retention.
+Enabling `logging.include_content` may store proprietary source code, prompts,
+diffs, and model responses. Loopbiotic sends selected source context to the backend
+configured by the user.
+
+===============================================================================
+HEALTH                                                     *loopbiotic-health*
+
+Run: >vim
+
+  :checkhealth loopbiotic
+<
+The report covers Neovim compatibility, release target, managed `loopbioticd`,
+download verification tools, active agent/model, logging privacy, and LSP
+clients.
+
+vim:tw=78:ts=8:noet:ft=help:norl:

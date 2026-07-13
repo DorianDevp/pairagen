@@ -1,4 +1,4 @@
-# Classical ML for Pairagen context optimization
+# Classical ML for Loopbiotic context optimization
 
 ## Status
 
@@ -8,7 +8,7 @@ runtime, or training pipeline.
 
 ## Goal
 
-The most useful classical ML application in Pairagen is not code generation.
+The most useful classical ML application in Loopbiotic is not code generation.
 It is context and execution-policy ranking: selecting project fragments with
 the highest expected usefulness at the lowest token and latency cost.
 
@@ -60,7 +60,7 @@ improve deterministic analysis rather than replace it.
 
 ## Interaction labels
 
-Pairagen naturally produces weak supervision without manual annotation.
+Loopbiotic naturally produces weak supervision without manual annotation.
 
 Positive signals include:
 
@@ -152,7 +152,7 @@ Preferred architecture:
 - explicit feature/model schema versions,
 - automatic heuristic fallback.
 
-A long-lived local `pair-ranker` process over stdio is acceptable during early
+A long-lived local `loopbiotic-ranker` process over stdio is acceptable during early
 experiments.
 
 ## Start conditions
@@ -165,5 +165,5 @@ ML implementation should begin only when:
 - offline replay and a heuristic baseline exist,
 - shadow-mode results demonstrate a measurable cost or quality improvement.
 
-Until then, Pairagen should collect versioned decisions and features while the
+Until then, Loopbiotic should collect versioned decisions and features while the
 production system remains deterministic.
