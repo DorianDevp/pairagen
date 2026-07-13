@@ -24,6 +24,10 @@ local labels = {
 
 function M.show(card, opts)
   opts = opts or {}
+  if state.details_card ~= card then
+    state.details_card = card
+    state.details_expanded = false
+  end
   state.card = card
   state.last_card = card
   status.hide()
@@ -41,7 +45,7 @@ function M.show(card, opts)
 
   local lines = M.lines(card)
   local width = M.width(lines)
-  local height = M.height(lines, width)
+  local height = M.height(lines, width, state.details_expanded)
   local buf, win = ui.render(state.card_buf, state.card_win, lines, {
     width = width,
     height = height,
@@ -77,7 +81,11 @@ function M.lines(card)
     M.add(lines, card.finding or card.title)
     M.signal(lines, card.annotation)
   elseif card.kind == "patch" then
-    M.add(lines, card.explanation or card.title)
+    local explanation = card.explanation or card.title
+    if not state.details_expanded then
+      explanation = M.short(explanation, 58)
+    end
+    M.add(lines, explanation)
     for _, warning in ipairs(card.warnings or {}) do
       M.signal(lines, warning)
     end
@@ -136,7 +144,8 @@ function M.goal(lines)
     return
   end
 
-  table.insert(lines, "Goal  " .. M.short(goal.statement, 54))
+  local statement = state.details_expanded and M.one_line(goal.statement) or M.short(goal.statement, 54)
+  table.insert(lines, "Goal  " .. statement)
   local completed = #(goal.completed_steps or {})
   if completed > 0 then
     table.insert(lines, string.format("Done  %d local step%s", completed, completed == 1 and "" or "s"))
@@ -175,15 +184,44 @@ end
 
 function M.short(text, limit)
   text = M.one_line(text)
-  if #text <= limit then
+  if vim.fn.strdisplaywidth(text) <= limit then
     return text
   end
 
-  return text:sub(1, limit - 3) .. "..."
+  local count = vim.fn.strchars(text)
+  local target = math.max(limit - 3, 0)
+  while count > 0 and vim.fn.strdisplaywidth(vim.fn.strcharpart(text, 0, count)) > target do
+    count = count - 1
+  end
+
+  return vim.fn.strcharpart(text, 0, count) .. "..."
 end
 
 function M.one_line(text)
   return tostring(text or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+function M.goal_collapsible()
+  local goal = state.goal
+  return goal and goal.statement and vim.fn.strdisplaywidth(M.one_line(goal.statement)) > 54
+end
+
+function M.details_available(card)
+  if M.goal_collapsible() then
+    return true
+  end
+
+  local explanation = card and card.kind == "patch" and (card.explanation or card.title)
+  return explanation and vim.fn.strdisplaywidth(M.one_line(explanation)) > 58
+end
+
+function M.toggle_details(card)
+  if not card or not M.details_available(card) then
+    return
+  end
+
+  state.details_expanded = not state.details_expanded
+  M.show(card, { enter = true })
 end
 
 function M.location(card)
@@ -259,6 +297,11 @@ function M.actions(card)
     table.insert(parts, M.hint("o", "Open & retry"))
   end
 
+  if M.details_available(card) then
+    local text = state.details_expanded and "Collapse details" or "Expand details"
+    table.insert(parts, M.hint(config.values.keymaps.details or "z", text))
+  end
+
   for _, action in ipairs(actions) do
     local name = type(action) == "table" and "apply_patch" or action
     local label = labels[name]
@@ -308,6 +351,13 @@ function M.bind(buf, card)
   if card.kind == "deny" and type(card.location) == "table" then
     vim.keymap.set("n", "o", function()
       require("pair").open_and_retry()
+    end, { buffer = buf, nowait = true, silent = true })
+  end
+  local details_key = config.values.keymaps.details or "z"
+  pcall(vim.keymap.del, "n", details_key, { buffer = buf })
+  if M.details_available(card) then
+    vim.keymap.set("n", details_key, function()
+      M.toggle_details(card)
     end, { buffer = buf, nowait = true, silent = true })
   end
 
@@ -366,10 +416,14 @@ function M.width(lines)
   return math.min(width, config.values.card.max_width)
 end
 
-function M.height(lines, width)
+function M.height(lines, width, expanded)
   local height = 0
   for _, line in ipairs(lines) do
     height = height + math.max(math.ceil(vim.fn.strdisplaywidth(line) / math.max(width, 1)), 1)
+  end
+
+  if expanded then
+    return height
   end
 
   return math.min(height, config.values.card.max_height)

@@ -71,6 +71,7 @@ M.values = {
     resume = "<leader>pr",
     reset = "<leader>pR",
     go_to = "<leader>pg",
+    details = "z",
     draft_accept = "<leader>pa",
     draft_reject = "<leader>pd",
     draft_retry = "<leader>pr",

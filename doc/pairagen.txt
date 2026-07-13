@@ -16,6 +16,10 @@ Pairagen presents one hypothesis, finding, or editable patch at a time. It is
 designed for explicit user-controlled pair-programming steps rather than an
 open-ended chat session.
 
+Long goals and patch explanations are compact by default. Focus the Pair card
+and press `z` to expand or collapse the full text. Configure this with
+`keymaps.details`.
+
 Pairagen has been tested primarily with the Codex CLI app-server backend.
 
 ===============================================================================

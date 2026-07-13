@@ -144,27 +144,7 @@ end
 function M.controls(card, opts)
   opts = opts or {}
   local keys = require("pair.config").values.keymaps
-  local lines = {
-    M.truncate(card.explanation or card.title or "Local change", 58),
-    "",
-    string.format("[%s] Go to change", keys.go_to),
-    string.format("[%s] Accept   [%s] Reject", keys.draft_accept, keys.draft_reject),
-    string.format("[%s] Retry    edit the draft directly", keys.draft_retry),
-  }
-  if state.goal and state.goal.statement then
-    table.insert(lines, 1, "Goal  " .. M.truncate(state.goal.statement, 52))
-    local completed = #(state.goal.completed_steps or {})
-    if completed > 0 then
-      table.insert(lines, 2, "Done  " .. completed .. " accepted")
-    end
-    local network = M.observation_network(state.goal.known_observations or {})
-    if network ~= "" then
-      table.insert(lines, completed > 0 and 3 or 2, "Map   " .. network)
-    end
-  end
-  if card.warnings and card.warnings[1] then
-    table.insert(lines, "Warning shown at hunk")
-  end
+  local lines = M.control_lines(card, keys)
 
   local width = math.min(58, require("pair.config").values.card.max_width)
   local height = 0
@@ -197,6 +177,59 @@ function M.controls(card, opts)
     M.focus_change()
   end, { buffer = buf, nowait = true, silent = true })
   vim.keymap.set("n", "g", M.focus_change, { buffer = buf, nowait = true, silent = true })
+  local details_key = keys.details or "z"
+  pcall(vim.keymap.del, "n", details_key, { buffer = buf })
+  if M.details_available(card) then
+    vim.keymap.set("n", details_key, function()
+      M.toggle_details(card)
+    end, { buffer = buf, nowait = true, silent = true })
+  end
+end
+
+function M.control_lines(card, keys)
+  keys = keys or require("pair.config").values.keymaps
+  local lines = {}
+  if state.goal and state.goal.statement then
+    local goal = state.details_expanded and M.one_line(state.goal.statement)
+      or M.truncate(state.goal.statement, 52)
+    table.insert(lines, "Goal  " .. goal)
+    local completed = #(state.goal.completed_steps or {})
+    if completed > 0 then
+      table.insert(lines, "Done  " .. completed .. " accepted")
+    end
+    local network = M.observation_network(state.goal.known_observations or {})
+    if network ~= "" then
+      table.insert(lines, "Map   " .. network)
+    end
+  end
+
+  local explanation = card.explanation or card.title or "Local change"
+  table.insert(lines, state.details_expanded and M.one_line(explanation) or M.truncate(explanation, 58))
+  table.insert(lines, "")
+  if M.details_available(card) then
+    local label = state.details_expanded and "Collapse details" or "Expand details"
+    table.insert(lines, string.format("[%s] %s", keys.details or "z", label))
+  end
+  table.insert(lines, string.format("[%s] Go to change", keys.go_to))
+  table.insert(lines, string.format("[%s] Accept   [%s] Reject", keys.draft_accept, keys.draft_reject))
+  table.insert(lines, string.format("[%s] Retry    edit the draft directly", keys.draft_retry))
+  if card.warnings and card.warnings[1] then
+    table.insert(lines, "Warning shown at hunk")
+  end
+
+  return lines
+end
+
+function M.details_available(card)
+  local goal = state.goal and state.goal.statement
+  local explanation = card.explanation or card.title or "Local change"
+  return goal and vim.fn.strdisplaywidth(M.one_line(goal)) > 52
+    or vim.fn.strdisplaywidth(M.one_line(explanation)) > 58
+end
+
+function M.toggle_details(card)
+  state.details_expanded = not state.details_expanded
+  require("pair.card").show(card, { enter = true })
 end
 
 function M.focus_change()
@@ -228,12 +261,11 @@ function M.observation_network(observations)
 end
 
 function M.truncate(text, limit)
-  text = tostring(text or ""):gsub("%s+", " ")
-  if #text <= limit then
-    return text
-  end
+  return require("pair.card").short(text, limit)
+end
 
-  return text:sub(1, limit - 3) .. "..."
+function M.one_line(text)
+  return require("pair.card").one_line(text)
 end
 
 function M.accept()

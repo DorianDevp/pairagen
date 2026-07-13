@@ -359,6 +359,8 @@ function M.reset()
   state.context_report = nil
   state.workspace_hints = nil
   state.completion_notified_card = nil
+  state.details_card = nil
+  state.details_expanded = false
   state.thinking_request_id = nil
   state.thinking_session_id = nil
 

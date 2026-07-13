@@ -172,7 +172,9 @@ One local patch or completed goal summary
 
 Cards stay anchored beside the source line and do not take focus. Use `<leader>pg`
 to jump to a finding or the first line of an inline draft, and `<leader>pr` to
-focus the current Pair card.
+focus the current Pair card. Long goals and draft explanations stay compact by
+default; press `z` while the card is focused to expand or collapse their full
+text (`keymaps.details` changes this key).
 
 When the agent can only proceed from a different file — say the fix belongs in
 a component class while a template is open — it does not fail or deny. It asks

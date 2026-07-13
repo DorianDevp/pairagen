@@ -33,6 +33,36 @@ local location = navigation.card_location({
 })
 assert(location.file == "templates/layout_editor.html")
 
+local card = require("pair.card")
+local diff = require("pair.diff")
+local long_goal = "Mam tutaj problem, bo ta pętla nie uwzględnia wszystkich elementów z kolejnych przebiegów"
+local long_explanation = "Oznacza korzeń podglądu tym samym dyskryminatorem w węźle nadrzędnym i zachowuje pełny opis zmiany"
+local patch_card = {
+  kind = "patch",
+  title = "Preview root",
+  explanation = long_explanation,
+}
+state.goal = {
+  statement = long_goal,
+  completed_steps = { "first", "second" },
+  known_observations = {},
+}
+state.details_expanded = false
+local compact = diff.control_lines(patch_card, config.values.keymaps)
+assert(compact[1]:match("%.%.%.$"))
+assert(table.concat(compact, "\n"):find("Expand details", 1, true))
+assert(not table.concat(compact, "\n"):find(long_explanation, 1, true))
+
+state.details_expanded = true
+local expanded = diff.control_lines(patch_card, config.values.keymaps)
+local expanded_text = table.concat(expanded, "\n")
+assert(expanded[1] == "Goal  " .. long_goal)
+assert(expanded_text:find(long_explanation, 1, true))
+assert(expanded_text:find("Collapse details", 1, true))
+assert(vim.fn.strchars(card.short("Zażółć gęślą jaźń i dłuższy opis", 18)) > 0)
+state.goal = nil
+state.details_expanded = false
+
 local installer = require("pair.installer")
 assert(installer.artifact("x86_64-unknown-linux-musl") == "paird-v0.1.0-x86_64-unknown-linux-musl.tar.gz")
 
