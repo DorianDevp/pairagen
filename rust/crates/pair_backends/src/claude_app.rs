@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::process::Stdio;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -31,22 +33,43 @@ Patch only for fix actions. patch.diff must be unified diff hunks starting with 
 A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Never plan or complete a whole refactor in one response.
 Prefer the supplied context; you may use at most two targeted read-only searches when it is insufficient. Never edit files or run commands."#;
 
-/// Keeps one `claude` CLI process alive per Pair session using its
-/// stream-json stdin/stdout mode, so follow-up cards skip the CLI cold start
-/// and reuse the conversation instead of resending the whole session.
+/// Keeps `claude` CLI processes alive across turns using its stream-json
+/// stdin/stdout mode. Each Pair session gets up to two processes: a discovery
+/// process (hypothesis/finding/choice turns, optionally on a faster model
+/// with a capped thinking budget) and a patch process (full model). Separate
+/// processes let a speculative patch prefetch run while the user keeps
+/// navigating discovery cards, and are required anyway because the CLI cannot
+/// switch models within one process.
 pub struct ClaudeAppBackend {
     command: String,
     args: Vec<String>,
     model: Option<String>,
+    discovery_model: Option<String>,
+    discovery_thinking: Option<String>,
     state: Mutex<ClaudeAppState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Phase {
+    Discovery,
+    Patch,
 }
 
 #[derive(Default)]
 struct ClaudeAppState {
-    process: Option<ClaudeAppProcess>,
     session_key: Option<String>,
+    slots: HashMap<Phase, Arc<Mutex<ClaudeSlot>>>,
+    // Pre-spawned discovery process created by warmup() before a session
+    // exists, adopted by the next session's first discovery turn.
+    warm: Option<Arc<Mutex<ClaudeSlot>>>,
+}
+
+#[derive(Default)]
+struct ClaudeSlot {
+    process: Option<ClaudeAppProcess>,
     context_fingerprint: Option<u64>,
     model: Option<String>,
+    reported_model: Option<String>,
 }
 
 struct ClaudeAppProcess {
@@ -70,6 +93,7 @@ struct TurnOutput {
 enum StreamEvent {
     Init(Option<String>),
     Working(String),
+    Delta(String),
     Result {
         text: String,
         token_usage: Option<TokenUsage>,
@@ -78,27 +102,152 @@ enum StreamEvent {
     Other,
 }
 
+/// Extracts card fields from the partially streamed op JSON so the editor can
+/// show what is being drafted before the turn completes.
+#[derive(Default)]
+struct StreamPreview {
+    buffer: String,
+    title_reported: bool,
+    body_reported: bool,
+}
+
+const PREVIEW_BODY_FIELDS: &[&str] = &[
+    "claim",
+    "finding",
+    "question",
+    "explanation",
+    "reason",
+    "summary",
+    "message",
+];
+const PREVIEW_BUFFER_LIMIT: usize = 4096;
+const PREVIEW_BODY_MIN_CHARS: usize = 40;
+const PREVIEW_BODY_MAX_CHARS: usize = 72;
+
+impl StreamPreview {
+    fn push(&mut self, delta: &str) -> Option<String> {
+        if self.body_reported || self.buffer.len() > PREVIEW_BUFFER_LIMIT {
+            return None;
+        }
+
+        self.buffer.push_str(delta);
+
+        if !self.title_reported {
+            let (title, complete) = extract_string_field(&self.buffer, "title")?;
+            if !complete || title.trim().is_empty() {
+                return None;
+            }
+            self.title_reported = true;
+            return Some(format!("Drafting: {title}"));
+        }
+
+        let (title, _) = extract_string_field(&self.buffer, "title")?;
+        let (body, complete) = PREVIEW_BODY_FIELDS
+            .iter()
+            .find_map(|field| extract_string_field(&self.buffer, field))?;
+        if !complete && body.chars().count() < PREVIEW_BODY_MIN_CHARS {
+            return None;
+        }
+        self.body_reported = true;
+        let snippet = body
+            .chars()
+            .take(PREVIEW_BODY_MAX_CHARS)
+            .collect::<String>();
+        let ellipsis = if body.chars().count() > PREVIEW_BODY_MAX_CHARS || !complete {
+            "…"
+        } else {
+            ""
+        };
+
+        Some(format!("{title}: {snippet}{ellipsis}"))
+    }
+}
+
+/// Returns the (possibly still streaming) value of `"field":"..."` in `json`,
+/// plus whether its closing quote has arrived.
+fn extract_string_field(json: &str, field: &str) -> Option<(String, bool)> {
+    let needle = format!("\"{field}\"");
+    let start = json.find(&needle)? + needle.len();
+    let rest = json[start..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+
+    let mut value = String::new();
+    let mut chars = rest.chars();
+    while let Some(next) = chars.next() {
+        match next {
+            '"' => return Some((value, true)),
+            '\\' => match chars.next() {
+                Some('n') => value.push('\n'),
+                Some('t') => value.push('\t'),
+                Some('u') => {
+                    // Good enough for a preview: skip the escape digits.
+                    for _ in 0..4 {
+                        chars.next();
+                    }
+                    value.push('?');
+                }
+                Some(escaped) => value.push(escaped),
+                None => return Some((value, false)),
+            },
+            _ => value.push(next),
+        }
+    }
+
+    Some((value, false))
+}
+
 impl ClaudeAppBackend {
     pub fn from_env() -> Result<Self> {
         let command = std::env::var("PAIR_CLAUDE_COMMAND").unwrap_or_else(|_| "claude".into());
         let args = args_from_env("PAIR_CLAUDE_ARGS_JSON", "PAIR_CLAUDE_ARGS")?;
-        let model = std::env::var("PAIR_CLAUDE_MODEL")
-            .ok()
-            .filter(|value| !value.trim().is_empty());
+        let model = optional_env("PAIR_CLAUDE_MODEL");
+        let discovery_model = optional_env("PAIR_CLAUDE_DISCOVERY_MODEL");
+        let discovery_thinking = optional_env("PAIR_CLAUDE_DISCOVERY_THINKING");
 
-        Ok(Self::new(command, args, model))
+        Ok(Self::new(
+            command,
+            args,
+            model,
+            discovery_model,
+            discovery_thinking,
+        ))
     }
 
-    pub fn new(command: impl Into<String>, args: Vec<String>, model: Option<String>) -> Self {
+    pub fn new(
+        command: impl Into<String>,
+        args: Vec<String>,
+        model: Option<String>,
+        discovery_model: Option<String>,
+        discovery_thinking: Option<String>,
+    ) -> Self {
         Self {
             command: command.into(),
             args,
             model,
+            discovery_model,
+            discovery_thinking,
             state: Mutex::new(ClaudeAppState::default()),
         }
     }
 
-    fn spawn_args(&self) -> Vec<String> {
+    fn phase_model(&self, phase: Phase) -> Option<String> {
+        match phase {
+            Phase::Patch => self.model.clone(),
+            Phase::Discovery => self.discovery_model.clone().or_else(|| self.model.clone()),
+        }
+    }
+
+    fn phase_thinking(&self, phase: Phase) -> Option<String> {
+        match phase {
+            // Patch turns keep the CLI's adaptive thinking: diff correctness
+            // is where reasoning pays for itself.
+            Phase::Patch => None,
+            Phase::Discovery => self.discovery_thinking.clone(),
+        }
+    }
+
+    fn spawn_args(&self, model: &Option<String>) -> Vec<String> {
         let mut args = vec![
             "-p".into(),
             "--input-format".into(),
@@ -106,13 +255,14 @@ impl ClaudeAppBackend {
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
+            "--include-partial-messages".into(),
             "--disallowedTools".into(),
             "Edit,Write,NotebookEdit,Bash".into(),
             "--append-system-prompt".into(),
             SYSTEM_PROMPT.into(),
         ];
 
-        if let Some(model) = &self.model {
+        if let Some(model) = model {
             args.push("--model".into());
             args.push(model.clone());
         }
@@ -122,27 +272,24 @@ impl ClaudeAppBackend {
         args
     }
 
-    async fn ensure(&self, state: &mut ClaudeAppState, session_key: &str) -> Result<()> {
-        // One Claude process holds one conversation; a new Pair session must
-        // not inherit the previous session's context.
-        if state.session_key.as_deref() != Some(session_key) {
-            state.process = None;
-            state.context_fingerprint = None;
-            state.session_key = Some(session_key.to_string());
-        }
-
-        if state.process.is_some() {
-            return Ok(());
-        }
-
-        let mut child = Command::new(&self.command)
-            .args(self.spawn_args())
+    fn spawn_process(
+        &self,
+        model: &Option<String>,
+        thinking: &Option<String>,
+    ) -> Result<ClaudeAppProcess> {
+        let mut command = Command::new(&self.command);
+        command
+            .args(self.spawn_args(model))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
 
+        if let Some(thinking) = thinking {
+            command.env("MAX_THINKING_TOKENS", thinking);
+        }
+
+        let mut child = command.spawn()?;
         let stdin = child
             .stdin
             .take()
@@ -152,13 +299,87 @@ impl ClaudeAppBackend {
             .take()
             .ok_or_else(|| anyhow!("claude stdout unavailable"))?;
 
-        state.process = Some(ClaudeAppProcess {
+        Ok(ClaudeAppProcess {
             child,
             stdin,
             stdout: BufReader::new(stdout).lines(),
-        });
+        })
+    }
+
+    /// Pre-spawns a discovery process before any session exists so the first
+    /// card skips the CLI cold start. Called while the user is still typing
+    /// the prompt; idempotent and cheap when something is already running.
+    async fn warm_up(&self) -> Result<()> {
+        let slot = {
+            let mut state = self.state.lock().await;
+            if !state.slots.is_empty() || state.warm.is_some() {
+                return Ok(());
+            }
+            let slot = Arc::new(Mutex::new(ClaudeSlot {
+                model: self.phase_model(Phase::Discovery),
+                ..ClaudeSlot::default()
+            }));
+            state.warm = Some(slot.clone());
+            slot
+        };
+
+        let mut slot = slot.lock().await;
+        if slot.process.is_none() {
+            slot.process = Some(self.spawn_process(
+                &self.phase_model(Phase::Discovery),
+                &self.phase_thinking(Phase::Discovery),
+            )?);
+        }
 
         Ok(())
+    }
+
+    /// Returns the slot for this turn's phase, creating it (or adopting the
+    /// warm process) as needed. The outer state lock is held only for the
+    /// bookkeeping; the returned slot's own lock serializes the actual turn,
+    /// so discovery and patch turns can run concurrently.
+    async fn slot(&self, session_key: &str, phase: Phase) -> Arc<Mutex<ClaudeSlot>> {
+        let mut state = self.state.lock().await;
+
+        if state.session_key.as_deref() != Some(session_key) {
+            // One process holds one conversation; a new Pair session must not
+            // inherit the previous session's context.
+            state.slots.clear();
+            state.session_key = Some(session_key.to_string());
+        }
+
+        if let Some(slot) = state.slots.get(&phase) {
+            return slot.clone();
+        }
+
+        let wanted_model = self.phase_model(phase);
+        let slot = match (phase, state.warm.take()) {
+            (Phase::Discovery, Some(warm)) => {
+                let adoptable = warm
+                    .try_lock()
+                    .map(|slot| slot.model == wanted_model)
+                    .unwrap_or(false);
+                if adoptable {
+                    warm
+                } else {
+                    Arc::new(Mutex::new(ClaudeSlot {
+                        model: wanted_model,
+                        ..ClaudeSlot::default()
+                    }))
+                }
+            }
+            (_, warm) => {
+                state.warm = warm;
+                Arc::new(Mutex::new(ClaudeSlot {
+                    model: wanted_model,
+                    ..ClaudeSlot::default()
+                }))
+            }
+        };
+
+        state.slots.insert(phase, slot.clone());
+
+        slot
     }
 
     async fn ask(
@@ -166,55 +387,38 @@ impl ClaudeAppBackend {
         req: &BackendRequest,
         progress: Option<&ProgressReporter>,
     ) -> Result<TurnOutput> {
-        let mut state = self.state.lock().await;
-        let fresh = state.session_key.as_deref() != Some(req.session.id.as_str())
-            || state.process.is_none();
+        let phase = turn_phase(req);
+        let slot = self.slot(&req.session.id, phase).await;
+        let mut slot = slot.lock().await;
 
         report_progress(
             progress,
             &req.session.id,
             "starting",
-            if fresh {
-                "Starting Claude"
-            } else {
+            if slot.process.is_some() {
                 "Reusing the Claude session"
+            } else {
+                "Starting Claude"
             },
         );
-        self.ensure(&mut state, &req.session.id).await?;
+
+        if slot.process.is_none() {
+            slot.process = Some(self.spawn_process(&slot.model, &self.phase_thinking(phase))?);
+            slot.context_fingerprint = None;
+        }
 
         let fingerprint = context_fingerprint(req);
-        let include_context = state.context_fingerprint != Some(fingerprint);
-        state.context_fingerprint = Some(fingerprint);
+        let include_context = slot.context_fingerprint != Some(fingerprint);
+        slot.context_fingerprint = Some(fingerprint);
 
-        let prompt = turn_prompt(req, include_context);
-        let message = json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}]
-            }
-        });
-        let line = serde_json::to_string(&message)?;
-
-        if let Err(error) = Self::send(&mut state, &line).await {
-            // The previous process may have died between turns; retry once on
-            // a fresh process before giving up.
-            state.process = None;
-            state.context_fingerprint = None;
-            self.ensure(&mut state, &req.session.id).await?;
-            let prompt = turn_prompt(req, true);
-            let message = json!({
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}]
-                }
-            });
-            Self::send(&mut state, &serde_json::to_string(&message)?)
+        if let Err(error) = send_turn(&mut slot, &turn_prompt(req, include_context)).await {
+            // The process may have died between turns; retry once on a fresh
+            // process with full context before giving up.
+            slot.process = Some(self.spawn_process(&slot.model, &self.phase_thinking(phase))?);
+            slot.context_fingerprint = Some(fingerprint);
+            send_turn(&mut slot, &turn_prompt(req, true))
                 .await
-                .map_err(|retry_error| {
-                    anyhow!("could not reach claude: {error}; retry failed: {retry_error}")
-                })?;
+                .map_err(|retry| anyhow!("could not reach claude: {error}; retry: {retry}"))?;
         }
 
         report_progress(
@@ -224,16 +428,18 @@ impl ClaudeAppBackend {
             "Claude is processing the request",
         );
 
+        let mut preview = StreamPreview::default();
+
         loop {
             let line = {
-                let process = state
+                let process = slot
                     .process
                     .as_mut()
                     .ok_or_else(|| anyhow!("claude process unavailable"))?;
                 match process.stdout.next_line().await? {
                     Some(line) => line,
                     None => {
-                        state.process = None;
+                        slot.process = None;
                         return Err(anyhow!(
                             "claude exited before finishing the turn; check that the claude CLI is logged in"
                         ));
@@ -251,16 +457,21 @@ impl ClaudeAppBackend {
 
             match parse_stream_event(&value) {
                 StreamEvent::Init(model) => {
-                    state.model = self.model.clone().or(model);
+                    slot.reported_model = model;
                 }
                 StreamEvent::Working(activity) => {
                     report_progress(progress, &req.session.id, "working", &activity);
+                }
+                StreamEvent::Delta(text) => {
+                    if let Some(message) = preview.push(&text) {
+                        report_progress(progress, &req.session.id, "drafting", &message);
+                    }
                 }
                 StreamEvent::Result { text, token_usage } => {
                     return Ok(TurnOutput {
                         text,
                         token_usage,
-                        model: state.model.clone().or_else(|| self.model.clone()),
+                        model: slot.reported_model.clone().or_else(|| slot.model.clone()),
                     });
                 }
                 StreamEvent::Failed(message) => {
@@ -271,19 +482,6 @@ impl ClaudeAppBackend {
         }
     }
 
-    async fn send(state: &mut ClaudeAppState, line: &str) -> Result<()> {
-        let process = state
-            .process
-            .as_mut()
-            .ok_or_else(|| anyhow!("claude process unavailable"))?;
-
-        process.stdin.write_all(line.as_bytes()).await?;
-        process.stdin.write_all(b"\n").await?;
-        process.stdin.flush().await?;
-
-        Ok(())
-    }
-
     fn error_card(message: impl Into<String>) -> Card {
         Card::Error(ErrorCard {
             id: "c_claude_error".into(),
@@ -292,6 +490,27 @@ impl ClaudeAppBackend {
             actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
         })
     }
+}
+
+async fn send_turn(slot: &mut ClaudeSlot, prompt: &str) -> Result<()> {
+    let message = json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": prompt}]
+        }
+    });
+    let mut line = serde_json::to_vec(&message)?;
+    line.push(b'\n');
+    let process = slot
+        .process
+        .as_mut()
+        .ok_or_else(|| anyhow!("claude process unavailable"))?;
+
+    process.stdin.write_all(&line).await?;
+    process.stdin.flush().await?;
+
+    Ok(())
 }
 
 #[async_trait]
@@ -330,6 +549,10 @@ impl BackendAdapter for ClaudeAppBackend {
         })
     }
 
+    async fn warmup(&self) -> Result<()> {
+        self.warm_up().await
+    }
+
     fn capabilities(&self) -> BackendInfo {
         BackendInfo {
             name: "claude_app".into(),
@@ -339,6 +562,16 @@ impl BackendAdapter for ClaudeAppBackend {
             can_read_project: true,
             can_use_tools: true,
         }
+    }
+}
+
+fn turn_phase(req: &BackendRequest) -> Phase {
+    if req.card_contract.expected_kind == Some(pair_protocol::CardKind::Patch)
+        || req.card_contract.allow_goal_completion
+    {
+        Phase::Patch
+    } else {
+        Phase::Discovery
     }
 }
 
@@ -416,6 +649,18 @@ fn parse_stream_event(value: &Value) -> StreamEvent {
                     .map(str::to_string),
             )
         }
+        Some("stream_event") => {
+            let delta = value.get("event").and_then(|event| event.get("delta"));
+            let text = delta
+                .filter(|delta| delta.get("type").and_then(Value::as_str) == Some("text_delta"))
+                .and_then(|delta| delta.get("text"))
+                .and_then(Value::as_str);
+
+            match text {
+                Some(text) => StreamEvent::Delta(text.to_string()),
+                None => StreamEvent::Other,
+            }
+        }
         Some("result") => {
             let text = value
                 .get("result")
@@ -454,7 +699,7 @@ fn parse_stream_event(value: &Value) -> StreamEvent {
 
             match tool {
                 Some(name) => StreamEvent::Working(format!("Claude is using {name}")),
-                None => StreamEvent::Working("Claude is drafting the next Pair card".into()),
+                None => StreamEvent::Other,
             }
         }
         _ => StreamEvent::Other,
@@ -467,6 +712,12 @@ fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
     let output = usage.get("output_tokens")?.as_u64()? as usize;
 
     Some(TokenUsage::reported(input, output))
+}
+
+fn optional_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn args_from_env(json_name: &str, plain_name: &str) -> Result<Vec<String>> {
@@ -537,6 +788,24 @@ mod tests {
     }
 
     #[test]
+    fn extracts_text_deltas_and_skips_thinking() {
+        let text = json!({
+            "type": "stream_event",
+            "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "abc"}}
+        });
+        let thinking = json!({
+            "type": "stream_event",
+            "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hmm"}}
+        });
+
+        assert!(matches!(
+            parse_stream_event(&text),
+            StreamEvent::Delta(delta) if delta == "abc"
+        ));
+        assert!(matches!(parse_stream_event(&thinking), StreamEvent::Other));
+    }
+
+    #[test]
     fn detects_failed_turns() {
         let value = json!({
             "type": "result",
@@ -558,6 +827,49 @@ mod tests {
             panic!("expected working event");
         };
         assert!(activity.contains("Grep"));
+    }
+
+    #[test]
+    fn preview_reports_title_then_body_once() {
+        let mut preview = StreamPreview::default();
+
+        assert_eq!(preview.push("{\"op\":\"hypothesis\",\"ti"), None);
+        assert_eq!(
+            preview.push("tle\":\"Falsy guard\","),
+            Some("Drafting: Falsy guard".into())
+        );
+        assert_eq!(preview.push("\"claim\":\"The guard rejects"), None);
+        let body = preview
+            .push(" 0, empty strings and false, so callers lose data\"")
+            .expect("body preview");
+        assert!(body.starts_with("Falsy guard: The guard rejects 0"));
+        assert_eq!(preview.push("\"more\":\"noise\""), None);
+    }
+
+    #[test]
+    fn extract_string_field_handles_escapes_and_partials() {
+        assert_eq!(
+            extract_string_field(r#"{"title":"a \"quoted\" step""#, "title"),
+            Some(("a \"quoted\" step".into(), true))
+        );
+        assert_eq!(
+            extract_string_field(r#"{"title":"still stream"#, "title"),
+            Some(("still stream".into(), false))
+        );
+        assert_eq!(extract_string_field(r#"{"titl"#, "title"), None);
+    }
+
+    #[test]
+    fn routes_patch_turns_to_the_patch_phase() {
+        let mut req = crate::test_request();
+        assert!(matches!(turn_phase(&req), Phase::Discovery));
+
+        req.card_contract.expected_kind = Some(pair_protocol::CardKind::Patch);
+        assert!(matches!(turn_phase(&req), Phase::Patch));
+
+        req.card_contract.expected_kind = None;
+        req.card_contract.allow_goal_completion = true;
+        assert!(matches!(turn_phase(&req), Phase::Patch));
     }
 
     #[test]

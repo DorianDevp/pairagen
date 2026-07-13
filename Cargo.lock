@@ -407,6 +407,7 @@ dependencies = [
  "pair_context",
  "pair_patch",
  "pair_protocol",
+ "serde_json",
  "thiserror",
  "tokio",
  "uuid",

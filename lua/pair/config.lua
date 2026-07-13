@@ -6,6 +6,9 @@ M.values = {
     args = {},
     mode = "auto",
     agent = "mock",
+    -- Speculative prefetch of the likely next card: "fix" requests the patch
+    -- in the background while you read a discovery card; "off" disables it.
+    prefetch = "fix",
   },
   distribution = {
     repository = "DorianDevp/pairagen",
@@ -39,6 +42,11 @@ M.values = {
       kind = "claude_app",
       command = "claude",
       args = {},
+      -- Discovery cards (hypothesis/finding/choice) run on a faster model
+      -- with a capped thinking budget; patch drafting keeps the main model
+      -- with adaptive thinking. Set either to nil to use the CLI default.
+      discovery_model = "haiku",
+      discovery_thinking = 1024,
     },
     aider = {
       kind = "generic",
@@ -285,7 +293,13 @@ end
 
 function M.backend_env()
   local _, agent = M.agent_config()
+  local env = M.agent_env(agent)
+  env.PAIR_PREFETCH = M.values.backend.prefetch or "fix"
 
+  return env
+end
+
+function M.agent_env(agent)
   if agent.kind == "mock" then
     return {
       PAIR_BACKEND = "mock",
@@ -325,6 +339,10 @@ function M.backend_env()
       PAIR_CLAUDE_ARGS = table.concat(args, " "),
       PAIR_CLAUDE_ARGS_JSON = vim.json.encode(args),
       PAIR_CLAUDE_MODEL = agent.model or "",
+      PAIR_CLAUDE_DISCOVERY_MODEL = agent.discovery_model or "",
+      PAIR_CLAUDE_DISCOVERY_THINKING = agent.discovery_thinking
+          and tostring(agent.discovery_thinking)
+        or "",
     }
   end
 

@@ -37,6 +37,12 @@ pub trait BackendAdapter: Send + Sync {
         self.next_card(req).await
     }
 
+    /// Called when the editor opens the prompt window, before any session
+    /// exists, so backends can pay their startup cost while the user types.
+    async fn warmup(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn capabilities(&self) -> BackendInfo;
 }
 
@@ -49,7 +55,7 @@ pub struct BackendProgress {
     pub message: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct BackendRequest {
     pub session: SessionSnapshot,
     pub action: BackendAction,
@@ -85,7 +91,7 @@ pub fn backend_context(context: &ContextBundle) -> serde_json::Value {
     })
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum BackendAction {
     Start,
     User(Action),

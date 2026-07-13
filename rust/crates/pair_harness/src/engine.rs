@@ -21,6 +21,23 @@ pub struct Engine {
     backend: Arc<dyn BackendAdapter>,
     sessions: HashMap<String, Session>,
     context_optimizer: ContextOptimizer,
+    prefetch_mode: PrefetchMode,
+    prefetches: HashMap<String, Prefetch>,
+}
+
+/// Speculative prefetch of the likely next card. `Fix` requests the patch
+/// card in the background while the user is still reading a discovery card,
+/// so pressing Fix returns (near-)instantly on a hit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrefetchMode {
+    Off,
+    Fix,
+}
+
+struct Prefetch {
+    action: Action,
+    fingerprint: u64,
+    handle: tokio::task::JoinHandle<Result<BackendResponse>>,
 }
 
 impl Engine {
@@ -29,7 +46,13 @@ impl Engine {
             backend,
             sessions: HashMap::new(),
             context_optimizer: ContextOptimizer::default(),
+            prefetch_mode: PrefetchMode::Off,
+            prefetches: HashMap::new(),
         }
+    }
+
+    pub fn set_prefetch_mode(&mut self, mode: PrefetchMode) {
+        self.prefetch_mode = mode;
     }
 
     pub async fn start(&mut self, params: StartSessionParams) -> Result<StartSessionResult> {
@@ -56,6 +79,7 @@ impl Engine {
                 context,
                 &expected,
                 progress,
+                None,
             )
             .await;
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
@@ -70,6 +94,7 @@ impl Engine {
         let context_report = session.context.report.clone();
 
         self.sessions.insert(session_id.clone(), session);
+        self.schedule_prefetch(&session_id).await;
 
         Ok(StartSessionResult {
             session_id,
@@ -94,11 +119,15 @@ impl Engine {
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         let mut session = self.take_session(session_id)?;
+        let prefetched = self.take_prefetch(&mut session, &action).await;
         let result = self
-            .action_taken(session_id, &mut session, action, progress)
+            .action_taken(session_id, &mut session, action, progress, prefetched)
             .await;
 
         self.sessions.insert(session_id.into(), session);
+        if result.is_ok() {
+            self.schedule_prefetch(session_id).await;
+        }
 
         result
     }
@@ -119,6 +148,9 @@ impl Engine {
             .await;
 
         self.sessions.insert(session_id.into(), session);
+        if result.is_ok() {
+            self.schedule_prefetch(session_id).await;
+        }
 
         result
     }
@@ -129,6 +161,7 @@ impl Engine {
         session: &mut Session,
         action: Action,
         progress: Option<ProgressReporter>,
+        prefetched: Option<BackendResponse>,
     ) -> Result<ActionResult> {
         let state = session.state.next(&action)?;
         if action == Action::Stop {
@@ -161,6 +194,7 @@ impl Engine {
                 context,
                 &state,
                 progress,
+                prefetched,
             )
             .await;
 
@@ -207,6 +241,7 @@ impl Engine {
                 context,
                 &expected,
                 progress,
+                None,
             )
             .await;
 
@@ -310,7 +345,7 @@ impl Engine {
         session.rejected_patches.extend(result.patch_ids.clone());
         session.state = SessionState::PatchShown;
 
-        self.action_taken(&session_id, session, Action::Retry, progress)
+        self.action_taken(&session_id, session, Action::Retry, progress, None)
             .await
     }
 
@@ -379,18 +414,26 @@ impl Engine {
         context: ContextBundle,
         expected: &NextState,
         progress: Option<ProgressReporter>,
+        mut prefetched: Option<BackendResponse>,
     ) -> BackendResponse {
         let mut action = action;
         let mut token_usage = None;
         let mut attempts = Vec::new();
 
         for attempt in 0..3 {
-            let request = self.request(session, action, context.clone(), expected);
-            let mut response = match self
-                .backend
-                .next_card_with_progress(request, progress.clone())
-                .await
-            {
+            let attempt_response = match prefetched.take() {
+                // A matching speculative response was computed for this exact
+                // request while the user was reading the previous card; it
+                // still goes through every dedup/validation gate below.
+                Some(response) => Ok(response),
+                None => {
+                    let request = self.request(session, action, context.clone(), expected);
+                    self.backend
+                        .next_card_with_progress(request, progress.clone())
+                        .await
+                }
+            };
+            let mut response = match attempt_response {
                 Ok(response) => response,
                 Err(error) => {
                     let detail = format!("{error:#}");
@@ -545,6 +588,137 @@ impl Engine {
             session.token_usage.add(usage);
         }
     }
+
+    /// Requests the likely next card in the background while the user reads
+    /// the one just shown. Only Fix is predicted: it is the most common and
+    /// slowest follow-up, and on backends with a separate patch process a
+    /// misprediction never blocks the user's real next request.
+    async fn schedule_prefetch(&mut self, session_id: &str) {
+        if self.prefetch_mode != PrefetchMode::Fix {
+            return;
+        }
+
+        if let Some(existing) = self.prefetches.get(session_id) {
+            if !existing.handle.is_finished() {
+                // An earlier speculation is still running on the backend;
+                // queueing another would only pile up turns.
+                return;
+            }
+            // Fold the finished-but-unconsumed speculation into the session's
+            // token totals so wasted turns stay visible to the user.
+            if let Some(stale) = self.prefetches.remove(session_id)
+                && let Ok(Ok(response)) = stale.handle.await
+                && let Some(session) = self.sessions.get_mut(session_id)
+            {
+                fold_usage(session, &response.metadata.token_usage);
+            }
+        }
+
+        let Some(session) = self.sessions.get(session_id) else {
+            return;
+        };
+        if session.state != SessionState::CardShown {
+            return;
+        }
+        let Some(card) = session.cards.last() else {
+            return;
+        };
+        if !card.actions().contains(&Action::Fix) {
+            return;
+        }
+        let Ok(expected) = session.state.next(&Action::Fix) else {
+            return;
+        };
+
+        let request = self.request(
+            session,
+            BackendAction::User(Action::Fix),
+            session.context.clone(),
+            &expected,
+        );
+        let fingerprint = request_fingerprint(&request);
+        let backend = self.backend.clone();
+        let handle = tokio::spawn(async move { backend.next_card(request).await });
+
+        self.prefetches.insert(
+            session_id.to_string(),
+            Prefetch {
+                action: Action::Fix,
+                fingerprint,
+                handle,
+            },
+        );
+    }
+
+    /// Consumes a pending speculation if it was computed for exactly the
+    /// request this action would produce; otherwise leaves the real path
+    /// untouched and keeps the wasted tokens accounted for.
+    async fn take_prefetch(
+        &mut self,
+        session: &mut Session,
+        action: &Action,
+    ) -> Option<BackendResponse> {
+        let entry = self.prefetches.remove(&session.id)?;
+
+        if entry.action == *action
+            && let Ok(expected) = session.state.next(action)
+        {
+            let request = self.request(
+                session,
+                BackendAction::User(action.clone()),
+                session.context.clone(),
+                &expected,
+            );
+            if request_fingerprint(&request) == entry.fingerprint {
+                return match entry.handle.await {
+                    Ok(Ok(response)) => Some(response),
+                    _ => None,
+                };
+            }
+            if entry.handle.is_finished() {
+                if let Ok(Ok(response)) = entry.handle.await {
+                    fold_usage(session, &response.metadata.token_usage);
+                }
+                return None;
+            }
+            self.prefetches.insert(session.id.clone(), entry);
+            return None;
+        }
+
+        if entry.handle.is_finished() {
+            if let Ok(Ok(response)) = entry.handle.await {
+                fold_usage(session, &response.metadata.token_usage);
+            }
+        } else {
+            self.prefetches.insert(session.id.clone(), entry);
+        }
+
+        None
+    }
+}
+
+fn fold_usage(session: &mut Session, usage: &Option<pair_protocol::TokenUsage>) {
+    if let Some(usage) = usage {
+        session.token_usage.add(usage);
+    }
+}
+
+fn request_fingerprint(request: &BackendRequest) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    // Only model-visible data may decide whether a speculative response
+    // matches: the optimizer report (cache counters vary run to run) and raw
+    // LSP hints are telemetry that backend_context strips before the model
+    // ever sees them.
+    let mut request = request.clone();
+    request.context.report = None;
+    request.context.hints = vec![];
+
+    let mut hasher = DefaultHasher::new();
+    serde_json::to_string(&request)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
 }
 
 fn agent_attempt(
@@ -1869,5 +2043,125 @@ mod tests {
                 can_use_tools: false,
             }
         }
+    }
+
+    #[derive(Default)]
+    struct CountingBackend {
+        inner: MockBackend,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CountingBackend {
+        fn record(&self, path: &str, action: &BackendAction) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{path}:{action:?}"));
+        }
+    }
+
+    #[async_trait]
+    impl BackendAdapter for CountingBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            self.record("plain", &req.action);
+            self.inner.next_card(req).await
+        }
+
+        async fn next_card_with_progress(
+            &self,
+            req: BackendRequest,
+            _progress: Option<ProgressReporter>,
+        ) -> Result<BackendResponse> {
+            self.record("progress", &req.action);
+            self.inner.next_card(req).await
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            self.inner.capabilities()
+        }
+    }
+
+    #[tokio::test]
+    async fn prefetched_fix_is_consumed_without_a_second_backend_call() {
+        let backend = Arc::new(CountingBackend::default());
+        let mut engine = Engine::new(backend.clone());
+        engine.set_prefetch_mode(PrefetchMode::Fix);
+
+        let start = engine.start(params()).await.unwrap();
+        assert!(matches!(start.card, Card::Hypothesis(_)));
+
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        assert!(matches!(result.card, Card::Patch(_)));
+
+        let calls = backend.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "unexpected backend calls: {calls:?}");
+        assert!(calls[0].starts_with("progress:Start"));
+        assert!(calls[1].starts_with("plain:User(Fix)"));
+    }
+
+    #[tokio::test]
+    async fn stale_prefetch_is_discarded_after_context_change() {
+        let backend = Arc::new(CountingBackend::default());
+        let mut engine = Engine::new(backend.clone());
+        engine.set_prefetch_mode(PrefetchMode::Fix);
+
+        let start = engine.start(params()).await.unwrap();
+        let context = ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from("src/work.ts"),
+            cursor: Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: "const edited = true".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        };
+        engine.update_context(&start.session_id, context).unwrap();
+
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        let Card::Patch(card) = result.card else {
+            panic!("expected patch card");
+        };
+
+        // The mock builds the diff from the buffer's first line, so a patch
+        // produced from the fresh request must reference the edited buffer.
+        assert!(
+            card.patches[0].diff.contains("const edited = true"),
+            "patch was built from stale context: {}",
+            card.patches[0].diff
+        );
+        let calls = backend.calls.lock().unwrap().clone();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.starts_with("progress:User(Fix)")),
+            "real fix call missing: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fingerprint_ignores_optimizer_telemetry() {
+        let backend = Arc::new(CountingBackend::default());
+        let mut engine = Engine::new(backend);
+        engine.set_prefetch_mode(PrefetchMode::Fix);
+        let start = engine.start(params()).await.unwrap();
+        let session = engine.get(&start.session_id).unwrap();
+
+        let request = engine.request(
+            session,
+            BackendAction::User(Action::Fix),
+            session.context.clone(),
+            &NextState::Patch,
+        );
+        let mut noisy = request.clone();
+        noisy.context.report = Some(pair_protocol::ContextReport {
+            enabled: true,
+            cache_hits: 42,
+            ..Default::default()
+        });
+
+        assert_eq!(request_fingerprint(&request), request_fingerprint(&noisy));
     }
 }

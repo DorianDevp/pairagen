@@ -7,6 +7,10 @@ local M = {}
 function M.open(mode)
   local source = require("pair.context").capture()
 
+  -- Let the backend pay its startup cost (CLI boot, process spawn) while the
+  -- user is still typing the prompt.
+  require("pair.rpc").request("backend/warmup", {}, function() end)
+
   M.open_for({
     title = M.title("Prompt"),
     footer = " Ctrl-s submit  Esc normal  q close ",

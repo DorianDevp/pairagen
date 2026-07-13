@@ -6,7 +6,7 @@ use pair_backends::{
     BackendAdapter, ClaudeAppBackend, CodexAppBackend, GenericCliBackend, MockBackend,
     OllamaBackend, ProgressReporter, StdioAgentBackend,
 };
-use pair_harness::Engine;
+use pair_harness::{Engine, PrefetchMode};
 use pair_protocol::{
     ActionParams, BackendInfo, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
     PatchApplyResult, ReplyParams, StartSessionParams,
@@ -69,8 +69,11 @@ struct Server {
 
 impl Server {
     fn new(backend: Arc<dyn BackendAdapter>, progress: ProgressReporter) -> Self {
+        let mut engine = Engine::new(backend.clone());
+        engine.set_prefetch_mode(prefetch_mode_from_env());
+
         Self {
-            engine: Engine::new(backend.clone()),
+            engine,
             backend,
             progress,
         }
@@ -173,11 +176,26 @@ impl Server {
 
                 json!(result)
             }
+            "backend/warmup" => {
+                self.backend
+                    .warmup()
+                    .await
+                    .map_err(|error| (id.clone(), error.to_string()))?;
+
+                json!({"ok": true})
+            }
             "shutdown" => json!({"ok": true}),
             method => return Err((id, format!("unknown method {method}"))),
         };
 
         Ok(JsonRpcResponse::ok(id, result))
+    }
+}
+
+fn prefetch_mode_from_env() -> PrefetchMode {
+    match std::env::var("PAIR_PREFETCH").as_deref() {
+        Ok("off") => PrefetchMode::Off,
+        _ => PrefetchMode::Fix,
     }
 }
 
