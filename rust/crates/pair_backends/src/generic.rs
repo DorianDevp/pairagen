@@ -34,7 +34,7 @@ impl GenericCliBackend {
 
     fn prompt(&self, req: &BackendRequest) -> String {
         let value = json!({
-            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), summary(title,summary,changed_files), error(title,message). Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
+            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), deny(title,reason), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. error is only for technical failures. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
             "stream": {
                 "protocol": "ndjson",
                 "progress": {"t": "pair_progress", "phase": "short phase", "message": "short user-visible activity summary"},
@@ -245,11 +245,7 @@ fn backend_name(command: &str) -> String {
 }
 
 fn parse_card(output: &str) -> Result<Card> {
-    if let Ok(op) = serde_json::from_str::<AgentOp>(output.trim()) {
-        return Ok(op.into_card("c_agent"));
-    }
-
-    if let Ok(card) = serde_json::from_str(output.trim()) {
+    if let Ok(card) = parse_json_card(output.trim()) {
         return Ok(card);
     }
 
@@ -257,11 +253,20 @@ fn parse_card(output: &str) -> Result<Card> {
         return Err(anyhow!("backend returned no Pair op"));
     };
 
-    if let Ok(op) = serde_json::from_str::<AgentOp>(json) {
+    parse_json_card(json)
+}
+
+fn parse_json_card(json: &str) -> Result<Card> {
+    let value = serde_json::from_str::<serde_json::Value>(json)?;
+
+    // Dispatch on the discriminator so a malformed op reports what is wrong with
+    // the op itself instead of the misleading Card error ("missing field kind").
+    if value.get("op").is_some() {
+        let op = serde_json::from_value::<AgentOp>(value)?;
         return Ok(op.into_card("c_agent"));
     }
 
-    Ok(serde_json::from_str(json)?)
+    Ok(serde_json::from_value(value)?)
 }
 
 fn excerpt(output: &str) -> String {
@@ -338,6 +343,34 @@ mod tests {
         let card = parse_card(output).unwrap();
 
         assert!(matches!(card, Card::Error(_)));
+    }
+
+    #[test]
+    fn parses_choice_op_with_string_options_and_null_fields() {
+        let output = r#"{"op":"choice","title":"Clarify what to test","question":"What should we test?","options":["Add a spec","Extend the directive spec","Just a smoke test"],"claim":null,"evidence":null,"next":null,"finding":null,"location":null,"annotation":null,"explanation":null,"patches":null,"summary":null,"changed_files":null,"message":null}"#;
+        let card = parse_card(output).unwrap();
+
+        let Card::Choice(card) = card else {
+            panic!("expected choice card");
+        };
+        assert_eq!(card.options.len(), 3);
+    }
+
+    #[test]
+    fn parses_deny_op() {
+        let output = r#"{"op":"deny","title":"Ambiguous prompt","reason":"Say which spec to write."}"#;
+        let card = parse_card(output).unwrap();
+
+        assert!(matches!(card, Card::Deny(_)));
+    }
+
+    #[test]
+    fn reports_op_error_instead_of_card_error() {
+        let output = r#"{"op":"finding","title":"T"}"#;
+        let error = parse_card(output).unwrap_err().to_string();
+
+        assert!(error.contains("finding"), "unexpected error: {error}");
+        assert!(!error.contains("kind"), "unexpected error: {error}");
     }
 
     #[test]

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Action, Card, ChoiceCard, ChoiceOption, ErrorCard, FilePatch, FindingCard, HypothesisCard,
-    Location, LocationEvidence, NextMove, PatchCard, SummaryCard,
+    Action, Card, ChoiceCard, ChoiceOption, DenyCard, ErrorCard, FilePatch, FindingCard,
+    HypothesisCard, Location, LocationEvidence, NextMove, PatchCard, SummaryCard,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -31,6 +31,10 @@ pub enum AgentOp {
         title: String,
         question: String,
         options: Vec<AgentChoice>,
+    },
+    Deny {
+        title: String,
+        reason: String,
     },
     Summary {
         title: String,
@@ -63,10 +67,43 @@ pub struct AgentPatch {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(from = "AgentChoiceInput")]
 pub struct AgentChoice {
     pub id: String,
     pub label: String,
     pub action: Action,
+}
+
+// Agents frequently emit choice options as plain strings instead of the full
+// {id,label,action} object; accept both so a valid choice op never fails to parse.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AgentChoiceInput {
+    Object {
+        #[serde(default)]
+        id: Option<String>,
+        label: String,
+        #[serde(default)]
+        action: Option<Action>,
+    },
+    Label(String),
+}
+
+impl From<AgentChoiceInput> for AgentChoice {
+    fn from(input: AgentChoiceInput) -> Self {
+        match input {
+            AgentChoiceInput::Object { id, label, action } => Self {
+                id: id.unwrap_or_default(),
+                label,
+                action: action.unwrap_or(Action::EditPrompt),
+            },
+            AgentChoiceInput::Label(label) => Self {
+                id: String::new(),
+                label,
+                action: Action::EditPrompt,
+            },
+        }
+    }
 }
 
 impl AgentOp {
@@ -142,7 +179,17 @@ impl AgentOp {
                 id,
                 title,
                 question,
-                options: options.into_iter().map(AgentChoice::choice).collect(),
+                options: options
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, option)| option.choice(index + 1))
+                    .collect(),
+            }),
+            Self::Deny { title, reason } => Card::Deny(DenyCard {
+                id,
+                title,
+                reason,
+                actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
             }),
             Self::Summary {
                 title,
@@ -196,9 +243,13 @@ impl AgentPatch {
 }
 
 impl AgentChoice {
-    fn choice(self) -> ChoiceOption {
+    fn choice(self, index: usize) -> ChoiceOption {
         ChoiceOption {
-            id: self.id,
+            id: if self.id.trim().is_empty() {
+                format!("o_{index}")
+            } else {
+                self.id
+            },
             label: self.label,
             action: self.action,
         }
@@ -212,6 +263,57 @@ fn one() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_choice_options_given_as_plain_strings() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"choice","title":"T","question":"Q","options":["First","Second"]}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::Choice(card) = card else {
+            panic!("expected choice card");
+        };
+        assert_eq!(card.options.len(), 2);
+        assert_eq!(card.options[0].id, "o_1");
+        assert_eq!(card.options[0].label, "First");
+        assert_eq!(card.options[1].id, "o_2");
+    }
+
+    #[test]
+    fn parses_choice_options_missing_id_and_action() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"choice","title":"T","question":"Q","options":[{"label":"Only label"},{"id":"custom","label":"Full","action":"fix"}]}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::Choice(card) = card else {
+            panic!("expected choice card");
+        };
+        assert_eq!(card.options[0].id, "o_1");
+        assert_eq!(card.options[1].id, "custom");
+        assert_eq!(card.options[1].action, Action::Fix);
+    }
+
+    #[test]
+    fn maps_deny_op_to_deny_card() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"deny","title":"Ambiguous prompt","reason":"The prompt does not say what to test."}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::Deny(card) = card else {
+            panic!("expected deny card");
+        };
+        assert_eq!(card.title, "Ambiguous prompt");
+        assert_eq!(
+            card.actions,
+            vec![Action::Retry, Action::EditPrompt, Action::Stop]
+        );
+    }
 
     #[test]
     fn maps_op_to_card() {

@@ -125,7 +125,7 @@ pub fn enforce_card_contract(
         return card;
     };
 
-    if matches!(card, Card::Error(_))
+    if matches!(card, Card::Error(_) | Card::Deny(_))
         || card.kind() == expected_kind
         || (contract.allow_goal_completion && matches!(card, Card::Summary(_)))
     {

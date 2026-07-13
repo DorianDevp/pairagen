@@ -13,6 +13,7 @@ pub enum CardKind {
     Finding,
     Patch,
     Choice,
+    Deny,
     Summary,
     Error,
 }
@@ -41,6 +42,7 @@ pub enum Card {
     Finding(FindingCard),
     Patch(PatchCard),
     Choice(ChoiceCard),
+    Deny(DenyCard),
     Summary(SummaryCard),
     Error(ErrorCard),
 }
@@ -52,6 +54,7 @@ impl Card {
             Card::Finding(_) => CardKind::Finding,
             Card::Patch(_) => CardKind::Patch,
             Card::Choice(_) => CardKind::Choice,
+            Card::Deny(_) => CardKind::Deny,
             Card::Summary(_) => CardKind::Summary,
             Card::Error(_) => CardKind::Error,
         }
@@ -63,6 +66,7 @@ impl Card {
             Card::Finding(card) => &card.id,
             Card::Patch(card) => &card.id,
             Card::Choice(card) => &card.id,
+            Card::Deny(card) => &card.id,
             Card::Summary(card) => &card.id,
             Card::Error(card) => &card.id,
         }
@@ -74,6 +78,7 @@ impl Card {
             Card::Finding(card) => &card.actions,
             Card::Patch(card) => &card.actions,
             Card::Choice(_) => &[],
+            Card::Deny(card) => &card.actions,
             Card::Summary(card) => &card.next_actions,
             Card::Error(card) => &card.actions,
         }
@@ -131,6 +136,14 @@ pub struct ChoiceOption {
     pub id: String,
     pub label: String,
     pub action: Action,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DenyCard {
+    pub id: CardId,
+    pub title: String,
+    pub reason: String,
+    pub actions: Vec<Action>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

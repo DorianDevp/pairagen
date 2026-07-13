@@ -755,6 +755,12 @@ fn validate_backend_card(
         return Ok(());
     }
 
+    // A denial is valid in any state: the agent is telling the user it cannot
+    // produce the expected card, so only the card text itself is checked.
+    if matches!(card, Card::Deny(_)) {
+        return validate_one_card(card);
+    }
+
     validate_one_card(card)?;
     PatchValidator::validate_card(card)?;
     validate_patch_target(card, context)?;
@@ -845,6 +851,10 @@ fn validate_one_card(card: &Card) -> Result<()> {
                 require_text("choice option id", &option.id)?;
                 require_text("choice option label", &option.label)?;
             }
+        }
+        Card::Deny(card) => {
+            require_text("card title", &card.title)?;
+            require_text("deny reason", &card.reason)?;
         }
         Card::Summary(card) => {
             require_text("card title", &card.title)?;
@@ -1042,7 +1052,7 @@ fn expected_card_kind(
                 .cards
                 .iter()
                 .rev()
-                .find(|card| !matches!(card, Card::Error(_)))
+                .find(|card| !matches!(card, Card::Error(_) | Card::Deny(_)))
                 .map(Card::kind)
                 .unwrap_or(CardKind::Hypothesis),
             Action::Apply | Action::ApplyPatch { .. } | Action::Stop => CardKind::Summary,
@@ -1051,10 +1061,11 @@ fn expected_card_kind(
 }
 
 fn state_after_card(card: &Card, next_state: &NextState) -> SessionState {
-    if matches!(card, Card::Error(_)) && matches!(next_state, NextState::Patch) {
+    let refused = matches!(card, Card::Error(_) | Card::Deny(_));
+    if refused && matches!(next_state, NextState::Patch) {
         return SessionState::PatchFailed;
     }
-    if matches!(card, Card::Error(_)) && matches!(next_state, NextState::Continuation) {
+    if refused && matches!(next_state, NextState::Continuation) {
         return SessionState::ContinuationFailed;
     }
 
@@ -1067,6 +1078,7 @@ fn card_summary(card: &Card) -> String {
         Card::Finding(card) => format!("finding: {}", card.finding),
         Card::Patch(card) => format!("patch: {}", card.explanation),
         Card::Choice(card) => format!("choice: {}", card.question),
+        Card::Deny(card) => format!("deny: {}", card.reason),
         Card::Summary(card) => format!("summary: {}", card.summary),
         Card::Error(card) => format!("error: {}", card.message),
     }

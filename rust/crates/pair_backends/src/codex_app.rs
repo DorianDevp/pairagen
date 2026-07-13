@@ -880,6 +880,7 @@ fn output_schema(req: &BackendRequest) -> Value {
         Some(pair_protocol::CardKind::Hypothesis) => hypothesis_schema(),
         Some(pair_protocol::CardKind::Finding) => finding_schema(),
         Some(pair_protocol::CardKind::Choice) => choice_schema(),
+        Some(pair_protocol::CardKind::Deny) => deny_schema(),
         Some(pair_protocol::CardKind::Summary) => summary_schema(),
         Some(pair_protocol::CardKind::Error) => error_schema(),
         None => error_schema(),
@@ -1048,6 +1049,17 @@ fn summary_schema() -> Value {
             "title": {"type": "string"},
             "summary": {"type": "string"},
             "changed_files": {"type": "array", "items": {"type": "string"}}
+        }),
+    )
+}
+
+fn deny_schema() -> Value {
+    object_schema(
+        &["op", "title", "reason"],
+        json!({
+            "op": {"type": "string", "enum": ["deny"]},
+            "title": {"type": "string"},
+            "reason": {"type": "string"}
         }),
     )
 }

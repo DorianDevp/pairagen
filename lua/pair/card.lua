@@ -96,8 +96,16 @@ function M.lines(card)
     M.add(lines, card.summary or card.title)
   elseif card.kind == "error" then
     M.add(lines, card.message or card.title)
+  elseif card.kind == "deny" then
+    table.insert(lines, "Agent could not proceed")
+    table.insert(lines, "")
+    M.add(lines, card.reason or card.title)
   elseif card.kind == "choice" then
     M.add(lines, card.question or card.title)
+    for index, option in ipairs(card.options or {}) do
+      table.insert(lines, "")
+      M.add(lines, string.format("%d. %s", index, option.label or option.id or ""))
+    end
   end
 
   local location = M.location(card)
@@ -327,6 +335,7 @@ function M.highlight(buf, lines, card)
       or line:match("^At  ") and "PairMuted"
       or line:match("tokens$") and "PairMuted"
       or card.kind == "error" and "DiagnosticError"
+      or card.kind == "deny" and line == "Agent could not proceed" and "DiagnosticError"
     if group then
       vim.api.nvim_buf_add_highlight(buf, -1, group, index - 1, 0, -1)
     end
