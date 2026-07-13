@@ -2,7 +2,7 @@ local root = vim.fn.getcwd()
 vim.opt.runtimepath:append(root)
 
 local config = require("pair.config")
-config.setup({
+require("pair").setup({
   backend = { agent = "codex", command = "/tmp/paird-test" },
   agents = {
     codex = {
@@ -77,6 +77,37 @@ assert(location.file == "templates/layout_editor.html")
 
 local card = require("pair.card")
 local diff = require("pair.diff")
+local change_cursor = diff.change_cursor({ "before", "  inserted", "after" }, {
+  first_row = 0,
+  added = { 1 },
+})
+assert(change_cursor[1] == 2)
+assert(change_cursor[2] == 2)
+vim.cmd("enew")
+local focus_source = vim.api.nvim_get_current_buf()
+vim.api.nvim_buf_set_name(focus_source, root .. "/pairagen-focus-test.lua")
+vim.api.nvim_buf_set_lines(focus_source, 0, -1, false, { "local before = true", "return before" })
+local focus_card = {
+  id = "focus-card",
+  kind = "patch",
+  title = "Focus inserted text",
+  explanation = "Keep the cursor on the change",
+  patches = {
+    {
+      id = "focus-patch",
+      file = "pairagen-focus-test.lua",
+      diff = "@@ -1,2 +1,2 @@\n local before = true\n-return before\n+  return not before\n",
+    },
+  },
+}
+state.card = focus_card
+assert(diff.show(focus_card))
+assert(vim.api.nvim_get_current_buf() == state.diff_buf)
+assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 2, 2 }))
+diff.restore_source()
+assert(vim.api.nvim_get_current_buf() == focus_source)
+state.card = nil
+vim.api.nvim_buf_delete(focus_source, { force = true })
 local long_goal = "Mam tutaj problem, bo ta pętla nie uwzględnia wszystkich elementów z kolejnych przebiegów"
 local long_explanation = "Oznacza korzeń podglądu tym samym dyskryminatorem w węźle nadrzędnym i zachowuje pełny opis zmiany"
 local patch_card = {
@@ -119,5 +150,40 @@ local sanitized = log.sanitize({ buffer_text = "secret source", event = "kept" }
 assert(sanitized.buffer_text.redacted == true)
 assert(sanitized.buffer_text.bytes > 0)
 assert(sanitized.event == "kept")
+
+vim.cmd("edit README.md")
+vim.cmd("tabedit CHANGELOG.md")
+local navigation_tab = vim.api.nvim_get_current_tabpage()
+assert(navigation.open_location({ file = "README.md", line = 2, column = 1 }))
+assert(vim.api.nvim_get_current_tabpage() == navigation_tab)
+assert(vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t") == "README.md")
+
+local location_card = {
+  id = "location-card",
+  kind = "finding",
+  title = "Relevant call",
+  finding = "This is where the function is called.",
+  location = { file = "README.md", line = 4, column = 2 },
+  next_actions = { "stop" },
+}
+state.session_id = "headless-session"
+card.show(location_card)
+assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 4, 1 }))
+local previous_float_win = state.card_win
+vim.cmd("tabnew")
+vim.wait(1000, function()
+  return state.card_win
+    and vim.api.nvim_win_is_valid(state.card_win)
+    and vim.api.nvim_win_get_tabpage(state.card_win) == vim.api.nvim_get_current_tabpage()
+end)
+assert(vim.api.nvim_win_get_tabpage(state.card_win) == vim.api.nvim_get_current_tabpage())
+assert(not vim.api.nvim_win_is_valid(previous_float_win))
+require("pair.ui").close(state.card_win)
+state.card_win = nil
+state.card = nil
+state.last_card = nil
+state.session_id = nil
+state.navigated_card = nil
+vim.cmd("tabonly")
 
 print("Pairagen headless smoke test passed")

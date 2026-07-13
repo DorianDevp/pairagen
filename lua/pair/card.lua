@@ -33,6 +33,14 @@ function M.show(card, opts)
   state.last_card = card
   status.hide()
 
+  if card.kind ~= "patch" and state.navigated_card ~= card then
+    state.navigated_card = card
+    local location = M.location(card)
+    if location then
+      navigation.open_location(location)
+    end
+  end
+
   if card.kind == "patch" then
     local diff = require("pair.diff")
     if diff.valid_preview() then

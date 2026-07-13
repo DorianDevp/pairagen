@@ -184,6 +184,12 @@ workspace; edits are still inert drafts until the user accepts each hunk. If
 the agent could not inspect a required file, `open_location` remains a fallback
 that supplies its buffer in a subsequent turn.
 
+Pair moves directly to the evidence for a location-bearing card and to the
+first non-blank character of the first added line for a draft, including drafts
+in the current file. It stays at that destination while the action card follows
+the active tab; it does not bounce through an older window that happens to show
+the same buffer.
+
 By default the first card is whatever fits the prompt best: a hypothesis, a
 finding, or a clarifying choice when the prompt is ambiguous. Start the prompt
 with `/{kind}` to demand a specific card instead — `/hypothesis`, `/finding`,

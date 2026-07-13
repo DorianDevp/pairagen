@@ -18,6 +18,7 @@ local M = {
   diff_source_buf = nil,
   diff_source_tick = nil,
   diff_first_row = nil,
+  diff_cursor = nil,
   thinking_win = nil,
   thinking_buf = nil,
   thinking_timer = nil,
@@ -35,6 +36,7 @@ local M = {
   completion_checked_card = nil,
   details_card = nil,
   details_expanded = false,
+  navigated_card = nil,
 }
 
 return M

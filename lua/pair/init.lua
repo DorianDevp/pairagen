@@ -61,6 +61,17 @@ function M.setup(opts)
   config.setup(opts)
   require("pair.commands").setup()
   require("pair.keymaps").setup()
+  local group = vim.api.nvim_create_augroup("PairCardTabFollow", { clear = true })
+  vim.api.nvim_create_autocmd("TabEnter", {
+    group = group,
+    callback = function()
+      vim.schedule(function()
+        if state.card and state.session_id and not state.thinking_request_id then
+          card.show(state.card)
+        end
+      end)
+    end,
+  })
 end
 
 function M.prompt(mode)
@@ -472,6 +483,7 @@ function M.reset()
   state.diff_source_buf = nil
   state.diff_source_tick = nil
   state.diff_first_row = nil
+  state.diff_cursor = nil
   state.token_usage = nil
   state.turn_token_usage = nil
   state.backend_model = nil
@@ -481,6 +493,7 @@ function M.reset()
   state.completion_checked_card = nil
   state.details_card = nil
   state.details_expanded = false
+  state.navigated_card = nil
   state.thinking_request_id = nil
   state.thinking_session_id = nil
 

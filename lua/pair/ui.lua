@@ -61,6 +61,15 @@ function M.render(buf, win, lines, opts)
   opts = opts or {}
   lines = M.lines(lines)
 
+  if win
+    and vim.api.nvim_win_is_valid(win)
+    and vim.api.nvim_win_get_tabpage(win) ~= vim.api.nvim_get_current_tabpage()
+  then
+    M.close(win)
+    win = nil
+    buf = nil
+  end
+
   if not buf or not vim.api.nvim_buf_is_valid(buf) then
     return M.float(lines, opts)
   end
@@ -154,7 +163,7 @@ function M.buffer_anchor(buf, line, column)
     return nil
   end
 
-  for _, win in ipairs(vim.api.nvim_list_wins()) do
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if vim.api.nvim_win_get_buf(win) == buf then
       local position = vim.fn.screenpos(win, math.max(line or 1, 1), math.max((column or 0) + 1, 1))
       if position.row > 0 and position.col > 0 then

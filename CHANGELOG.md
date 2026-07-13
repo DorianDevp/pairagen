@@ -6,6 +6,12 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Action cards now follow the active tab, navigation no longer jumps through a
+  matching buffer in an unrelated tab, and patch drafts focus the first added
+  character automatically.
+
 ## [0.2.0] - 2026-07-13
 
 ### Added

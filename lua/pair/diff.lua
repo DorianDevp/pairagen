@@ -36,16 +36,6 @@ function M.show(card, opts)
     return false
   end
 
-  local source_win = context.buffer_window(source_buf)
-  if not source_win then
-    navigation.open_location({ file = patch.file, line = 1, column = 1 })
-    source_win = context.buffer_window(source_buf)
-  end
-  if not source_win then
-    ui.notify("Source location is not visible", vim.log.levels.WARN)
-    return false
-  end
-
   local source_lines = vim.api.nvim_buf_get_lines(source_buf, 0, -1, false)
   local hunk_ok, hunk = pcall(apply.parse_hunk, patch.diff)
   if not hunk_ok then
@@ -60,6 +50,23 @@ function M.show(card, opts)
   local draft_ok, draft_lines = pcall(apply.apply_diff, source_lines, patch.diff)
   if not draft_ok then
     ui.notify(draft_lines, vim.log.levels.ERROR)
+    return false
+  end
+
+  local annotations = M.annotations(hunk, source_start)
+  local change_cursor = M.change_cursor(draft_lines, annotations)
+  if not navigation.open_location({
+    file = patch.file,
+    line = change_cursor[1],
+    column = change_cursor[2] + 1,
+  }) then
+    ui.notify("Source location is not visible", vim.log.levels.WARN)
+    return false
+  end
+
+  local source_win = vim.api.nvim_get_current_win()
+  if vim.api.nvim_get_current_buf() ~= source_buf then
+    ui.notify("Patch target did not open in the active editor window", vim.log.levels.WARN)
     return false
   end
 
@@ -79,8 +86,8 @@ function M.show(card, opts)
   state.diff_source_buf = source_buf
   state.diff_source_tick = vim.api.nvim_buf_get_changedtick(source_buf)
 
-  local annotations = M.annotations(hunk, source_start)
   state.diff_first_row = annotations.first_row
+  state.diff_cursor = change_cursor
   M.decorate(draft_buf, draft_lines, annotations, card.warnings or {})
   M.controls(card, opts)
 
@@ -88,6 +95,8 @@ function M.show(card, opts)
   vim.keymap.set("n", keymaps.draft_accept, M.accept, { buffer = draft_buf, nowait = true, silent = true })
   vim.keymap.set("n", keymaps.draft_reject, M.reject, { buffer = draft_buf, nowait = true, silent = true })
   vim.keymap.set("n", keymaps.draft_retry, M.retry, { buffer = draft_buf, nowait = true, silent = true })
+
+  M.focus_change()
 
   return true
 end
@@ -113,6 +122,15 @@ function M.annotations(hunk, source_start)
   end
 
   return annotations
+end
+
+function M.change_cursor(draft_lines, annotations)
+  local row = annotations.added[1] or annotations.first_row
+  row = math.max(0, math.min(row, math.max(#draft_lines - 1, 0)))
+  local line = draft_lines[row + 1] or ""
+  local indentation = line:match("^%s*") or ""
+
+  return { row + 1, #indentation }
 end
 
 function M.decorate(buf, draft_lines, annotations, warnings)
@@ -255,9 +273,10 @@ function M.focus_change()
 
   vim.api.nvim_set_current_win(state.diff_win)
   local line_count = math.max(vim.api.nvim_buf_line_count(state.diff_buf), 1)
+  local cursor = state.diff_cursor or { (state.diff_first_row or 0) + 1, 0 }
   vim.api.nvim_win_set_cursor(state.diff_win, {
-    math.min((state.diff_first_row or 0) + 1, line_count),
-    0,
+    math.min(cursor[1], line_count),
+    cursor[2],
   })
   vim.cmd("normal! zz")
 
@@ -360,6 +379,7 @@ function M.restore_source(cursor)
   state.diff_source_buf = nil
   state.diff_source_tick = nil
   state.diff_first_row = nil
+  state.diff_cursor = nil
 end
 
 function M.send(accepted, patch_ids, changed_files, error)
