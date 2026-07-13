@@ -45,7 +45,10 @@ pub enum AgentOp {
         reason: Option<String>,
         #[serde(default)]
         message: Option<String>,
-        location: AgentLocation,
+        #[serde(default)]
+        location: Option<AgentLocation>,
+        #[serde(default)]
+        next: Option<AgentLocation>,
     },
     Summary {
         title: String,
@@ -279,7 +282,16 @@ impl AgentOp {
                 reason,
                 message,
                 location,
+                next,
             } => {
+                let Some(location) = location.or(next) else {
+                    return Card::Error(ErrorCard {
+                        id,
+                        title: "Open location target missing".into(),
+                        message: "The agent requested navigation without a location.".into(),
+                        actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+                    });
+                };
                 let fallback = location.annotation.clone();
                 Card::OpenLocation(OpenLocationCard {
                     id,
@@ -485,6 +497,24 @@ mod tests {
             card.reason,
             "The next change requires a new exception file."
         );
+        assert_eq!(
+            card.location.file,
+            PathBuf::from("src/Exception/OAuth/OAuthAccountNotActiveException.php")
+        );
+    }
+
+    #[test]
+    fn maps_flat_schema_open_location_next_to_location() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"annotation":null,"changed_files":null,"claim":null,"evidence":null,"explanation":null,"finding":null,"goal_complete":false,"location":null,"message":null,"next":{"annotation":"New inactive-account exception.","column":1,"file":"src/Exception/OAuth/OAuthAccountNotActiveException.php","line":1},"op":"open_location","options":null,"patches":null,"question":null,"reason":"Create the exception before referencing it.","summary":null,"title":"Open inactive-account exception"}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::OpenLocation(card) = card else {
+            panic!("expected open_location card");
+        };
+        assert_eq!(card.reason, "Create the exception before referencing it.");
         assert_eq!(
             card.location.file,
             PathBuf::from("src/Exception/OAuth/OAuthAccountNotActiveException.php")

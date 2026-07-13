@@ -712,7 +712,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
         "- finding: concise explanation of the pending hunk"
     } else if goal_loop {
         "- patch: one complete structured patch for local hunk-by-hunk review; include goal_complete\n\
-- open_location: when the next hunk belongs in another buffer; put the explanation in reason, not message\n\
+- open_location: when the next hunk belongs in another buffer; put the target in location (not next) and the explanation in reason (not message)\n\
 - choice: only for a blocking user decision\n\
 - summary: only when the complete original goal is satisfied"
     } else {
@@ -1555,6 +1555,35 @@ mod tests {
             panic!("expected patch card");
         };
         assert!(card.goal_complete);
+    }
+
+    #[test]
+    fn goal_loop_accepts_open_location_target_in_next() {
+        let output = json!({
+            "op": "open_location",
+            "title": "Open inactive-account exception",
+            "reason": "Create the exception before referencing it.",
+            "location": null,
+            "next": {
+                "file": "src/Exception/OAuth/OAuthAccountNotActiveException.php",
+                "line": 1,
+                "column": 1,
+                "annotation": "New exception type."
+            }
+        });
+        let contract = crate::CardContract {
+            allow_goal_completion: true,
+            ..Default::default()
+        };
+
+        let Card::OpenLocation(card) = parse_card(&output.to_string(), &contract).unwrap() else {
+            panic!("expected open_location card");
+        };
+        assert!(
+            card.location
+                .file
+                .ends_with("OAuthAccountNotActiveException.php")
+        );
     }
 
     #[test]
