@@ -687,7 +687,6 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             req.card_contract.max_hunks_per_patch,
             req.card_contract.max_changed_lines,
         )
-            .into()
     } else if patch_turn {
         format!(
             "- Return exactly one file and exactly one hunk changing at most {} added/removed lines.\n\

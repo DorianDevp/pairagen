@@ -2058,7 +2058,7 @@ mod tests {
             let observed_reads = observed_reads.clone();
             Box::pin(async move {
                 observed_reads.fetch_add(1, Ordering::SeqCst);
-                let text = if file == PathBuf::from("src/work.ts") {
+                let text = if file == std::path::Path::new("src/work.ts") {
                     "first"
                 } else {
                     "other"
