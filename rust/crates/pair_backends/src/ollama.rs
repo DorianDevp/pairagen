@@ -134,6 +134,7 @@ impl BackendAdapter for OllamaBackend {
             raw_output: Some(text),
             metadata: BackendMetadata {
                 backend: "ollama".into(),
+                model: Some(self.model.clone()),
                 token_usage: Some(token_usage),
                 activities: vec![],
                 attempts: vec![],

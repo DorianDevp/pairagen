@@ -46,6 +46,7 @@ struct ClaudeAppState {
     process: Option<ClaudeAppProcess>,
     session_key: Option<String>,
     context_fingerprint: Option<u64>,
+    model: Option<String>,
 }
 
 struct ClaudeAppProcess {
@@ -63,9 +64,11 @@ impl Drop for ClaudeAppProcess {
 struct TurnOutput {
     text: String,
     token_usage: Option<TokenUsage>,
+    model: Option<String>,
 }
 
 enum StreamEvent {
+    Init(Option<String>),
     Working(String),
     Result {
         text: String,
@@ -222,15 +225,20 @@ impl ClaudeAppBackend {
         );
 
         loop {
-            let process = state
-                .process
-                .as_mut()
-                .ok_or_else(|| anyhow!("claude process unavailable"))?;
-            let Some(line) = process.stdout.next_line().await? else {
-                state.process = None;
-                return Err(anyhow!(
-                    "claude exited before finishing the turn; check that the claude CLI is logged in"
-                ));
+            let line = {
+                let process = state
+                    .process
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("claude process unavailable"))?;
+                match process.stdout.next_line().await? {
+                    Some(line) => line,
+                    None => {
+                        state.process = None;
+                        return Err(anyhow!(
+                            "claude exited before finishing the turn; check that the claude CLI is logged in"
+                        ));
+                    }
+                }
             };
 
             if line.trim().is_empty() {
@@ -242,11 +250,18 @@ impl ClaudeAppBackend {
             };
 
             match parse_stream_event(&value) {
+                StreamEvent::Init(model) => {
+                    state.model = self.model.clone().or(model);
+                }
                 StreamEvent::Working(activity) => {
                     report_progress(progress, &req.session.id, "working", &activity);
                 }
                 StreamEvent::Result { text, token_usage } => {
-                    return Ok(TurnOutput { text, token_usage });
+                    return Ok(TurnOutput {
+                        text,
+                        token_usage,
+                        model: state.model.clone().or_else(|| self.model.clone()),
+                    });
                 }
                 StreamEvent::Failed(message) => {
                     return Err(anyhow!("claude turn failed: {message}"));
@@ -307,6 +322,7 @@ impl BackendAdapter for ClaudeAppBackend {
             raw_output: Some(output.text),
             metadata: BackendMetadata {
                 backend: "claude_app".into(),
+                model: output.model,
                 token_usage: Some(token_usage),
                 activities: vec![],
                 attempts: vec![],
@@ -392,6 +408,14 @@ fn action_value(action: &BackendAction) -> Value {
 
 fn parse_stream_event(value: &Value) -> StreamEvent {
     match value.get("type").and_then(Value::as_str) {
+        Some("system") if value.get("subtype").and_then(Value::as_str) == Some("init") => {
+            StreamEvent::Init(
+                value
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            )
+        }
         Some("result") => {
             let text = value
                 .get("result")
@@ -495,6 +519,21 @@ mod tests {
         assert_eq!(usage.input_tokens, 120);
         assert_eq!(usage.output_tokens, 30);
         assert!(!usage.estimated);
+    }
+
+    #[test]
+    fn extracts_model_from_init_event() {
+        let value = json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "model": "claude-opus-4-8"
+        });
+
+        let StreamEvent::Init(model) = parse_stream_event(&value) else {
+            panic!("expected init event");
+        };
+        assert_eq!(model.as_deref(), Some("claude-opus-4-8"));
     }
 
     #[test]

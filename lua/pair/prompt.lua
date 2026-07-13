@@ -29,6 +29,11 @@ end
 function M.title(kind)
   local agent = config.agent()
   local model = config.model()
+  if not model or model == "" then
+    -- No model configured: show what the backend reported it is actually
+    -- using, once a turn has completed.
+    model = state.backend_model
+  end
   local active = model and model ~= "" and (agent .. " / " .. model) or (agent .. " / default")
 
   return string.format(" Pair %s · %s ", kind, active)

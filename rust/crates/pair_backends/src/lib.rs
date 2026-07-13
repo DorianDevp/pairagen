@@ -176,6 +176,7 @@ pub struct BackendResponse {
 #[derive(Clone, Debug)]
 pub struct BackendMetadata {
     pub backend: String,
+    pub model: Option<String>,
     pub token_usage: Option<TokenUsage>,
     pub activities: Vec<String>,
     pub attempts: Vec<pair_protocol::AgentAttempt>,

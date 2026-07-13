@@ -60,6 +60,7 @@ impl Engine {
             .await;
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
+        let model = response.metadata.model.clone();
         self.add_usage(&mut session, &response.metadata.token_usage);
 
         let card = self.accept_response(&mut session, response, expected)?;
@@ -77,6 +78,7 @@ impl Engine {
             token_usage,
             turn_token_usage,
             context_report,
+            model,
             attempts,
         })
     }
@@ -143,6 +145,7 @@ impl Engine {
                 token_usage,
                 turn_token_usage: Default::default(),
                 context_report: session.context.report.clone(),
+                model: None,
                 attempts: vec![],
             });
         }
@@ -163,6 +166,7 @@ impl Engine {
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
+        let model = response.metadata.model.clone();
         self.add_usage(session, &response.metadata.token_usage);
 
         let card = self.accept_response(session, response, state)?;
@@ -175,6 +179,7 @@ impl Engine {
             token_usage,
             turn_token_usage,
             context_report: session.context.report.clone(),
+            model,
             attempts,
         })
     }
@@ -207,6 +212,7 @@ impl Engine {
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
+        let model = response.metadata.model.clone();
         self.add_usage(session, &response.metadata.token_usage);
 
         let card = self.accept_response(session, response, expected)?;
@@ -219,6 +225,7 @@ impl Engine {
             token_usage,
             turn_token_usage,
             context_report: session.context.report.clone(),
+            model,
             attempts,
         })
     }
@@ -295,6 +302,7 @@ impl Engine {
                 token_usage: session.token_usage.clone(),
                 turn_token_usage: TokenUsage::default(),
                 context_report: session.context.report.clone(),
+                model: None,
                 attempts: vec![],
             });
         }
@@ -987,6 +995,7 @@ fn backend_failure_response(session: &Session, error: anyhow::Error) -> BackendR
         raw_output: None,
         metadata: pair_backends::BackendMetadata {
             backend: "harness".into(),
+            model: None,
             token_usage: None,
             activities: vec![],
             attempts: vec![],
@@ -1007,6 +1016,7 @@ fn duplicate_failure_response(session: &Session, reason: String) -> BackendRespo
         raw_output: None,
         metadata: pair_backends::BackendMetadata {
             backend: "harness".into(),
+            model: None,
             token_usage: None,
             activities: vec![],
             attempts: vec![],
@@ -1598,6 +1608,7 @@ mod tests {
                 raw_output: None,
                 metadata: BackendMetadata {
                     backend: "repeating_observation".into(),
+                    model: None,
                     token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
                     activities: vec![],
                     attempts: vec![],
@@ -1668,6 +1679,7 @@ mod tests {
                 raw_output: None,
                 metadata: BackendMetadata {
                     backend: "flaky".into(),
+                    model: None,
                     token_usage: None,
                     activities: vec![],
                     attempts: vec![],
@@ -1719,6 +1731,7 @@ mod tests {
                 raw_output: None,
                 metadata: BackendMetadata {
                     backend: "bad_patch".into(),
+                    model: None,
                     token_usage: None,
                     activities: vec![],
                     attempts: vec![],
@@ -1791,6 +1804,7 @@ mod tests {
                 raw_output: None,
                 metadata: BackendMetadata {
                     backend: "repairing_patch".into(),
+                    model: None,
                     token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
                     activities: vec![],
                     attempts: vec![],
@@ -1837,6 +1851,7 @@ mod tests {
                 raw_output: Some("raw finding from backend".into()),
                 metadata: BackendMetadata {
                     backend: "wrong_type".into(),
+                    model: None,
                     token_usage: None,
                     activities: vec![],
                     attempts: vec![],

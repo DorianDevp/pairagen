@@ -35,6 +35,7 @@ impl BackendAdapter for MockBackend {
         Ok(BackendResponse {
             metadata: BackendMetadata {
                 backend: "mock".into(),
+                model: None,
                 token_usage: Some(TokenUsage::estimated(
                     estimate_tokens(&req.session.prompt),
                     estimate_tokens(&to_string(&card).unwrap_or_default()),

@@ -101,6 +101,8 @@ pub struct StartSessionResult {
     pub token_usage: TokenUsage,
     pub turn_token_usage: TokenUsage,
     pub context_report: Option<crate::ContextReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub attempts: Vec<AgentAttempt>,
 }
@@ -129,6 +131,8 @@ pub struct ActionResult {
     pub token_usage: TokenUsage,
     pub turn_token_usage: TokenUsage,
     pub context_report: Option<crate::ContextReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub attempts: Vec<AgentAttempt>,
 }

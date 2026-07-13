@@ -535,6 +535,7 @@ impl BackendAdapter for CodexAppBackend {
             raw_output: Some(output.text.clone()),
             metadata: BackendMetadata {
                 backend: "codex_app".into(),
+                model: self.model.clone(),
                 token_usage: output.token_usage.or_else(|| {
                     Some(TokenUsage::estimated(
                         estimate_tokens(&prompt(&req, true)),

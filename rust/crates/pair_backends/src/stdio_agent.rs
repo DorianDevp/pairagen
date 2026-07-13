@@ -166,6 +166,7 @@ impl BackendAdapter for StdioAgentBackend {
             raw_output: Some(raw_output),
             metadata: BackendMetadata {
                 backend: "agent_stdio".into(),
+                model: None,
                 token_usage: Some(TokenUsage::estimated(answer.input_tokens, output_tokens)),
                 activities: vec![],
                 attempts: vec![],

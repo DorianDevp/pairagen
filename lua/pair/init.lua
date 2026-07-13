@@ -81,6 +81,7 @@ function M.start(text, mode, source)
     state.goal = message.result.goal or state.goal
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.backend_model = message.result.model or state.backend_model
     state.context_report = message.result.context_report
     log.event("context_optimization", message.result.context_report or {})
     log.event("agent_attempts", message.result.attempts or {})
@@ -148,6 +149,7 @@ function M.action(action)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.backend_model = message.result.model or state.backend_model
     state.context_report = message.result.context_report
     log.event("context_optimization", message.result.context_report or {})
     log.event("agent_attempts", message.result.attempts or {})
@@ -212,6 +214,7 @@ function M.reply(text)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.backend_model = message.result.model or state.backend_model
     state.context_report = message.result.context_report
     log.event("context_optimization", message.result.context_report or {})
     log.event("agent_attempts", message.result.attempts or {})
@@ -313,6 +316,7 @@ function M.reset()
   state.diff_first_row = nil
   state.token_usage = nil
   state.turn_token_usage = nil
+  state.backend_model = nil
   state.context_report = nil
   state.workspace_hints = nil
   state.completion_notified_card = nil

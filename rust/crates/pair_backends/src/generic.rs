@@ -202,6 +202,7 @@ impl BackendAdapter for GenericCliBackend {
             raw_output: Some(raw_output),
             metadata: BackendMetadata {
                 backend: "generic_cli".into(),
+                model: None,
                 token_usage: Some(TokenUsage::estimated(
                     estimate_tokens(&prompt),
                     estimate_tokens(&stdout),
