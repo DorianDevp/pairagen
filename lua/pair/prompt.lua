@@ -7,9 +7,13 @@ local M = {}
 function M.open(mode)
   local source = require("pair.context").capture()
 
+  -- Let the backend pay its startup cost (CLI boot, process spawn) while the
+  -- user is still typing the prompt.
+  require("pair.rpc").request("backend/warmup", {}, function() end)
+
   M.open_for({
     title = M.title("Prompt"),
-    footer = " Ctrl-s submit  Esc normal  q close ",
+    footer = " /kind forces card type  Ctrl-s submit  Esc normal  q close ",
     submit = function(text)
       require("pair").start(text, mode, source)
     end,
@@ -29,6 +33,11 @@ end
 function M.title(kind)
   local agent = config.agent()
   local model = config.model()
+  if not model or model == "" then
+    -- No model configured: show what the backend reported it is actually
+    -- using, once a turn has completed.
+    model = state.backend_model
+  end
   local active = model and model ~= "" and (agent .. " / " .. model) or (agent .. " / default")
 
   return string.format(" Pair %s · %s ", kind, active)

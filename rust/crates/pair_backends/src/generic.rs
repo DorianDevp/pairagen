@@ -33,8 +33,22 @@ impl GenericCliBackend {
     }
 
     fn prompt(&self, req: &BackendRequest) -> String {
-        let value = json!({
-            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), summary(title,summary,changed_files), error(title,message). Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
+        generic_prompt(req)
+    }
+
+    fn error_card(message: impl Into<String>) -> Card {
+        Card::Error(ErrorCard {
+            id: "c_backend_error".into(),
+            title: "Backend error".into(),
+            message: message.into(),
+            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+        })
+    }
+}
+
+pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
+    let value = json!({
+            "api": "Return one JSON Pair op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. When the change belongs in a different file than the supplied buffer, return open_location immediately with that place instead of attempting a patch; the editor opens it with the user's permission and the same turn continues with a.kind location_granted and fresh ctx. error is only for technical failures. limits.expected, when set, is the required op (deny always allowed; choice also allowed for hypothesis/finding); when null, choose the best fitting op and ask via choice when ambiguous. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
             "stream": {
                 "protocol": "ndjson",
                 "progress": {"t": "pair_progress", "phase": "short phase", "message": "short user-visible activity summary"},
@@ -60,7 +74,8 @@ impl GenericCliBackend {
                 "patch_files": req.card_contract.max_patch_files,
                 "hunks_per_patch": req.card_contract.max_hunks_per_patch,
                 "changed_lines": req.card_contract.max_changed_lines,
-                "goal_completion": req.card_contract.allow_goal_completion
+                "goal_completion": req.card_contract.allow_goal_completion,
+                "expected": req.card_contract.expected_kind
             },
             "s": {
                 "id": req.session.id,
@@ -71,21 +86,11 @@ impl GenericCliBackend {
                 "n": req.session.card_count,
                 "last": req.session.last_summary
             },
-            "a": action_value(&req.action),
-            "ctx": crate::backend_context(&req.context)
-        });
+        "a": action_value(&req.action),
+        "ctx": crate::backend_context(&req.context)
+    });
 
-        serde_json::to_string(&value).unwrap_or_default()
-    }
-
-    fn error_card(message: impl Into<String>) -> Card {
-        Card::Error(ErrorCard {
-            id: "c_backend_error".into(),
-            title: "Backend error".into(),
-            message: message.into(),
-            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
-        })
-    }
+    serde_json::to_string(&value).unwrap_or_default()
 }
 
 fn action_value(action: &crate::BackendAction) -> serde_json::Value {
@@ -98,6 +103,7 @@ fn action_value(action: &crate::BackendAction) -> serde_json::Value {
         crate::BackendAction::ContractRetry(reason) => {
             json!({"kind": "contract_retry", "reason": reason})
         }
+        crate::BackendAction::LocationGranted => json!({"kind": "location_granted"}),
     }
 }
 
@@ -198,6 +204,7 @@ impl BackendAdapter for GenericCliBackend {
             raw_output: Some(raw_output),
             metadata: BackendMetadata {
                 backend: "generic_cli".into(),
+                model: None,
                 token_usage: Some(TokenUsage::estimated(
                     estimate_tokens(&prompt),
                     estimate_tokens(&stdout),
@@ -244,12 +251,8 @@ fn backend_name(command: &str) -> String {
         .to_string()
 }
 
-fn parse_card(output: &str) -> Result<Card> {
-    if let Ok(op) = serde_json::from_str::<AgentOp>(output.trim()) {
-        return Ok(op.into_card("c_agent"));
-    }
-
-    if let Ok(card) = serde_json::from_str(output.trim()) {
+pub(crate) fn parse_card(output: &str) -> Result<Card> {
+    if let Ok(card) = parse_json_card(output.trim()) {
         return Ok(card);
     }
 
@@ -257,11 +260,39 @@ fn parse_card(output: &str) -> Result<Card> {
         return Err(anyhow!("backend returned no Pair op"));
     };
 
-    if let Ok(op) = serde_json::from_str::<AgentOp>(json) {
+    parse_json_card(json)
+}
+
+fn parse_json_card(json: &str) -> Result<Card> {
+    let value = serde_json::from_str::<serde_json::Value>(json)?;
+
+    // Dispatch on the discriminator so a malformed op reports what is wrong with
+    // the op itself instead of the misleading Card error ("missing field kind").
+    if value.get("op").is_some() {
+        let op = serde_json::from_value::<AgentOp>(value)?;
         return Ok(op.into_card("c_agent"));
     }
 
-    Ok(serde_json::from_str(json)?)
+    match serde_json::from_value::<Card>(value.clone()) {
+        Ok(card) => Ok(card),
+        // Agents sometimes name the discriminator "kind" while otherwise
+        // emitting an op payload; retry the op parse under that reading.
+        Err(card_error) => match value.get("kind").cloned() {
+            Some(kind) => {
+                let mut value = value;
+                value["op"] = kind;
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("kind");
+                }
+
+                match serde_json::from_value::<AgentOp>(value) {
+                    Ok(op) => Ok(op.into_card("c_agent")),
+                    Err(op_error) => Err(op_error.into()),
+                }
+            }
+            None => Err(card_error.into()),
+        },
+    }
 }
 
 fn excerpt(output: &str) -> String {
@@ -338,6 +369,46 @@ mod tests {
         let card = parse_card(output).unwrap();
 
         assert!(matches!(card, Card::Error(_)));
+    }
+
+    #[test]
+    fn parses_choice_op_with_string_options_and_null_fields() {
+        let output = r#"{"op":"choice","title":"Clarify what to test","question":"What should we test?","options":["Add a spec","Extend the directive spec","Just a smoke test"],"claim":null,"evidence":null,"next":null,"finding":null,"location":null,"annotation":null,"explanation":null,"patches":null,"summary":null,"changed_files":null,"message":null}"#;
+        let card = parse_card(output).unwrap();
+
+        let Card::Choice(card) = card else {
+            panic!("expected choice card");
+        };
+        assert_eq!(card.options.len(), 3);
+    }
+
+    #[test]
+    fn parses_op_payload_with_kind_discriminator() {
+        let output = r#"{"kind":"hypothesis","title":"T","claim":"C","evidence":"src/work.ts:2 — no value returned"}"#;
+        let card = parse_card(output).unwrap();
+
+        let Card::Hypothesis(card) = card else {
+            panic!("expected hypothesis card");
+        };
+        assert_eq!(card.evidence.as_ref().unwrap().line, 2);
+    }
+
+    #[test]
+    fn parses_deny_op() {
+        let output =
+            r#"{"op":"deny","title":"Ambiguous prompt","reason":"Say which spec to write."}"#;
+        let card = parse_card(output).unwrap();
+
+        assert!(matches!(card, Card::Deny(_)));
+    }
+
+    #[test]
+    fn reports_op_error_instead_of_card_error() {
+        let output = r#"{"op":"finding","title":"T"}"#;
+        let error = parse_card(output).unwrap_err().to_string();
+
+        assert!(error.contains("finding"), "unexpected error: {error}");
+        assert!(!error.contains("kind"), "unexpected error: {error}");
     }
 
     #[test]

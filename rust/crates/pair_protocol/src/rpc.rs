@@ -21,6 +21,15 @@ impl TokenUsage {
         }
     }
 
+    pub fn reported(input: usize, output: usize) -> Self {
+        Self {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+            estimated: false,
+        }
+    }
+
     pub fn add(&mut self, other: &Self) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
@@ -92,6 +101,8 @@ pub struct StartSessionResult {
     pub token_usage: TokenUsage,
     pub turn_token_usage: TokenUsage,
     pub context_report: Option<crate::ContextReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub attempts: Vec<AgentAttempt>,
 }
@@ -120,6 +131,8 @@ pub struct ActionResult {
     pub token_usage: TokenUsage,
     pub turn_token_usage: TokenUsage,
     pub context_report: Option<crate::ContextReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub attempts: Vec<AgentAttempt>,
 }

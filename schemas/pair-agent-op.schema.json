@@ -15,13 +15,14 @@
     "patches",
     "question",
     "options",
+    "reason",
     "summary",
     "changed_files",
     "message"
   ],
   "properties": {
     "op": {
-      "enum": ["hypothesis", "finding", "patch", "choice", "summary", "error"]
+      "enum": ["hypothesis", "finding", "patch", "choice", "deny", "open_location", "summary", "error"]
     },
     "title": {
       "type": "string"
@@ -91,28 +92,37 @@
     "options": {
       "type": ["array", "null"],
       "items": {
-        "type": "object",
-        "required": ["id", "label", "action"],
-        "properties": {
-          "id": { "type": "string" },
-          "label": { "type": "string" },
-          "action": {
-            "enum": [
-              "follow",
-              "why",
-              "fix",
-              "other_lead",
-              "retry",
-              "edit_prompt",
-              "open",
-              "run_check",
-              "next",
-              "stop"
-            ]
+        "anyOf": [
+          { "type": "string" },
+          {
+            "type": "object",
+            "required": ["label"],
+            "properties": {
+              "id": { "type": ["string", "null"] },
+              "label": { "type": "string" },
+              "action": {
+                "enum": [
+                  "follow",
+                  "why",
+                  "fix",
+                  "other_lead",
+                  "retry",
+                  "edit_prompt",
+                  "open",
+                  "run_check",
+                  "next",
+                  "stop",
+                  null
+                ]
+              }
+            },
+            "additionalProperties": false
           }
-        },
-        "additionalProperties": false
+        ]
       }
+    },
+    "reason": {
+      "type": ["string", "null"]
     },
     "summary": {
       "type": ["string", "null"]

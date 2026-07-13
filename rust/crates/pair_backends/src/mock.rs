@@ -30,11 +30,13 @@ impl BackendAdapter for MockBackend {
             BackendAction::User(action) => unsupported_card(action),
             BackendAction::Reply(text) => reply_card(text),
             BackendAction::ContractRetry(_) => finding_card(),
+            BackendAction::LocationGranted => patch_card(&req),
         };
 
         Ok(BackendResponse {
             metadata: BackendMetadata {
                 backend: "mock".into(),
+                model: None,
                 token_usage: Some(TokenUsage::estimated(
                     estimate_tokens(&req.session.prompt),
                     estimate_tokens(&to_string(&card).unwrap_or_default()),

@@ -16,6 +16,26 @@ rpc.on("agent/progress", function(progress)
   thinking.progress(progress)
 end)
 
+-- Mid-turn permission request: the agent can only continue once a different
+-- file is open. On approval the same agent turn resumes with fresh context —
+-- no card is shown and no extra request is spent.
+rpc.on_request("editor/open_location", function(params, respond)
+  local location = params.location or {}
+  local file = location.file or "?"
+  local question = string.format(
+    "Pair agent wants to open %s:%s\n%s",
+    vim.fn.fnamemodify(file, ":~:."),
+    location.line or 1,
+    params.reason or ""
+  )
+
+  if vim.fn.confirm(question, "&Open\n&Deny", 1, "Question") == 1 and navigation.open_location(location) then
+    respond({ granted = true, context = context.session() })
+  else
+    respond({ granted = false })
+  end
+end)
+
 function M.setup(opts)
   config.setup(opts)
   require("pair.commands").setup()
@@ -81,6 +101,7 @@ function M.start(text, mode, source)
     state.goal = message.result.goal or state.goal
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.backend_model = message.result.model or state.backend_model
     state.context_report = message.result.context_report
     log.event("context_optimization", message.result.context_report or {})
     log.event("agent_attempts", message.result.attempts or {})
@@ -148,6 +169,7 @@ function M.action(action)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.backend_model = message.result.model or state.backend_model
     state.context_report = message.result.context_report
     log.event("context_optimization", message.result.context_report or {})
     log.event("agent_attempts", message.result.attempts or {})
@@ -212,6 +234,7 @@ function M.reply(text)
 
     state.token_usage = message.result.token_usage
     state.turn_token_usage = message.result.turn_token_usage
+    state.backend_model = message.result.model or state.backend_model
     state.context_report = message.result.context_report
     log.event("context_optimization", message.result.context_report or {})
     log.event("agent_attempts", message.result.attempts or {})
@@ -244,6 +267,25 @@ function M.resume()
   end
 
   ui.notify("No Pair card to restore", vim.log.levels.WARN)
+end
+
+-- One-key continuation for a deny card that names a location: jump there, so
+-- the next context capture sees that buffer, then retry the denied step.
+function M.open_and_retry()
+  local active_card = state.card
+  if not (active_card and active_card.kind == "deny" and type(active_card.location) == "table") then
+    ui.notify("No location on this card", vim.log.levels.WARN)
+    return
+  end
+
+  if not navigation.open_location(active_card.location) then
+    ui.notify("Could not open " .. tostring(active_card.location.file), vim.log.levels.ERROR)
+    return
+  end
+
+  ui.close(state.card_win)
+  state.card_win = nil
+  M.action("retry")
 end
 
 function M.go_to()
@@ -313,6 +355,7 @@ function M.reset()
   state.diff_first_row = nil
   state.token_usage = nil
   state.turn_token_usage = nil
+  state.backend_model = nil
   state.context_report = nil
   state.workspace_hints = nil
   state.completion_notified_card = nil

@@ -21,6 +21,40 @@ pub struct Engine {
     backend: Arc<dyn BackendAdapter>,
     sessions: HashMap<String, Session>,
     context_optimizer: ContextOptimizer,
+    prefetch_mode: PrefetchMode,
+    prefetches: HashMap<String, Prefetch>,
+    location_granter: Option<LocationGranter>,
+}
+
+/// Most open_location grants honored within a single turn before the request
+/// is surfaced as a deny card instead.
+pub const MAX_LOCATION_GRANTS: usize = 2;
+
+/// Editor callback that asks the user to open a location mid-turn and, when
+/// granted, returns freshly captured context for that buffer.
+pub type LocationGranter = Arc<
+    dyn Fn(
+            pair_protocol::OpenLocationCard,
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ContextBundle>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Speculative prefetch of the likely next card. `Fix` requests the patch
+/// card in the background while the user is still reading a discovery card,
+/// so pressing Fix returns (near-)instantly on a hit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrefetchMode {
+    Off,
+    Fix,
+}
+
+struct Prefetch {
+    action: Action,
+    fingerprint: u64,
+    handle: tokio::task::JoinHandle<Result<BackendResponse>>,
 }
 
 impl Engine {
@@ -29,7 +63,18 @@ impl Engine {
             backend,
             sessions: HashMap::new(),
             context_optimizer: ContextOptimizer::default(),
+            prefetch_mode: PrefetchMode::Off,
+            prefetches: HashMap::new(),
+            location_granter: None,
         }
+    }
+
+    pub fn set_prefetch_mode(&mut self, mode: PrefetchMode) {
+        self.prefetch_mode = mode;
+    }
+
+    pub fn set_location_granter(&mut self, granter: LocationGranter) {
+        self.location_granter = Some(granter);
     }
 
     pub async fn start(&mut self, params: StartSessionParams) -> Result<StartSessionResult> {
@@ -56,10 +101,12 @@ impl Engine {
                 context,
                 &expected,
                 progress,
+                None,
             )
             .await;
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
+        let model = response.metadata.model.clone();
         self.add_usage(&mut session, &response.metadata.token_usage);
 
         let card = self.accept_response(&mut session, response, expected)?;
@@ -69,6 +116,7 @@ impl Engine {
         let context_report = session.context.report.clone();
 
         self.sessions.insert(session_id.clone(), session);
+        self.schedule_prefetch(&session_id).await;
 
         Ok(StartSessionResult {
             session_id,
@@ -77,6 +125,7 @@ impl Engine {
             token_usage,
             turn_token_usage,
             context_report,
+            model,
             attempts,
         })
     }
@@ -92,11 +141,15 @@ impl Engine {
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         let mut session = self.take_session(session_id)?;
+        let prefetched = self.take_prefetch(&mut session, &action).await;
         let result = self
-            .action_taken(session_id, &mut session, action, progress)
+            .action_taken(session_id, &mut session, action, progress, prefetched)
             .await;
 
         self.sessions.insert(session_id.into(), session);
+        if result.is_ok() {
+            self.schedule_prefetch(session_id).await;
+        }
 
         result
     }
@@ -117,6 +170,9 @@ impl Engine {
             .await;
 
         self.sessions.insert(session_id.into(), session);
+        if result.is_ok() {
+            self.schedule_prefetch(session_id).await;
+        }
 
         result
     }
@@ -127,6 +183,7 @@ impl Engine {
         session: &mut Session,
         action: Action,
         progress: Option<ProgressReporter>,
+        prefetched: Option<BackendResponse>,
     ) -> Result<ActionResult> {
         let state = session.state.next(&action)?;
         if action == Action::Stop {
@@ -143,6 +200,7 @@ impl Engine {
                 token_usage,
                 turn_token_usage: Default::default(),
                 context_report: session.context.report.clone(),
+                model: None,
                 attempts: vec![],
             });
         }
@@ -158,11 +216,13 @@ impl Engine {
                 context,
                 &state,
                 progress,
+                prefetched,
             )
             .await;
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
+        let model = response.metadata.model.clone();
         self.add_usage(session, &response.metadata.token_usage);
 
         let card = self.accept_response(session, response, state)?;
@@ -175,6 +235,7 @@ impl Engine {
             token_usage,
             turn_token_usage,
             context_report: session.context.report.clone(),
+            model,
             attempts,
         })
     }
@@ -202,11 +263,13 @@ impl Engine {
                 context,
                 &expected,
                 progress,
+                None,
             )
             .await;
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
+        let model = response.metadata.model.clone();
         self.add_usage(session, &response.metadata.token_usage);
 
         let card = self.accept_response(session, response, expected)?;
@@ -219,6 +282,7 @@ impl Engine {
             token_usage,
             turn_token_usage,
             context_report: session.context.report.clone(),
+            model,
             attempts,
         })
     }
@@ -295,6 +359,7 @@ impl Engine {
                 token_usage: session.token_usage.clone(),
                 turn_token_usage: TokenUsage::default(),
                 context_report: session.context.report.clone(),
+                model: None,
                 attempts: vec![],
             });
         }
@@ -302,7 +367,7 @@ impl Engine {
         session.rejected_patches.extend(result.patch_ids.clone());
         session.state = SessionState::PatchShown;
 
-        self.action_taken(&session_id, session, Action::Retry, progress)
+        self.action_taken(&session_id, session, Action::Retry, progress, None)
             .await
     }
 
@@ -357,7 +422,7 @@ impl Engine {
             action,
             context,
             card_contract: CardContract {
-                expected_kind: Some(expected_kind),
+                expected_kind,
                 allow_goal_completion: matches!(expected, NextState::Continuation),
                 ..CardContract::default()
             },
@@ -371,18 +436,29 @@ impl Engine {
         context: ContextBundle,
         expected: &NextState,
         progress: Option<ProgressReporter>,
+        mut prefetched: Option<BackendResponse>,
     ) -> BackendResponse {
         let mut action = action;
+        let mut context = context;
         let mut token_usage = None;
         let mut attempts = Vec::new();
+        let mut attempt = 0;
+        let mut grants = 0;
 
-        for attempt in 0..3 {
-            let request = self.request(session, action, context.clone(), expected);
-            let mut response = match self
-                .backend
-                .next_card_with_progress(request, progress.clone())
-                .await
-            {
+        while attempt < 3 {
+            let attempt_response = match prefetched.take() {
+                // A matching speculative response was computed for this exact
+                // request while the user was reading the previous card; it
+                // still goes through every dedup/validation gate below.
+                Some(response) => Ok(response),
+                None => {
+                    let request = self.request(session, action, context.clone(), expected);
+                    self.backend
+                        .next_card_with_progress(request, progress.clone())
+                        .await
+                }
+            };
+            let mut response = match attempt_response {
                 Ok(response) => response,
                 Err(error) => {
                     let detail = format!("{error:#}");
@@ -404,6 +480,64 @@ impl Engine {
             };
             let attempt_usage = response.metadata.token_usage.clone().unwrap_or_default();
             merge_usage(&mut token_usage, &response.metadata.token_usage);
+
+            // A mid-turn permission request: the agent needs another file open
+            // before it can produce the real card. Ask the editor; on grant the
+            // same turn continues with the freshly captured context. Grants do
+            // not consume retry attempts.
+            if let Card::OpenLocation(request) = &response.card {
+                let request = request.clone();
+
+                if grants < MAX_LOCATION_GRANTS
+                    && let Some(granter) = &self.location_granter
+                {
+                    if let Some(progress) = &progress {
+                        progress(BackendProgress {
+                            session_id: session.id.clone(),
+                            phase: "permission".into(),
+                            message: format!(
+                                "Agent asks to open {}",
+                                request.location.file.display()
+                            ),
+                        });
+                    }
+
+                    if let Some(granted) = granter(request.clone(), session.id.clone()).await {
+                        attempts.push(agent_attempt(
+                            attempt + 1,
+                            &response,
+                            "location_granted",
+                            Some(request.location.file.display().to_string()),
+                            attempt_usage,
+                            false,
+                        ));
+                        session.context = granted.clone();
+                        context = granted;
+                        action = BackendAction::LocationGranted;
+                        grants += 1;
+                        continue;
+                    }
+                }
+
+                attempts.push(agent_attempt(
+                    attempt + 1,
+                    &response,
+                    "location_declined",
+                    Some(request.location.file.display().to_string()),
+                    attempt_usage,
+                    false,
+                ));
+                response.card = Card::Deny(pair_protocol::DenyCard {
+                    id: session.next_card_id("deny"),
+                    title: "Agent needs another file".into(),
+                    reason: request.reason,
+                    location: Some(request.location),
+                    actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+                });
+                response.metadata.token_usage = token_usage;
+                response.metadata.attempts = attempts;
+                return response;
+            }
 
             if let Some((key, reason)) = duplicate_observation(session, &response.card) {
                 activate_observation(session, &key);
@@ -431,6 +565,7 @@ impl Engine {
                     action = BackendAction::ContractRetry(format!(
                         "{reason}. Return a distinct next observation; do not repeat known findings or signals."
                     ));
+                    attempt += 1;
                     continue;
                 }
 
@@ -470,8 +605,9 @@ impl Engine {
                         });
                     }
                     action = BackendAction::ContractRetry(format!(
-                        "The previous card failed the local patch contract: {detail}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card."
+                        "The previous card failed the local patch contract: {detail}. Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card. If the change belongs in a different file than the supplied buffer, return an open_location op with that place instead of another patch."
                     ));
+                    attempt += 1;
                     continue;
                 }
 
@@ -537,6 +673,137 @@ impl Engine {
             session.token_usage.add(usage);
         }
     }
+
+    /// Requests the likely next card in the background while the user reads
+    /// the one just shown. Only Fix is predicted: it is the most common and
+    /// slowest follow-up, and on backends with a separate patch process a
+    /// misprediction never blocks the user's real next request.
+    async fn schedule_prefetch(&mut self, session_id: &str) {
+        if self.prefetch_mode != PrefetchMode::Fix {
+            return;
+        }
+
+        if let Some(existing) = self.prefetches.get(session_id) {
+            if !existing.handle.is_finished() {
+                // An earlier speculation is still running on the backend;
+                // queueing another would only pile up turns.
+                return;
+            }
+            // Fold the finished-but-unconsumed speculation into the session's
+            // token totals so wasted turns stay visible to the user.
+            if let Some(stale) = self.prefetches.remove(session_id)
+                && let Ok(Ok(response)) = stale.handle.await
+                && let Some(session) = self.sessions.get_mut(session_id)
+            {
+                fold_usage(session, &response.metadata.token_usage);
+            }
+        }
+
+        let Some(session) = self.sessions.get(session_id) else {
+            return;
+        };
+        if session.state != SessionState::CardShown {
+            return;
+        }
+        let Some(card) = session.cards.last() else {
+            return;
+        };
+        if !card.actions().contains(&Action::Fix) {
+            return;
+        }
+        let Ok(expected) = session.state.next(&Action::Fix) else {
+            return;
+        };
+
+        let request = self.request(
+            session,
+            BackendAction::User(Action::Fix),
+            session.context.clone(),
+            &expected,
+        );
+        let fingerprint = request_fingerprint(&request);
+        let backend = self.backend.clone();
+        let handle = tokio::spawn(async move { backend.next_card(request).await });
+
+        self.prefetches.insert(
+            session_id.to_string(),
+            Prefetch {
+                action: Action::Fix,
+                fingerprint,
+                handle,
+            },
+        );
+    }
+
+    /// Consumes a pending speculation if it was computed for exactly the
+    /// request this action would produce; otherwise leaves the real path
+    /// untouched and keeps the wasted tokens accounted for.
+    async fn take_prefetch(
+        &mut self,
+        session: &mut Session,
+        action: &Action,
+    ) -> Option<BackendResponse> {
+        let entry = self.prefetches.remove(&session.id)?;
+
+        if entry.action == *action
+            && let Ok(expected) = session.state.next(action)
+        {
+            let request = self.request(
+                session,
+                BackendAction::User(action.clone()),
+                session.context.clone(),
+                &expected,
+            );
+            if request_fingerprint(&request) == entry.fingerprint {
+                return match entry.handle.await {
+                    Ok(Ok(response)) => Some(response),
+                    _ => None,
+                };
+            }
+            if entry.handle.is_finished() {
+                if let Ok(Ok(response)) = entry.handle.await {
+                    fold_usage(session, &response.metadata.token_usage);
+                }
+                return None;
+            }
+            self.prefetches.insert(session.id.clone(), entry);
+            return None;
+        }
+
+        if entry.handle.is_finished() {
+            if let Ok(Ok(response)) = entry.handle.await {
+                fold_usage(session, &response.metadata.token_usage);
+            }
+        } else {
+            self.prefetches.insert(session.id.clone(), entry);
+        }
+
+        None
+    }
+}
+
+fn fold_usage(session: &mut Session, usage: &Option<pair_protocol::TokenUsage>) {
+    if let Some(usage) = usage {
+        session.token_usage.add(usage);
+    }
+}
+
+fn request_fingerprint(request: &BackendRequest) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+
+    // Only model-visible data may decide whether a speculative response
+    // matches: the optimizer report (cache counters vary run to run) and raw
+    // LSP hints are telemetry that backend_context strips before the model
+    // ever sees them.
+    let mut request = request.clone();
+    request.context.report = None;
+    request.context.hints = vec![];
+
+    let mut hasher = DefaultHasher::new();
+    serde_json::to_string(&request)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
 }
 
 fn agent_attempt(
@@ -755,6 +1022,12 @@ fn validate_backend_card(
         return Ok(());
     }
 
+    // A denial is valid in any state: the agent is telling the user it cannot
+    // produce the expected card, so only the card text itself is checked.
+    if matches!(card, Card::Deny(_)) {
+        return validate_one_card(card);
+    }
+
     validate_one_card(card)?;
     PatchValidator::validate_card(card)?;
     validate_patch_target(card, context)?;
@@ -845,6 +1118,27 @@ fn validate_one_card(card: &Card) -> Result<()> {
                 require_text("choice option id", &option.id)?;
                 require_text("choice option label", &option.label)?;
             }
+        }
+        Card::Deny(card) => {
+            require_text("card title", &card.title)?;
+            require_text("deny reason", &card.reason)?;
+            if let Some(location) = &card.location {
+                validate_location(
+                    &location.file,
+                    location.line,
+                    location.column,
+                    "deny location",
+                )?;
+            }
+        }
+        Card::OpenLocation(card) => {
+            require_text("open_location reason", &card.reason)?;
+            validate_location(
+                &card.location.file,
+                card.location.line,
+                card.location.column,
+                "open_location",
+            )?;
         }
         Card::Summary(card) => {
             require_text("card title", &card.title)?;
@@ -977,6 +1271,7 @@ fn backend_failure_response(session: &Session, error: anyhow::Error) -> BackendR
         raw_output: None,
         metadata: pair_backends::BackendMetadata {
             backend: "harness".into(),
+            model: None,
             token_usage: None,
             activities: vec![],
             attempts: vec![],
@@ -997,6 +1292,7 @@ fn duplicate_failure_response(session: &Session, reason: String) -> BackendRespo
         raw_output: None,
         metadata: pair_backends::BackendMetadata {
             backend: "harness".into(),
+            model: None,
             token_usage: None,
             activities: vec![],
             attempts: vec![],
@@ -1012,49 +1308,56 @@ fn expected_start_state(mode: &Mode) -> NextState {
     }
 }
 
+/// None means the agent may answer with whichever card kind fits, including a
+/// clarifying choice or a deny. A kind is only demanded when the user asked
+/// for one (a "/{kind}" prompt prefix, an explicit mode, or a concrete action
+/// such as Fix) or when the state machine requires it.
 fn expected_card_kind(
     session: &Session,
     action: &BackendAction,
     next_state: &NextState,
-) -> CardKind {
+) -> Option<CardKind> {
     match next_state {
-        NextState::Patch => return CardKind::Patch,
-        NextState::Continuation => return CardKind::Patch,
-        NextState::Summary | NextState::Finished => return CardKind::Summary,
+        NextState::Patch => return Some(CardKind::Patch),
+        NextState::Continuation => return Some(CardKind::Patch),
+        NextState::Summary | NextState::Finished => return Some(CardKind::Summary),
         NextState::Any | NextState::Card => {}
     }
 
     match action {
-        BackendAction::Start => match session.mode {
-            Mode::Fix | Mode::Propose => CardKind::Patch,
-            Mode::Explain | Mode::Review => CardKind::Finding,
-            Mode::Auto | Mode::Investigate => CardKind::Hypothesis,
-        },
-        BackendAction::Reply(_) => CardKind::Finding,
-        BackendAction::ContractRetry(_) => CardKind::Finding,
+        BackendAction::Start => session.forced_kind.or(match session.mode {
+            Mode::Fix | Mode::Propose => Some(CardKind::Patch),
+            Mode::Explain | Mode::Review => Some(CardKind::Finding),
+            Mode::Investigate => Some(CardKind::Hypothesis),
+            Mode::Auto => None,
+        }),
+        BackendAction::Reply(_) => None,
+        BackendAction::ContractRetry(_) => None,
+        BackendAction::LocationGranted => None,
         BackendAction::User(action) => match action {
-            Action::Fix => CardKind::Patch,
-            Action::OtherLead => CardKind::Hypothesis,
+            Action::Fix => Some(CardKind::Patch),
+            Action::OtherLead => Some(CardKind::Hypothesis),
             Action::Follow | Action::Why | Action::Open | Action::RunCheck | Action::Next => {
-                CardKind::Finding
+                Some(CardKind::Finding)
             }
             Action::Retry | Action::EditPrompt => session
                 .cards
                 .iter()
                 .rev()
-                .find(|card| !matches!(card, Card::Error(_)))
+                .find(|card| !matches!(card, Card::Error(_) | Card::Deny(_)))
                 .map(Card::kind)
-                .unwrap_or(CardKind::Hypothesis),
-            Action::Apply | Action::ApplyPatch { .. } | Action::Stop => CardKind::Summary,
+                .or(session.forced_kind),
+            Action::Apply | Action::ApplyPatch { .. } | Action::Stop => Some(CardKind::Summary),
         },
     }
 }
 
 fn state_after_card(card: &Card, next_state: &NextState) -> SessionState {
-    if matches!(card, Card::Error(_)) && matches!(next_state, NextState::Patch) {
+    let refused = matches!(card, Card::Error(_) | Card::Deny(_));
+    if refused && matches!(next_state, NextState::Patch) {
         return SessionState::PatchFailed;
     }
-    if matches!(card, Card::Error(_)) && matches!(next_state, NextState::Continuation) {
+    if refused && matches!(next_state, NextState::Continuation) {
         return SessionState::ContinuationFailed;
     }
 
@@ -1067,6 +1370,8 @@ fn card_summary(card: &Card) -> String {
         Card::Finding(card) => format!("finding: {}", card.finding),
         Card::Patch(card) => format!("patch: {}", card.explanation),
         Card::Choice(card) => format!("choice: {}", card.question),
+        Card::Deny(card) => format!("deny: {}", card.reason),
+        Card::OpenLocation(card) => format!("open_location: {}", card.reason),
         Card::Summary(card) => format!("summary: {}", card.summary),
         Card::Error(card) => format!("error: {}", card.message),
     }
@@ -1586,6 +1891,7 @@ mod tests {
                 raw_output: None,
                 metadata: BackendMetadata {
                     backend: "repeating_observation".into(),
+                    model: None,
                     token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
                     activities: vec![],
                     attempts: vec![],
@@ -1656,6 +1962,7 @@ mod tests {
                 raw_output: None,
                 metadata: BackendMetadata {
                     backend: "flaky".into(),
+                    model: None,
                     token_usage: None,
                     activities: vec![],
                     attempts: vec![],
@@ -1707,6 +2014,7 @@ mod tests {
                 raw_output: None,
                 metadata: BackendMetadata {
                     backend: "bad_patch".into(),
+                    model: None,
                     token_usage: None,
                     activities: vec![],
                     attempts: vec![],
@@ -1779,6 +2087,7 @@ mod tests {
                 raw_output: None,
                 metadata: BackendMetadata {
                     backend: "repairing_patch".into(),
+                    model: None,
                     token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
                     activities: vec![],
                     attempts: vec![],
@@ -1825,6 +2134,7 @@ mod tests {
                 raw_output: Some("raw finding from backend".into()),
                 metadata: BackendMetadata {
                     backend: "wrong_type".into(),
+                    model: None,
                     token_usage: None,
                     activities: vec![],
                     attempts: vec![],
@@ -1842,5 +2152,327 @@ mod tests {
                 can_use_tools: false,
             }
         }
+    }
+
+    #[derive(Default)]
+    struct CountingBackend {
+        inner: MockBackend,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CountingBackend {
+        fn record(&self, path: &str, action: &BackendAction) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{path}:{action:?}"));
+        }
+    }
+
+    #[async_trait]
+    impl BackendAdapter for CountingBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            self.record("plain", &req.action);
+            self.inner.next_card(req).await
+        }
+
+        async fn next_card_with_progress(
+            &self,
+            req: BackendRequest,
+            _progress: Option<ProgressReporter>,
+        ) -> Result<BackendResponse> {
+            self.record("progress", &req.action);
+            self.inner.next_card(req).await
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            self.inner.capabilities()
+        }
+    }
+
+    #[tokio::test]
+    async fn prefetched_fix_is_consumed_without_a_second_backend_call() {
+        let backend = Arc::new(CountingBackend::default());
+        let mut engine = Engine::new(backend.clone());
+        engine.set_prefetch_mode(PrefetchMode::Fix);
+
+        let start = engine.start(params()).await.unwrap();
+        assert!(matches!(start.card, Card::Hypothesis(_)));
+
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        assert!(matches!(result.card, Card::Patch(_)));
+
+        let calls = backend.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "unexpected backend calls: {calls:?}");
+        assert!(calls[0].starts_with("progress:Start"));
+        assert!(calls[1].starts_with("plain:User(Fix)"));
+    }
+
+    #[tokio::test]
+    async fn stale_prefetch_is_discarded_after_context_change() {
+        let backend = Arc::new(CountingBackend::default());
+        let mut engine = Engine::new(backend.clone());
+        engine.set_prefetch_mode(PrefetchMode::Fix);
+
+        let start = engine.start(params()).await.unwrap();
+        let context = ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from("src/work.ts"),
+            cursor: Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: "const edited = true".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        };
+        engine.update_context(&start.session_id, context).unwrap();
+
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+        let Card::Patch(card) = result.card else {
+            panic!("expected patch card");
+        };
+
+        // The mock builds the diff from the buffer's first line, so a patch
+        // produced from the fresh request must reference the edited buffer.
+        assert!(
+            card.patches[0].diff.contains("const edited = true"),
+            "patch was built from stale context: {}",
+            card.patches[0].diff
+        );
+        let calls = backend.calls.lock().unwrap().clone();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.starts_with("progress:User(Fix)")),
+            "real fix call missing: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fingerprint_ignores_optimizer_telemetry() {
+        let backend = Arc::new(CountingBackend::default());
+        let mut engine = Engine::new(backend);
+        engine.set_prefetch_mode(PrefetchMode::Fix);
+        let start = engine.start(params()).await.unwrap();
+        let session = engine.get(&start.session_id).unwrap();
+
+        let request = engine.request(
+            session,
+            BackendAction::User(Action::Fix),
+            session.context.clone(),
+            &NextState::Patch,
+        );
+        let mut noisy = request.clone();
+        noisy.context.report = Some(pair_protocol::ContextReport {
+            enabled: true,
+            cache_hits: 42,
+            ..Default::default()
+        });
+
+        assert_eq!(request_fingerprint(&request), request_fingerprint(&noisy));
+    }
+
+    #[derive(Default)]
+    struct ExpectationRecorder {
+        inner: MockBackend,
+        requests: std::sync::Mutex<Vec<(Option<CardKind>, String)>>,
+    }
+
+    #[async_trait]
+    impl BackendAdapter for ExpectationRecorder {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((req.card_contract.expected_kind, req.session.prompt.clone()));
+            self.inner.next_card(req).await
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            self.inner.capabilities()
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_auto_prompt_expects_any_kind() {
+        let backend = Arc::new(ExpectationRecorder::default());
+        let mut engine = Engine::new(backend.clone());
+
+        engine.start(params()).await.unwrap();
+
+        let requests = backend.requests.lock().unwrap().clone();
+        assert_eq!(requests[0].0, None);
+        assert_eq!(requests[0].1, "payload is empty");
+    }
+
+    #[tokio::test]
+    async fn kind_prefix_forces_the_expected_card() {
+        let backend = Arc::new(ExpectationRecorder::default());
+        let mut engine = Engine::new(backend.clone());
+        let mut start_params = params();
+        start_params.prompt = "/patch guard the payload".into();
+
+        engine.start(start_params).await.unwrap();
+
+        let requests = backend.requests.lock().unwrap().clone();
+        assert_eq!(requests[0].0, Some(CardKind::Patch));
+        assert_eq!(requests[0].1, "guard the payload");
+    }
+
+    #[derive(Default)]
+    struct NavigatingBackend {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl BackendAdapter for NavigatingBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            self.calls.lock().unwrap().push(format!("{:?}", req.action));
+
+            let card = match req.action {
+                BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                    id: "c_1".into(),
+                    title: "Wrong buffer suspected".into(),
+                    claim: "The sizing lives in the component file.".into(),
+                    evidence: None,
+                    next_move: None,
+                    actions: vec![Action::Fix, Action::Stop],
+                }),
+                BackendAction::User(Action::Fix) => {
+                    Card::OpenLocation(pair_protocol::OpenLocationCard {
+                        id: "c_nav".into(),
+                        reason: "The change belongs in the component file.".into(),
+                        location: pair_protocol::Location {
+                            file: "src/component.ts".into(),
+                            line: 3,
+                            column: 1,
+                        },
+                    })
+                }
+                BackendAction::LocationGranted => {
+                    let old_line = req.context.buffer_text.lines().next().unwrap_or_default();
+                    Card::Patch(PatchCard {
+                        id: "c_patch".into(),
+                        title: "Adjust icon size".into(),
+                        explanation: "Sets the icon size on the component.".into(),
+                        warnings: vec![],
+                        patches: vec![FilePatch {
+                            id: "p_1".into(),
+                            file: req.context.file.clone(),
+                            diff: format!("@@ -1,1 +1,1 @@\n-{old_line}\n+const size = 16\n"),
+                            explanation: "Shrinks the icon.".into(),
+                        }],
+                        actions: vec![
+                            Action::Apply,
+                            Action::Retry,
+                            Action::EditPrompt,
+                            Action::Stop,
+                        ],
+                    })
+                }
+                other => panic!("unexpected action {other:?}"),
+            };
+
+            Ok(BackendResponse {
+                card,
+                raw_output: None,
+                metadata: BackendMetadata {
+                    backend: "navigating".into(),
+                    model: None,
+                    token_usage: Some(pair_protocol::TokenUsage::estimated(10, 5)),
+                    activities: vec![],
+                    attempts: vec![],
+                },
+            })
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "navigating".into(),
+                streaming: false,
+                patches: true,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
+    }
+
+    fn granted_context() -> ContextBundle {
+        ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from("src/component.ts"),
+            cursor: Cursor { line: 3, column: 1 },
+            selection: None,
+            buffer_text: "const size = 24".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn open_location_grant_continues_the_same_turn() {
+        let backend = Arc::new(NavigatingBackend::default());
+        let granted: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let granted_log = granted.clone();
+        let mut engine = Engine::new(backend.clone());
+        engine.set_location_granter(Arc::new(move |request, _session| {
+            granted_log
+                .lock()
+                .unwrap()
+                .push(request.location.file.display().to_string());
+            Box::pin(async move { Some(granted_context()) })
+        }));
+
+        let start = engine.start(params()).await.unwrap();
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+        let Card::Patch(card) = result.card else {
+            panic!("expected patch card, got {:?}", result.card);
+        };
+        assert_eq!(card.patches[0].file, PathBuf::from("src/component.ts"));
+        assert!(card.patches[0].diff.contains("const size = 24"));
+        assert_eq!(granted.lock().unwrap().as_slice(), ["src/component.ts"]);
+        assert_eq!(
+            engine.get(&start.session_id).unwrap().context.file,
+            PathBuf::from("src/component.ts")
+        );
+
+        let calls = backend.calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|call| call.contains("LocationGranted")));
+    }
+
+    #[tokio::test]
+    async fn declined_open_location_surfaces_a_deny_card() {
+        let backend = Arc::new(NavigatingBackend::default());
+        let mut engine = Engine::new(backend);
+        engine.set_location_granter(Arc::new(|_, _| Box::pin(async { None })));
+
+        let start = engine.start(params()).await.unwrap();
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+        let Card::Deny(card) = result.card else {
+            panic!("expected deny card, got {:?}", result.card);
+        };
+        assert_eq!(
+            card.location.as_ref().map(|l| l.file.clone()),
+            Some(PathBuf::from("src/component.ts"))
+        );
+    }
+
+    #[tokio::test]
+    async fn open_location_without_granter_becomes_a_deny_card() {
+        let backend = Arc::new(NavigatingBackend::default());
+        let mut engine = Engine::new(backend);
+
+        let start = engine.start(params()).await.unwrap();
+        let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+        assert!(matches!(result.card, Card::Deny(_)));
     }
 }

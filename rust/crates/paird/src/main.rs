@@ -1,18 +1,23 @@
+use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use pair_backends::{
-    BackendAdapter, CodexAppBackend, GenericCliBackend, MockBackend, ProgressReporter,
-    StdioAgentBackend,
+    BackendAdapter, ClaudeAppBackend, CodexAppBackend, GenericCliBackend, MockBackend,
+    OllamaBackend, ProgressReporter, StdioAgentBackend,
 };
-use pair_harness::Engine;
+use pair_harness::{Engine, LocationGranter, PrefetchMode};
 use pair_protocol::{
-    ActionParams, BackendInfo, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+    ActionParams, BackendInfo, ContextBundle, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
     PatchApplyResult, ReplyParams, StartSessionParams,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+
+const OPEN_LOCATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,13 +38,53 @@ async fn main() -> Result<()> {
 async fn serve_stdio() -> Result<()> {
     let backend = backend_from_env()?;
     let stdout = Arc::new(Mutex::new(io::stdout()));
-    let mut server = Server::new(backend, progress_reporter(stdout.clone()));
-    let stdin = io::stdin();
 
-    for line in stdin.lock().lines() {
-        let line = line?;
+    // Editor lines flow through a channel so that a mid-turn server request
+    // (editor/open_location) can await its response while the main loop is
+    // blocked inside the engine call that produced it.
+    let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let lines = Arc::new(tokio::sync::Mutex::new(line_rx));
+    // Client requests that arrived while a granter was waiting for its
+    // response; the main loop drains them before reading new lines.
+    let deferred = Arc::new(Mutex::new(VecDeque::<String>::new()));
+
+    let mut server = Server::new(backend, progress_reporter(stdout.clone()));
+    server.engine.set_location_granter(location_granter(
+        stdout.clone(),
+        lines.clone(),
+        deferred.clone(),
+    ));
+
+    loop {
+        let line = {
+            let queued = deferred.lock().expect("deferred lock").pop_front();
+            match queued {
+                Some(line) => line,
+                None => match lines.lock().await.recv().await {
+                    Some(line) => line,
+                    None => break,
+                },
+            }
+        };
 
         if line.trim().is_empty() {
+            continue;
+        }
+
+        // A response to a paird-initiated request that arrived after its
+        // granter timed out; there is nothing left to deliver it to.
+        if is_stale_server_response(&line) {
             continue;
         }
 
@@ -50,9 +95,95 @@ async fn serve_stdio() -> Result<()> {
     Ok(())
 }
 
+fn is_stale_server_response(line: &str) -> bool {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|value| {
+            let id = value.get("id")?.as_str()?.to_string();
+            let is_response = value.get("method").is_none();
+            Some(id.starts_with("paird_") && is_response)
+        })
+        .unwrap_or(false)
+}
+
+/// Asks the editor to open a location mid-turn: sends an editor/open_location
+/// request and pumps incoming lines until its response arrives (deferring
+/// unrelated client requests for the main loop) or the timeout expires.
+fn location_granter(
+    stdout: Arc<Mutex<io::Stdout>>,
+    lines: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+    deferred: Arc<Mutex<VecDeque<String>>>,
+) -> LocationGranter {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    Arc::new(move |request, session_id| {
+        let stdout = stdout.clone();
+        let lines = lines.clone();
+        let deferred = deferred.clone();
+
+        Box::pin(async move {
+            let id = format!("paird_{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+            let message = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "editor/open_location",
+                "params": {
+                    "session_id": session_id,
+                    "reason": request.reason,
+                    "location": request.location,
+                },
+            });
+
+            if write_json(&stdout, &message).is_err() {
+                return None;
+            }
+
+            let deadline = tokio::time::Instant::now() + OPEN_LOCATION_TIMEOUT;
+
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+
+                let line = {
+                    let mut lines = lines.lock().await;
+                    match tokio::time::timeout(remaining, lines.recv()).await {
+                        Err(_) => return None,
+                        Ok(None) => return None,
+                        Ok(Some(line)) => line,
+                    }
+                };
+
+                let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+
+                if value.get("id").and_then(Value::as_str) == Some(id.as_str())
+                    && value.get("method").is_none()
+                {
+                    let result = value.get("result")?;
+                    if result.get("granted").and_then(Value::as_bool) != Some(true) {
+                        return None;
+                    }
+
+                    return result
+                        .get("context")
+                        .cloned()
+                        .and_then(|context| serde_json::from_value::<ContextBundle>(context).ok());
+                }
+
+                deferred.lock().expect("deferred lock").push_back(line);
+            }
+        })
+    })
+}
+
 fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
     match std::env::var("PAIR_BACKEND").as_deref() {
         Ok("codex_app") | Ok("codex") => Ok(Arc::new(CodexAppBackend::from_env()?)),
+        Ok("claude_app") | Ok("claude") => Ok(Arc::new(ClaudeAppBackend::from_env()?)),
+        Ok("ollama") => Ok(Arc::new(OllamaBackend::from_env()?)),
         Ok("agent") | Ok("agent_stdio") => Ok(Arc::new(StdioAgentBackend::from_env()?)),
         Ok("generic") | Ok("generic_cli") => Ok(Arc::new(GenericCliBackend::from_env()?)),
         _ => Ok(Arc::new(MockBackend)),
@@ -67,8 +198,11 @@ struct Server {
 
 impl Server {
     fn new(backend: Arc<dyn BackendAdapter>, progress: ProgressReporter) -> Self {
+        let mut engine = Engine::new(backend.clone());
+        engine.set_prefetch_mode(prefetch_mode_from_env());
+
         Self {
-            engine: Engine::new(backend.clone()),
+            engine,
             backend,
             progress,
         }
@@ -171,11 +305,26 @@ impl Server {
 
                 json!(result)
             }
+            "backend/warmup" => {
+                self.backend
+                    .warmup()
+                    .await
+                    .map_err(|error| (id.clone(), error.to_string()))?;
+
+                json!({"ok": true})
+            }
             "shutdown" => json!({"ok": true}),
             method => return Err((id, format!("unknown method {method}"))),
         };
 
         Ok(JsonRpcResponse::ok(id, result))
+    }
+}
+
+fn prefetch_mode_from_env() -> PrefetchMode {
+    match std::env::var("PAIR_PREFETCH").as_deref() {
+        Ok("off") => PrefetchMode::Off,
+        _ => PrefetchMode::Fix,
     }
 }
 

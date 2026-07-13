@@ -15,6 +15,7 @@ pair_backends = { path = "../pair_backends" }
 pair_context = { path = "../pair_context" }
 pair_patch = { path = "../pair_patch" }
 pair_protocol = { path = "../pair_protocol" }
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true

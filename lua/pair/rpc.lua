@@ -211,6 +211,24 @@ function M.on(method, callback)
   M.notifications[method] = callback
 end
 
+-- Handlers for requests initiated by paird (method + id). The handler
+-- receives (params, respond); it must call respond(result) exactly once.
+function M.on_request(method, callback)
+  M.requests = M.requests or {}
+  M.requests[method] = callback
+end
+
+function M.respond(id, result)
+  local payload = vim.json.encode({
+    jsonrpc = "2.0",
+    id = id,
+    result = result,
+  })
+
+  log.event("rpc_server_response", { id = id })
+  vim.fn.chansend(M.job, payload .. "\n")
+end
+
 function M.on_data(data)
   if not data or #data == 0 then
     return
@@ -245,6 +263,31 @@ function M.handle(line)
     if callback then
       callback(message.params or {})
     end
+
+    return
+  end
+
+  if message.method and message.id ~= nil then
+    local handler = M.requests and M.requests[message.method]
+    local id = message.id
+
+    if not handler then
+      vim.fn.chansend(
+        M.job,
+        vim.json.encode({
+          jsonrpc = "2.0",
+          id = id,
+          error = { code = -32601, message = "unknown editor request " .. message.method },
+        }) .. "\n"
+      )
+      return
+    end
+
+    vim.schedule(function()
+      handler(message.params or {}, function(result)
+        M.respond(id, result)
+      end)
+    end)
 
     return
   end

@@ -166,6 +166,7 @@ impl BackendAdapter for StdioAgentBackend {
             raw_output: Some(raw_output),
             metadata: BackendMetadata {
                 backend: "agent_stdio".into(),
+                model: None,
                 token_usage: Some(TokenUsage::estimated(answer.input_tokens, output_tokens)),
                 activities: vec![],
                 attempts: vec![],
@@ -234,12 +235,13 @@ fn action_value(action: &BackendAction) -> serde_json::Value {
         BackendAction::ContractRetry(reason) => {
             json!({"kind": "contract_retry", "reason": reason})
         }
+        BackendAction::LocationGranted => json!({"kind": "location_granted"}),
     }
 }
 
 fn agent_api() -> serde_json::Value {
     json!(
-        "Return one JSON Pair op only. Ops: hypothesis, finding, patch, choice, summary, error. Behave as an equal pair-programming partner: explain what you noticed and why the next coherent block matters, then return control to the user. Never plan or complete a whole refactor in one response. Return patch for user action fix or start mode fix unless impossible. When limits.allow_goal_completion is true, return a patch if the original goal is unresolved or a summary if it is complete; never restart discovery. A patch is one local step: exactly one file and one hunk within the supplied changed-line limit. patch.diff must be a unified diff hunk starting with @@. You may first emit newline-delimited {\"t\":\"pair_progress\",\"phase\":string,\"message\":string} records with concise user-visible activity summaries. Never emit hidden reasoning or private chain-of-thought. End with either a raw Pair op or {\"t\":\"pair_result\",\"result\":<Pair op>}."
+        "Return one JSON Pair op only. Ops: hypothesis, finding, patch, choice, deny, summary, error. Use deny(title,reason) when you cannot or should not proceed, such as an ambiguous prompt or missing information; the reason is shown to the user. error is only for technical failures. Behave as an equal pair-programming partner: explain what you noticed and why the next coherent block matters, then return control to the user. Never plan or complete a whole refactor in one response. Return patch for user action fix or start mode fix unless impossible. When limits.allow_goal_completion is true, return a patch if the original goal is unresolved or a summary if it is complete; never restart discovery. A patch is one local step: exactly one file and one hunk within the supplied changed-line limit. patch.diff must be a unified diff hunk starting with @@. You may first emit newline-delimited {\"t\":\"pair_progress\",\"phase\":string,\"message\":string} records with concise user-visible activity summaries. Never emit hidden reasoning or private chain-of-thought. End with either a raw Pair op or {\"t\":\"pair_result\",\"result\":<Pair op>}."
     )
 }
 

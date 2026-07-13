@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Action, Card, ChoiceCard, ChoiceOption, ErrorCard, FilePatch, FindingCard, HypothesisCard,
-    Location, LocationEvidence, NextMove, PatchCard, SummaryCard,
+    Action, Card, ChoiceCard, ChoiceOption, DenyCard, ErrorCard, FilePatch, FindingCard,
+    HypothesisCard, Location, LocationEvidence, NextMove, OpenLocationCard, PatchCard, SummaryCard,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -32,6 +32,16 @@ pub enum AgentOp {
         question: String,
         options: Vec<AgentChoice>,
     },
+    Deny {
+        title: String,
+        reason: String,
+        #[serde(default)]
+        location: Option<AgentLocation>,
+    },
+    OpenLocation {
+        reason: String,
+        location: AgentLocation,
+    },
     Summary {
         title: String,
         summary: String,
@@ -44,6 +54,7 @@ pub enum AgentOp {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(from = "AgentLocationInput")]
 pub struct AgentLocation {
     pub file: PathBuf,
     pub line: usize,
@@ -51,6 +62,70 @@ pub struct AgentLocation {
     pub column: usize,
     #[serde(default)]
     pub annotation: Option<String>,
+}
+
+// Agents occasionally emit locations as "file:line[:column][ — note]" strings
+// instead of the location object; accept both so the op still parses.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AgentLocationInput {
+    Object {
+        file: PathBuf,
+        line: usize,
+        #[serde(default = "one")]
+        column: usize,
+        #[serde(default)]
+        annotation: Option<String>,
+    },
+    Text(String),
+}
+
+impl From<AgentLocationInput> for AgentLocation {
+    fn from(input: AgentLocationInput) -> Self {
+        match input {
+            AgentLocationInput::Object {
+                file,
+                line,
+                column,
+                annotation,
+            } => Self {
+                file,
+                line,
+                column,
+                annotation,
+            },
+            AgentLocationInput::Text(text) => parse_location_text(&text),
+        }
+    }
+}
+
+fn parse_location_text(text: &str) -> AgentLocation {
+    let (place, annotation) = [" — ", " – ", " - "]
+        .iter()
+        .find_map(|separator| text.split_once(separator))
+        .map(|(place, annotation)| (place.trim(), Some(annotation.trim().to_string())))
+        .unwrap_or((text.trim(), None));
+
+    let mut file = place;
+    let mut numbers = Vec::new();
+    while let Some((head, tail)) = file.rsplit_once(':') {
+        let Ok(number) = tail.parse::<usize>() else {
+            break;
+        };
+        if numbers.len() == 2 {
+            break;
+        }
+        numbers.push(number);
+        file = head;
+    }
+    numbers.reverse();
+
+    AgentLocation {
+        file: PathBuf::from(file),
+        line: numbers.first().copied().unwrap_or(1).max(1),
+        column: numbers.get(1).copied().unwrap_or(1).max(1),
+        annotation,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -63,10 +138,43 @@ pub struct AgentPatch {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(from = "AgentChoiceInput")]
 pub struct AgentChoice {
     pub id: String,
     pub label: String,
     pub action: Action,
+}
+
+// Agents frequently emit choice options as plain strings instead of the full
+// {id,label,action} object; accept both so a valid choice op never fails to parse.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AgentChoiceInput {
+    Object {
+        #[serde(default)]
+        id: Option<String>,
+        label: String,
+        #[serde(default)]
+        action: Option<Action>,
+    },
+    Label(String),
+}
+
+impl From<AgentChoiceInput> for AgentChoice {
+    fn from(input: AgentChoiceInput) -> Self {
+        match input {
+            AgentChoiceInput::Object { id, label, action } => Self {
+                id: id.unwrap_or_default(),
+                label,
+                action: action.unwrap_or(Action::EditPrompt),
+            },
+            AgentChoiceInput::Label(label) => Self {
+                id: String::new(),
+                label,
+                action: Action::EditPrompt,
+            },
+        }
+    }
 }
 
 impl AgentOp {
@@ -142,7 +250,27 @@ impl AgentOp {
                 id,
                 title,
                 question,
-                options: options.into_iter().map(AgentChoice::choice).collect(),
+                options: options
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, option)| option.choice(index + 1))
+                    .collect(),
+            }),
+            Self::Deny {
+                title,
+                reason,
+                location,
+            } => Card::Deny(DenyCard {
+                id,
+                title,
+                reason,
+                location: location.map(AgentLocation::location),
+                actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+            }),
+            Self::OpenLocation { reason, location } => Card::OpenLocation(OpenLocationCard {
+                id,
+                reason,
+                location: location.location(),
             }),
             Self::Summary {
                 title,
@@ -196,9 +324,13 @@ impl AgentPatch {
 }
 
 impl AgentChoice {
-    fn choice(self) -> ChoiceOption {
+    fn choice(self, index: usize) -> ChoiceOption {
         ChoiceOption {
-            id: self.id,
+            id: if self.id.trim().is_empty() {
+                format!("o_{index}")
+            } else {
+                self.id
+            },
             label: self.label,
             action: self.action,
         }
@@ -212,6 +344,108 @@ fn one() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_location_given_as_string() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"hypothesis","title":"T","claim":"C","evidence":"src/work.ts:2:5 — the return has no value"}"#,
+        )
+        .unwrap();
+
+        let AgentOp::Hypothesis { evidence, .. } = op else {
+            panic!("expected hypothesis");
+        };
+        let evidence = evidence.unwrap();
+        assert_eq!(evidence.file, PathBuf::from("src/work.ts"));
+        assert_eq!(evidence.line, 2);
+        assert_eq!(evidence.column, 5);
+        assert_eq!(
+            evidence.annotation.as_deref(),
+            Some("the return has no value")
+        );
+    }
+
+    #[test]
+    fn parses_location_string_without_line() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"finding","title":"T","finding":"F","location":"src/work.ts"}"#,
+        )
+        .unwrap();
+
+        let AgentOp::Finding { location, .. } = op else {
+            panic!("expected finding");
+        };
+        let location = location.unwrap();
+        assert_eq!(location.file, PathBuf::from("src/work.ts"));
+        assert_eq!(location.line, 1);
+    }
+
+    #[test]
+    fn parses_choice_options_given_as_plain_strings() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"choice","title":"T","question":"Q","options":["First","Second"]}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::Choice(card) = card else {
+            panic!("expected choice card");
+        };
+        assert_eq!(card.options.len(), 2);
+        assert_eq!(card.options[0].id, "o_1");
+        assert_eq!(card.options[0].label, "First");
+        assert_eq!(card.options[1].id, "o_2");
+    }
+
+    #[test]
+    fn parses_choice_options_missing_id_and_action() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"choice","title":"T","question":"Q","options":[{"label":"Only label"},{"id":"custom","label":"Full","action":"fix"}]}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::Choice(card) = card else {
+            panic!("expected choice card");
+        };
+        assert_eq!(card.options[0].id, "o_1");
+        assert_eq!(card.options[1].id, "custom");
+        assert_eq!(card.options[1].action, Action::Fix);
+    }
+
+    #[test]
+    fn maps_deny_op_to_deny_card() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"deny","title":"Ambiguous prompt","reason":"The prompt does not say what to test."}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::Deny(card) = card else {
+            panic!("expected deny card");
+        };
+        assert_eq!(card.title, "Ambiguous prompt");
+        assert_eq!(
+            card.actions,
+            vec![Action::Retry, Action::EditPrompt, Action::Stop]
+        );
+    }
+
+    #[test]
+    fn maps_deny_location_for_editor_navigation() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"deny","title":"Wrong buffer","reason":"Open the component file first.","location":{"file":"libs/app/util/src/lib/vw-icon-button.component.ts","line":12,"column":1}}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::Deny(card) = card else {
+            panic!("expected deny card");
+        };
+        let location = card.location.expect("deny location");
+        assert_eq!(location.line, 12);
+        assert!(location.file.ends_with("vw-icon-button.component.ts"));
+    }
 
     #[test]
     fn maps_op_to_card() {

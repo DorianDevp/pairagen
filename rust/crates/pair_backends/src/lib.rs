@@ -1,6 +1,8 @@
+pub mod claude_app;
 pub mod codex_app;
 pub mod generic;
 pub mod mock;
+pub mod ollama;
 pub mod stdio_agent;
 pub mod stream;
 
@@ -15,9 +17,11 @@ use pair_protocol::{
 use serde::Serialize;
 use serde_json::json;
 
+pub use claude_app::*;
 pub use codex_app::*;
 pub use generic::*;
 pub use mock::*;
+pub use ollama::*;
 pub use stdio_agent::*;
 pub use stream::*;
 
@@ -33,6 +37,12 @@ pub trait BackendAdapter: Send + Sync {
         self.next_card(req).await
     }
 
+    /// Called when the editor opens the prompt window, before any session
+    /// exists, so backends can pay their startup cost while the user types.
+    async fn warmup(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn capabilities(&self) -> BackendInfo;
 }
 
@@ -45,7 +55,7 @@ pub struct BackendProgress {
     pub message: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct BackendRequest {
     pub session: SessionSnapshot,
     pub action: BackendAction,
@@ -81,12 +91,15 @@ pub fn backend_context(context: &ContextBundle) -> serde_json::Value {
     })
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum BackendAction {
     Start,
     User(Action),
     Reply(String),
     ContractRetry(String),
+    // The editor granted an open_location request mid-turn; the request's
+    // context carries the freshly opened buffer.
+    LocationGranted,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -125,8 +138,13 @@ pub fn enforce_card_contract(
         return card;
     };
 
-    if matches!(card, Card::Error(_))
+    // A clarifying question is a legitimate alternative to guessing wherever a
+    // discovery card is expected; patch and summary requests stay strict.
+    let discovery_expected = matches!(expected_kind, CardKind::Hypothesis | CardKind::Finding);
+
+    if matches!(card, Card::Error(_) | Card::Deny(_) | Card::OpenLocation(_))
         || card.kind() == expected_kind
+        || (discovery_expected && matches!(card, Card::Choice(_)))
         || (contract.allow_goal_completion && matches!(card, Card::Summary(_)))
     {
         return card;
@@ -172,6 +190,7 @@ pub struct BackendResponse {
 #[derive(Clone, Debug)]
 pub struct BackendMetadata {
     pub backend: String,
+    pub model: Option<String>,
     pub token_usage: Option<TokenUsage>,
     pub activities: Vec<String>,
     pub attempts: Vec<pair_protocol::AgentAttempt>,
@@ -195,6 +214,36 @@ pub struct SessionSnapshot {
     pub card_count: usize,
     pub last_card: Option<Card>,
     pub last_summary: Option<String>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_request() -> BackendRequest {
+    BackendRequest {
+        session: SessionSnapshot {
+            id: "s_1".into(),
+            prompt: "payload is empty".into(),
+            completed_steps: vec![],
+            known_observations: vec![],
+            mode: Mode::Auto,
+            card_count: 0,
+            last_card: None,
+            last_summary: None,
+        },
+        action: BackendAction::Start,
+        context: ContextBundle {
+            cwd: "/tmp/project".into(),
+            file: "src/main.rs".into(),
+            cursor: pair_protocol::Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: "fn main() {}".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        },
+        card_contract: CardContract::default(),
+    }
 }
 
 #[cfg(test)]
@@ -241,6 +290,44 @@ mod tests {
         assert!(matches!(
             enforce_card_contract(hypothesis(), &contract, "Codex", "{}"),
             Card::Hypothesis(_)
+        ));
+    }
+
+    #[test]
+    fn allows_choice_when_discovery_kind_is_expected() {
+        let contract = CardContract {
+            expected_kind: Some(CardKind::Hypothesis),
+            ..CardContract::default()
+        };
+        let choice = Card::Choice(pair_protocol::ChoiceCard {
+            id: "c_choice".into(),
+            title: "Clarify".into(),
+            question: "Which behavior do you want?".into(),
+            options: vec![],
+        });
+
+        assert!(matches!(
+            enforce_card_contract(choice, &contract, "Claude", "{}"),
+            Card::Choice(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_choice_when_patch_is_required() {
+        let contract = CardContract {
+            expected_kind: Some(CardKind::Patch),
+            ..CardContract::default()
+        };
+        let choice = Card::Choice(pair_protocol::ChoiceCard {
+            id: "c_choice".into(),
+            title: "Clarify".into(),
+            question: "Which behavior do you want?".into(),
+            options: vec![],
+        });
+
+        assert!(matches!(
+            enforce_card_contract(choice, &contract, "Claude", "{}"),
+            Card::Error(_)
         ));
     }
 
