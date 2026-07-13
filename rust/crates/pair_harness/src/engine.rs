@@ -423,7 +423,7 @@ impl Engine {
             context,
             card_contract: CardContract {
                 expected_kind,
-                allow_goal_completion: matches!(expected, NextState::Continuation),
+                allow_goal_completion: matches!(expected, NextState::GoalReview),
                 ..CardContract::default()
             },
         }
@@ -642,6 +642,19 @@ impl Engine {
         next_state: NextState,
     ) -> Result<Card> {
         let mut received = response.card;
+        if matches!(next_state, NextState::GoalReview)
+            && let Card::Summary(summary) = &mut received
+        {
+            summary
+                .next_actions
+                .retain(|action| *action != Action::Next);
+            if !summary.next_actions.contains(&Action::RunCheck) {
+                summary.next_actions.insert(0, Action::RunCheck);
+            }
+            if !summary.next_actions.contains(&Action::Stop) {
+                summary.next_actions.push(Action::Stop);
+            }
+        }
         prepare_observation_card(session, &mut received);
         let validation =
             PatchNormalizer::normalize_card(&mut received, &session.context).and_then(|()| {
@@ -1319,7 +1332,7 @@ fn expected_card_kind(
 ) -> Option<CardKind> {
     match next_state {
         NextState::Patch => return Some(CardKind::Patch),
-        NextState::Continuation => return Some(CardKind::Patch),
+        NextState::GoalReview => return None,
         NextState::Summary | NextState::Finished => return Some(CardKind::Summary),
         NextState::Any | NextState::Card => {}
     }
@@ -1357,8 +1370,8 @@ fn state_after_card(card: &Card, next_state: &NextState) -> SessionState {
     if refused && matches!(next_state, NextState::Patch) {
         return SessionState::PatchFailed;
     }
-    if refused && matches!(next_state, NextState::Continuation) {
-        return SessionState::ContinuationFailed;
+    if refused && matches!(next_state, NextState::GoalReview) {
+        return SessionState::GoalReviewFailed;
     }
 
     SessionState::from_card(card)
@@ -1495,7 +1508,7 @@ mod tests {
             .action(&applied.session_id, Action::Next)
             .await
             .unwrap();
-        assert!(matches!(next.card, Card::Patch(_)));
+        assert!(matches!(next.card, Card::Finding(_)));
     }
 
     #[tokio::test]

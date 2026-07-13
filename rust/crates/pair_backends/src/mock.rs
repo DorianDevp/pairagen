@@ -25,7 +25,7 @@ impl BackendAdapter for MockBackend {
             BackendAction::User(Action::OtherLead) => other_card(),
             BackendAction::User(Action::Retry) => patch_card(&req),
             BackendAction::User(Action::RunCheck) => check_card(),
-            BackendAction::User(Action::Next) => patch_card(&req),
+            BackendAction::User(Action::Next) => next_step_card(),
             BackendAction::User(Action::Stop) => stop_card(),
             BackendAction::User(action) => unsupported_card(action),
             BackendAction::Reply(text) => reply_card(text),
@@ -124,6 +124,22 @@ fn other_card() -> Card {
         evidence: None,
         next_move: None,
         actions: vec![Action::Follow, Action::Why, Action::Fix, Action::Stop],
+    })
+}
+
+fn next_step_card() -> Card {
+    Card::Finding(FindingCard {
+        id: "c_next".into(),
+        title: "Next goal step".into(),
+        finding: "The payload producer is fixed; inspect the caller that consumes body.data next."
+            .into(),
+        location: Some(pair_protocol::Location {
+            file: "src/caller.ts".into(),
+            line: 1,
+            column: 1,
+        }),
+        annotation: Some("This is the next unresolved part of the original goal.".into()),
+        actions: vec![Action::Open, Action::Fix, Action::Stop],
     })
 }
 

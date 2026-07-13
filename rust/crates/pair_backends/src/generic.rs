@@ -63,7 +63,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
                 "If a.kind is user and a.action is fix, return a patch op unless a patch is impossible.",
                 "If s.mode is fix and a.kind is start, return a patch op unless a patch is impossible.",
                 "For non-fix actions, do not return a patch op.",
-                "If limits.goal_completion is true, return one patch when the original goal is unresolved or one summary when it is complete; never restart discovery.",
+                "If limits.goal_completion is true, assess the whole original goal. Return summary only when every requirement is satisfied; otherwise return one finding with the next unresolved step and its concrete location. Never return a patch for this action.",
                 "A patch is one small local pair-programming step: one file, one hunk, and no more changed lines than the supplied limit.",
                 "Do not complete or plan a whole refactor in one response.",
                 "Explain why the next coherent block matters and return control to the user after that step."

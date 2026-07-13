@@ -8,7 +8,7 @@ pub enum SessionState {
     CardShown,
     PatchShown,
     PatchFailed,
-    ContinuationFailed,
+    GoalReviewFailed,
     Applying,
     Applied,
     Summary,
@@ -21,7 +21,7 @@ pub enum NextState {
     Any,
     Card,
     Patch,
-    Continuation,
+    GoalReview,
     Summary,
     Finished,
 }
@@ -40,11 +40,11 @@ impl SessionState {
             (Self::PatchShown, Action::Stop) => Ok(NextState::Finished),
             (Self::PatchFailed, Action::Retry | Action::EditPrompt) => Ok(NextState::Patch),
             (Self::PatchFailed, Action::Stop) => Ok(NextState::Finished),
-            (Self::ContinuationFailed, Action::Retry | Action::EditPrompt) => {
-                Ok(NextState::Continuation)
+            (Self::GoalReviewFailed, Action::Retry | Action::EditPrompt) => {
+                Ok(NextState::GoalReview)
             }
-            (Self::ContinuationFailed, Action::Stop) => Ok(NextState::Finished),
-            (Self::Summary, Action::Next) => Ok(NextState::Continuation),
+            (Self::GoalReviewFailed, Action::Stop) => Ok(NextState::Finished),
+            (Self::Summary, Action::Next) => Ok(NextState::GoalReview),
             (Self::Summary, Action::RunCheck) => Ok(NextState::Card),
             (Self::Summary, Action::Stop) => Ok(NextState::Finished),
             (Self::Finished, _) => Err(anyhow!("session is finished")),
@@ -79,9 +79,13 @@ impl NextState {
             (Self::Card, _) => Ok(()),
             (Self::Patch, Card::Patch(_)) => Ok(()),
             (Self::Patch, _) => Err(anyhow!("expected patch card")),
-            (Self::Continuation, Card::Patch(_) | Card::Summary(_)) => Ok(()),
-            (Self::Continuation, _) => Err(anyhow!(
-                "expected a continuation patch or completed goal summary"
+            (Self::GoalReview, Card::Patch(_)) => Err(anyhow!(
+                "goal review cannot draft a patch; use Fix explicitly"
+            )),
+            (Self::GoalReview, Card::Summary(_)) => Ok(()),
+            (Self::GoalReview, Card::Hypothesis(_) | Card::Finding(_) | Card::Choice(_)) => Ok(()),
+            (Self::GoalReview, _) => Err(anyhow!(
+                "expected a next-step finding, choice, or completed goal summary"
             )),
             (Self::Summary, Card::Summary(_)) => Ok(()),
             (Self::Summary, _) => Err(anyhow!("expected summary card")),
