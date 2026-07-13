@@ -18,7 +18,7 @@ local labels = {
   edit_prompt = { "e", "Edit", nil },
   open = { "o", "Open", "go_to" },
   run_check = { "t", "Check", nil },
-  next = { "n", "Next", nil },
+  next = { "n", "Assess goal", nil },
   stop = { "q", "Stop", "stop" },
 }
 
@@ -66,7 +66,7 @@ function M.show(card, opts)
 
   if card.kind == "summary" and M.has_action(card, "next") and state.completion_notified_card ~= card.id then
     state.completion_notified_card = card.id
-    ui.notify("Local step applied. Choose Next to continue, Check, or Stop.")
+    ui.notify("Local step applied. Assess the goal, run checks, or stop.")
   end
 end
 
@@ -94,7 +94,7 @@ function M.lines(card)
   elseif card.kind == "summary" then
     if M.has_action(card, "next") then
       table.insert(lines, "Status  Local step applied")
-      table.insert(lines, "Next    Continue only if the goal needs another change")
+      table.insert(lines, "Assess  Check the whole goal before drafting again")
       table.insert(lines, "")
     elseif card.title ~= "Stopped" then
       table.insert(lines, "Status  Goal complete")

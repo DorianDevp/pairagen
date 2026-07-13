@@ -25,6 +25,10 @@ function M.setup()
     require("pair").action("other_lead")
   end, { force = true })
 
+  vim.api.nvim_create_user_command("PairAssess", function()
+    require("pair").action("next")
+  end, { force = true })
+
   vim.api.nvim_create_user_command("PairNext", function()
     require("pair").action("next")
   end, { force = true })

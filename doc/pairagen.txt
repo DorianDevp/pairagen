@@ -49,8 +49,10 @@ COMMANDS                                                 *pairagen-commands*
 :PairWhy               Ask for the reasoning behind the current observation.
                                                        *:PairOther*
 :PairOther             Request another lead.
+                                                       *:PairAssess*
+:PairAssess            Assess the whole goal and locate one unresolved step.
                                                        *:PairNext*
-:PairNext              Explicitly continue after an applied local step.
+:PairNext              Compatibility alias for |:PairAssess|.
                                                        *:PairStop*
 :PairStop              Finish the active session.
                                                        *:PairHide*

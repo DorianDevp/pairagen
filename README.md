@@ -165,9 +165,10 @@ Edit the inline draft
 <leader>pa Accept, <leader>pd Reject, <leader>pr Retry
 Accepted local step
 Local applied receipt
-Explicit Next, Check, or Stop
-Next patch (only when requested)
-One local patch or completed goal summary
+Explicit Assess goal, Check, or Stop
+Completed-goal summary or one located unresolved step
+Explicit Draft/Fix at that location
+One local patch
 ```
 
 Cards stay anchored beside the source line and do not take focus. Use `<leader>pg`
@@ -193,10 +194,11 @@ Unknown words after `/` are treated as normal prompt text, so paths like
 
 The goal and accepted-step count stay visible on cards and editable drafts. After
 accepting a patch, Pair shows a local receipt without calling the agent again.
-`Next` explicitly continues the same goal and must return either one local patch
-or a completed-goal summary; it does not restart discovery. This keeps the user
-in control and avoids spending an entire model turn merely to ask whether to
-continue.
+`Assess goal` checks the original goal against accepted steps and current project
+state. It either marks the goal complete or locates one unresolved next step; it
+never drafts a patch. `Draft` remains a separate explicit action, so continuing
+cannot silently rewrite the current buffer. `:PairNext` remains as a compatibility
+alias for `:PairAssess`.
 
 ## Context optimization
 
@@ -302,6 +304,7 @@ The current implementation does not train or run an ML model.
 :PairWhy
 :PairFollow
 :PairOther
+:PairAssess
 :PairNext
 :PairStop
 :PairHide

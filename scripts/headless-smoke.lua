@@ -42,6 +42,8 @@ local patch_card = {
   title = "Preview root",
   explanation = long_explanation,
 }
+require("pair.commands").setup()
+assert(vim.fn.exists(":PairAssess") == 2)
 state.goal = {
   statement = long_goal,
   completed_steps = { "first", "second" },
