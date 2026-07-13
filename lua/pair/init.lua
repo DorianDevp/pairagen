@@ -163,6 +163,11 @@ function M.action(action)
     return
   end
 
+  if action == "run_check" then
+    M.run_check()
+    return
+  end
+
   if not M.confirm_agent_turn(action) then
     return
   end
@@ -209,6 +214,57 @@ function M.action(action)
     state.goal = message.result.goal or state.goal
     card.show(message.result.card)
   end)
+end
+
+function M.editor_check(files)
+  local report = { checked_files = 0, errors = {} }
+  local seen = {}
+
+  for _, file in ipairs(files or {}) do
+    local target = vim.fn.fnamemodify(file, ":p")
+    local buf = vim.fn.bufnr(target)
+    if buf >= 0 and vim.api.nvim_buf_is_loaded(buf) and not seen[buf] then
+      seen[buf] = true
+      report.checked_files = report.checked_files + 1
+      for _, diagnostic in ipairs(vim.diagnostic.get(buf, { severity = vim.diagnostic.severity.ERROR })) do
+        table.insert(report.errors, {
+          file = vim.fn.fnamemodify(target, ":."),
+          line = diagnostic.lnum + 1,
+          message = context.truncate(diagnostic.message, config.values.context.max_diagnostic_length),
+        })
+      end
+    end
+  end
+
+  return report
+end
+
+function M.run_check()
+  local active = state.card or state.last_card or {}
+  local report = M.editor_check(active.changed_files or {})
+  log.event("editor_check", report)
+
+  if #report.errors > 0 then
+    local first = report.errors[1]
+    ui.notify(string.format(
+      "Pair check found %s error%s. First: %s:%s %s",
+      #report.errors,
+      #report.errors == 1 and "" or "s",
+      first.file,
+      first.line,
+      first.message
+    ), vim.log.levels.ERROR)
+  elseif report.checked_files > 0 then
+    ui.notify(string.format(
+      "Pair check passed: no editor errors in %s changed buffer%s",
+      report.checked_files,
+      report.checked_files == 1 and "" or "s"
+    ))
+  else
+    ui.notify("Pair check unavailable: no changed buffers are loaded", vim.log.levels.WARN)
+  end
+
+  return report
 end
 
 function M.focus_card_location(active_card)
@@ -422,6 +478,7 @@ function M.reset()
   state.context_report = nil
   state.workspace_hints = nil
   state.completion_notified_card = nil
+  state.completion_checked_card = nil
   state.details_card = nil
   state.details_expanded = false
   state.thinking_request_id = nil

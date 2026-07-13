@@ -69,6 +69,17 @@ function M.show(card, opts)
     state.completion_notified_card = card.id
     ui.notify("Local step applied. Assess the goal, run checks, or stop.")
   end
+  if card.kind == "summary"
+    and card.title == "Goal complete"
+    and state.completion_checked_card ~= card.id
+  then
+    state.completion_checked_card = card.id
+    vim.defer_fn(function()
+      if state.card == card then
+        require("pair").run_check()
+      end
+    end, 300)
+  end
 end
 
 function M.lines(card)

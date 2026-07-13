@@ -32,6 +32,7 @@ local M = {
   context_report = nil,
   workspace_hints = nil,
   completion_notified_card = nil,
+  completion_checked_card = nil,
   details_card = nil,
   details_expanded = false,
 }

@@ -55,6 +55,19 @@ assert(table.concat(token_lines, "\n"):find("20 non-cached", 1, true))
 state.turn_token_usage = nil
 state.token_usage = nil
 
+local check_buf = vim.fn.bufadd(vim.fn.getcwd() .. "/src/check-test.lua")
+vim.fn.bufload(check_buf)
+local check_namespace = vim.api.nvim_create_namespace("pairagen-headless-check")
+vim.diagnostic.set(check_namespace, check_buf, {
+  { lnum = 2, col = 0, severity = vim.diagnostic.severity.ERROR, message = "broken check" },
+})
+local check = require("pair").editor_check({ "src/check-test.lua" })
+assert(check.checked_files == 1)
+assert(#check.errors == 1)
+assert(check.errors[1].line == 3)
+vim.diagnostic.reset(check_namespace, check_buf)
+vim.api.nvim_buf_delete(check_buf, { force = true })
+
 local navigation = require("pair.navigation")
 local location = navigation.card_location({
   evidence = { file = "old.rs" },
