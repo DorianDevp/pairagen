@@ -191,9 +191,12 @@ Unknown words after `/` are treated as normal prompt text, so paths like
 
 The goal and accepted-step count stay visible on cards and editable drafts. In
 the default `auto` mode the agent owns the complete process: it inspects the
-project, proposes one hunk, waits for `Accept` or `Reject`, and immediately
-continues after that decision until the whole goal is complete. User control is
-the hunk gate, not a repeated discovery/assess/draft ceremony. Asking `Why`
+project and prepares the complete change for the current buffer in one turn.
+Pair then presents that result hunk by hunk; `Accept` advances locally without
+another model call, and accepting the final complete hunk closes the goal
+locally. `Reject`, `Retry`, a required new file, or an explicit question can
+return control to the agent. User control is the hunk gate, not a repeated
+discovery/assess/draft ceremony. Asking `Why`
 opens a side conversation about the pending hunk and then returns to that exact
 draft without advancing or replacing it. Explicit
 `/{kind}` prompts and investigate/explain/review modes remain available for

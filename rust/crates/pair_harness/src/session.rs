@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use pair_protocol::{
     Card, CardKind, ContextBundle, ContextPolicy, Cursor, GoalStatus, Location, Mode,
-    ObservationProgress, PatchId, Selection, StartSessionParams, TokenUsage,
+    ObservationProgress, PatchCard, PatchId, Selection, StartSessionParams, TokenUsage,
 };
 use uuid::Uuid;
 
@@ -30,6 +30,7 @@ pub struct Session {
     pub constraints: Vec<String>,
     pub completed_steps: Vec<String>,
     pub completed_step_signatures: Vec<(PathBuf, String)>,
+    pub pending_patch_cards: VecDeque<PatchCard>,
     pub goal_status: GoalStatus,
     pub next_step: Option<String>,
     pub continuous_goal: bool,
@@ -65,6 +66,7 @@ impl Session {
             constraints: vec!["one card only".into(), "patches require user apply".into()],
             completed_steps: vec![],
             completed_step_signatures: vec![],
+            pending_patch_cards: VecDeque::new(),
             goal_status: GoalStatus::Active,
             next_step: None,
             continuous_goal,

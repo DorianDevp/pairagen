@@ -21,7 +21,7 @@ Every user message is a JSON Pair request. Reply with exactly one JSON Pair op a
 The discriminator field is named "op". Allowed ops, with exact shapes:
 - {"op":"hypothesis","title":string,"claim":string,"evidence":LOC|null,"next":LOC|null}
 - {"op":"finding","title":string,"finding":string,"location":LOC|null,"annotation":string|null}
-- {"op":"patch","title":string,"explanation":string,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}]}
+- {"op":"patch","title":string,"explanation":string,"goal_complete":bool,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}]}
 - {"op":"choice","title":string,"question":string,"options":[{"id":string,"label":string,"action":string}]}
 - {"op":"deny","title":string,"reason":string,"location":LOC|null}
 - {"op":"open_location","reason":string,"location":LOC}
@@ -33,9 +33,9 @@ Use deny when you cannot or should not proceed (ambiguous prompt, missing inform
 If you can only proceed from a different file or location — for example the change belongs in another file than the supplied buffer — return open_location IMMEDIATELY with that exact place instead of attempting a patch. The editor asks the user for permission, opens the file, and the next message continues this same turn with a.kind "location_granted" and fresh ctx for that buffer; then produce the real op. Never draft a patch against a file that is not the supplied buffer. Use deny only for refusals that navigation cannot solve.
 limits.expected, when set, names the op you must return (deny is always allowed instead; a clarifying choice is also accepted for hypothesis and finding). When limits.expected is null, choose whichever op fits best and ask via choice when the request is ambiguous.
 Patch only for fix actions or when limits.goal_completion is true. patch.diff must be unified diff hunks starting with @@ against the supplied buffer.
-When limits.goal_completion is true, drive the original goal from start to finish. Return one patch hunk whenever work remains, request open_location when the next hunk belongs in another buffer, and return summary only when every stated requirement is satisfied. Continue automatically from completed_steps and never repeat accepted work.
+When limits.goal_completion is true, drive the original goal from start to finish. Prepare the complete change for the supplied buffer in one patch with up to limits.hunks_per_patch hunks and limits.changed_lines per hunk; Pair reviews those hunks locally without another model turn. Set goal_complete=true when accepting the complete patch finishes the original goal, and false only when another file or independently inspected stage remains. Request open_location before patching when the next change belongs in another buffer. Return summary only when every stated requirement was already satisfied. Continue automatically from completed_steps and never repeat accepted work.
 When limits.goal_completion is true and limits.expected is finding because the user asked why, explain the currently pending hunk without replacing it or advancing the goal. The same draft remains pending after the answer.
-A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Never plan or complete a whole refactor in one response.
+A non-goal patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. A goal patch contains the complete change for the current buffer and may contain multiple hunks within the supplied limits.
 Prefer the supplied context; you may use at most two targeted read-only searches when it is insufficient. Never edit files or run commands."#;
 
 /// Keeps `claude` CLI processes alive across turns using its stream-json

@@ -122,6 +122,20 @@ impl PatchNormalizer {
 
 impl PatchValidator {
     pub fn validate_card(card: &Card) -> Result<()> {
+        Self::validate_card_with_limits(
+            card,
+            MAX_PATCH_FILES,
+            MAX_HUNKS_PER_PATCH,
+            MAX_CHANGED_LINES,
+        )
+    }
+
+    pub fn validate_card_with_limits(
+        card: &Card,
+        max_patch_files: usize,
+        max_hunks_per_patch: usize,
+        max_changed_lines: usize,
+    ) -> Result<()> {
         let Card::Patch(card) = card else {
             return Ok(());
         };
@@ -129,21 +143,29 @@ impl PatchValidator {
         if card.patches.is_empty() {
             return Err(anyhow!("patch card has no patches"));
         }
-        if card.patches.len() > MAX_PATCH_FILES {
+        if card.patches.len() > max_patch_files {
             return Err(anyhow!(
-                "patch card changes {} files; maximum is {MAX_PATCH_FILES}",
-                card.patches.len()
+                "patch card changes {} files; maximum is {max_patch_files}",
+                card.patches.len(),
             ));
         }
 
         for patch in &card.patches {
-            Self::validate_file_patch(patch)?;
+            Self::validate_file_patch_with_limits(patch, max_hunks_per_patch, max_changed_lines)?;
         }
 
         Ok(())
     }
 
     pub fn validate_file_patch(patch: &FilePatch) -> Result<()> {
+        Self::validate_file_patch_with_limits(patch, MAX_HUNKS_PER_PATCH, MAX_CHANGED_LINES)
+    }
+
+    fn validate_file_patch_with_limits(
+        patch: &FilePatch,
+        max_hunks_per_patch: usize,
+        max_changed_lines: usize,
+    ) -> Result<()> {
         if patch.id.trim().is_empty() {
             return Err(anyhow!("patch id is empty"));
         }
@@ -157,15 +179,15 @@ impl PatchValidator {
         }
 
         let diff = UnifiedDiff::parse(&patch.diff)?;
-        if diff.hunks.len() > MAX_HUNKS_PER_PATCH {
+        if diff.hunks.len() > max_hunks_per_patch {
             return Err(anyhow!(
-                "patch has {} hunks; maximum is {MAX_HUNKS_PER_PATCH}",
-                diff.hunks.len()
+                "patch has {} hunks; maximum is {max_hunks_per_patch}",
+                diff.hunks.len(),
             ));
         }
 
         for hunk in diff.hunks {
-            validate_hunk_counts(&hunk)?;
+            validate_hunk_counts(&hunk, max_changed_lines)?;
         }
 
         Ok(())
@@ -211,7 +233,7 @@ impl PatchValidator {
     }
 }
 
-fn validate_hunk_counts(hunk: &crate::Hunk) -> Result<()> {
+fn validate_hunk_counts(hunk: &crate::Hunk, max_changed_lines: usize) -> Result<()> {
     let old_count = hunk
         .lines
         .iter()
@@ -235,9 +257,9 @@ fn validate_hunk_counts(hunk: &crate::Hunk) -> Result<()> {
         .iter()
         .filter(|line| matches!(line, DiffLine::Remove(_) | DiffLine::Add(_)))
         .count();
-    if changed_lines > MAX_CHANGED_LINES {
+    if changed_lines > max_changed_lines {
         return Err(anyhow!(
-            "hunk changes {changed_lines} lines; maximum is {MAX_CHANGED_LINES}"
+            "hunk changes {changed_lines} lines; maximum is {max_changed_lines}"
         ));
     }
 
@@ -252,26 +274,7 @@ fn matches_at(source: &[&str], start: usize, expected: &[&str]) -> bool {
 }
 
 fn render_diff(diff: &UnifiedDiff) -> String {
-    let mut output = String::new();
-
-    for hunk in &diff.hunks {
-        output.push_str(&format!(
-            "@@ -{},{} +{},{} @@\n",
-            hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len
-        ));
-        for line in &hunk.lines {
-            let (prefix, text) = match line {
-                DiffLine::Context(text) => (' ', text),
-                DiffLine::Remove(text) => ('-', text),
-                DiffLine::Add(text) => ('+', text),
-            };
-            output.push(prefix);
-            output.push_str(text);
-            output.push('\n');
-        }
-    }
-
-    output
+    diff.render()
 }
 
 fn identifiers_for_lines(
@@ -360,6 +363,40 @@ mod tests {
     }
 
     #[test]
+    fn goal_batch_accepts_a_formatting_hunk_over_the_review_limit() {
+        let mut diff = "@@ -1,20 +1,20 @@\n".to_string();
+        for index in 0..20 {
+            diff.push_str(&format!("-line {index}\n"));
+        }
+        for index in 0..20 {
+            diff.push_str(&format!("+    line {index}\n"));
+        }
+        let card = Card::Patch(pair_protocol::PatchCard {
+            id: "c_format".into(),
+            title: "Format".into(),
+            explanation: "Indent the block.".into(),
+            warnings: vec![],
+            goal_complete: true,
+            patches: vec![FilePatch {
+                id: "p_format".into(),
+                file: PathBuf::from("templates/view.html"),
+                diff,
+                explanation: "Indent the block.".into(),
+            }],
+            actions: vec![pair_protocol::Action::Apply],
+        });
+
+        assert!(PatchValidator::validate_card(&card).is_err());
+        PatchValidator::validate_card_with_limits(
+            &card,
+            1,
+            pair_protocol::MAX_GOAL_HUNKS_PER_PATCH,
+            pair_protocol::MAX_GOAL_CHANGED_LINES,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn rejects_incorrect_hunk_header_counts() {
         let patch = FilePatch {
             id: "p_1".into(),
@@ -394,6 +431,7 @@ mod tests {
             title: "Rename".into(),
             explanation: "Rename the value.".into(),
             warnings: vec![],
+            goal_complete: false,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -428,6 +466,7 @@ mod tests {
             title: "Rename".into(),
             explanation: "Rename the value.".into(),
             warnings: vec![],
+            goal_complete: false,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -461,6 +500,7 @@ mod tests {
             title: "Rename".into(),
             explanation: "Rename the value.".into(),
             warnings: vec![],
+            goal_complete: false,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -501,6 +541,7 @@ mod tests {
             title: "Rename".into(),
             explanation: "Rename the value.".into(),
             warnings: vec![],
+            goal_complete: false,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -534,6 +575,7 @@ mod tests {
             title: "Rename response binding".into(),
             explanation: "Rename response to rpc_response.".into(),
             warnings: vec![],
+            goal_complete: false,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.rs"),
@@ -561,6 +603,7 @@ mod tests {
             title: "Rename response binding".into(),
             explanation: "Rename response to rpc_response.".into(),
             warnings: vec![],
+            goal_complete: false,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.rs"),

@@ -12,6 +12,7 @@
     "location",
     "annotation",
     "explanation",
+    "goal_complete",
     "patches",
     "question",
     "options",
@@ -71,6 +72,9 @@
     },
     "explanation": {
       "type": ["string", "null"]
+    },
+    "goal_complete": {
+      "type": ["boolean", "null"]
     },
     "patches": {
       "type": ["array", "null"],

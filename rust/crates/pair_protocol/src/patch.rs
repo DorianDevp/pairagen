@@ -9,6 +9,8 @@ pub type PatchId = String;
 pub const MAX_PATCH_FILES: usize = 1;
 pub const MAX_HUNKS_PER_PATCH: usize = 1;
 pub const MAX_CHANGED_LINES: usize = 32;
+pub const MAX_GOAL_HUNKS_PER_PATCH: usize = 16;
+pub const MAX_GOAL_CHANGED_LINES: usize = 512;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FilePatch {

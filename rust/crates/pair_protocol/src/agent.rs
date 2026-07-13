@@ -25,6 +25,8 @@ pub enum AgentOp {
     Patch {
         title: String,
         explanation: String,
+        #[serde(default)]
+        goal_complete: Option<bool>,
         patches: Vec<AgentPatch>,
     },
     Choice {
@@ -224,12 +226,14 @@ impl AgentOp {
             Self::Patch {
                 title,
                 explanation,
+                goal_complete,
                 patches,
             } => Card::Patch(PatchCard {
                 id,
                 title,
                 explanation,
                 warnings: vec![],
+                goal_complete: goal_complete.unwrap_or(false),
                 patches: patches
                     .into_iter()
                     .enumerate()

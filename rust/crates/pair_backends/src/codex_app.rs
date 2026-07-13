@@ -59,6 +59,8 @@ struct StructuredPatchOp {
     op: String,
     title: String,
     explanation: String,
+    #[serde(default)]
+    goal_complete: bool,
     patches: Vec<StructuredFilePatch>,
 }
 
@@ -672,13 +674,15 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
     } else if goal_loop {
         format!(
             "- Continue executing the original session goal from the accepted progress; never restart or repeat a completed step.\n\
-             - Inspect the project as needed with targeted read-only tools and decide the next coherent edit yourself.\n\
+             - Inspect the project as needed with targeted read-only tools and prepare the complete change for the supplied buffer in this turn.\n\
              - If the next edit is outside the supplied buffer, return open_location immediately and continue after the editor supplies that buffer.\n\
-             - If the goal is unresolved and the correct buffer is supplied, return exactly one structured patch with one file and one hunk changing at most {} added/removed lines.\n\
+             - If the goal is unresolved and the correct buffer is supplied, return exactly one structured patch with one file, up to {} hunks, and at most {} added/removed lines per hunk. Include every required edit in this buffer; review granularity is handled locally.\n\
+             - Set goal_complete=true when accepting the complete returned patch finishes the original goal. Set it false only when another file or independently inspected stage remains.\n\
              - Return summary only when every requirement in the original goal is satisfied; cite the completed result.\n\
              - Return choice only when a genuine user decision blocks all safe progress.\n\
              - Do not return a finding, an assessment, a plan, or instructions for the user to request another draft.",
-            req.card_contract.max_changed_lines
+            req.card_contract.max_hunks_per_patch,
+            req.card_contract.max_changed_lines,
         )
             .into()
     } else if patch_turn {
@@ -707,7 +711,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
     let output_contract = if goal_question {
         "- finding: concise explanation of the pending hunk"
     } else if goal_loop {
-        "- patch: exactly one structured hunk for the next goal step\n\
+        "- patch: one complete structured patch for local hunk-by-hunk review; include goal_complete\n\
 - open_location: when the next hunk belongs in another buffer\n\
 - choice: only for a blocking user decision\n\
 - summary: only when the complete original goal is satisfied"
@@ -865,6 +869,7 @@ fn parse_structured_patch(output: &str) -> Result<Card> {
         title: op.title,
         explanation: op.explanation,
         warnings: vec![],
+        goal_complete: op.goal_complete,
         patches,
         actions: vec![
             Action::Apply,
@@ -959,6 +964,7 @@ fn any_op_schema() -> Value {
             "location",
             "annotation",
             "explanation",
+            "goal_complete",
             "patches",
             "question",
             "options",
@@ -977,6 +983,7 @@ fn any_op_schema() -> Value {
             "location": nullable_location_schema(),
             "annotation": {"type": ["string", "null"]},
             "explanation": {"type": ["string", "null"]},
+            "goal_complete": {"type": ["boolean", "null"]},
             "patches": {
                 "type": ["array", "null"],
                 "items": object_schema(
@@ -1094,11 +1101,12 @@ fn finding_schema() -> Value {
 
 fn patch_schema(contract: &crate::CardContract) -> Value {
     object_schema(
-        &["op", "title", "explanation", "patches"],
+        &["op", "title", "explanation", "goal_complete", "patches"],
         json!({
             "op": {"type": "string", "enum": ["patch"]},
             "title": {"type": "string"},
             "explanation": {"type": "string"},
+            "goal_complete": {"type": "boolean"},
             "patches": {
                 "type": "array",
                 "minItems": 1,
@@ -1511,6 +1519,7 @@ mod tests {
             "op": "patch",
             "title": "Continue the goal",
             "explanation": "Apply the next accepted requirement.",
+            "goal_complete": true,
             "patches": [{
                 "id": null,
                 "file": "src/main.rs",
@@ -1542,10 +1551,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(matches!(
-            parse_card(&output.to_string(), &contract).unwrap(),
-            Card::Patch(_)
-        ));
+        let Card::Patch(card) = parse_card(&output.to_string(), &contract).unwrap() else {
+            panic!("expected patch card");
+        };
+        assert!(card.goal_complete);
     }
 
     #[test]
@@ -1572,13 +1581,23 @@ mod tests {
 
     #[test]
     fn goal_loop_schema_allows_structured_patch_or_summary() {
-        let schema = goal_loop_schema(&crate::CardContract::default());
+        let contract = crate::CardContract {
+            max_hunks_per_patch: pair_protocol::MAX_GOAL_HUNKS_PER_PATCH,
+            max_changed_lines: pair_protocol::MAX_GOAL_CHANGED_LINES,
+            ..Default::default()
+        };
+        let schema = goal_loop_schema(&contract);
         let ops = schema["properties"]["op"]["enum"].as_array().unwrap();
 
         assert!(ops.contains(&json!("patch")));
         assert!(ops.contains(&json!("summary")));
         assert!(!ops.contains(&json!("finding")));
         assert!(schema["properties"]["patches"]["items"]["properties"]["hunks"].is_object());
+        assert_eq!(
+            schema["properties"]["patches"]["items"]["properties"]["hunks"]["maxItems"],
+            pair_protocol::MAX_GOAL_HUNKS_PER_PATCH
+        );
+        assert!(schema["properties"]["goal_complete"].is_object());
     }
 
     #[test]

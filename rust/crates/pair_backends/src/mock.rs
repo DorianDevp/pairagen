@@ -196,6 +196,7 @@ fn patch_card(req: &BackendRequest) -> Card {
         title: "Guard payload shape".into(),
         explanation: "Ensure the empty branch returns the same payload shape.".into(),
         warnings: vec![],
+        goal_complete: req.card_contract.allow_goal_completion,
         patches: vec![FilePatch {
             id: "p_1".into(),
             file: relative_file(req).into(),

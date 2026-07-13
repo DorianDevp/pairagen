@@ -6,6 +6,10 @@ use crate::patch::{FilePatch, PatchId};
 
 pub type CardId = String;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CardKind {
@@ -125,6 +129,11 @@ pub struct PatchCard {
     pub explanation: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The backend prepared every edit required to finish the current goal.
+    /// The harness may split `patches` into local review cards; only the last
+    /// queued card retains this flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub goal_complete: bool,
     pub patches: Vec<FilePatch>,
     pub actions: Vec<Action>,
 }

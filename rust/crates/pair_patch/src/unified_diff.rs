@@ -63,6 +63,29 @@ impl UnifiedDiff {
 
         Ok(Self { hunks })
     }
+
+    pub fn render(&self) -> String {
+        let mut output = String::new();
+
+        for hunk in &self.hunks {
+            output.push_str(&format!(
+                "@@ -{},{} +{},{} @@\n",
+                hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len
+            ));
+            for line in &hunk.lines {
+                let (prefix, text) = match line {
+                    DiffLine::Context(text) => (' ', text),
+                    DiffLine::Remove(text) => ('-', text),
+                    DiffLine::Add(text) => ('+', text),
+                };
+                output.push(prefix);
+                output.push_str(text);
+                output.push('\n');
+            }
+        }
+
+        output
+    }
 }
 
 fn parse_hunk(line: &str) -> Result<Hunk> {

@@ -10,8 +10,8 @@ use pair_context::ContextOptimizer;
 use pair_patch::{PatchCoherence, PatchNormalizer, PatchValidator};
 use pair_protocol::{
     Action, ActionResult, AgentAttempt, Card, CardKind, ContextBundle, ErrorCard, GoalProgress,
-    Mode, ObservationKind, ObservationProgress, PatchApplyResult, StartSessionParams,
-    StartSessionResult, SummaryCard, TokenUsage,
+    MAX_GOAL_CHANGED_LINES, MAX_GOAL_HUNKS_PER_PATCH, Mode, ObservationKind, ObservationProgress,
+    PatchApplyResult, StartSessionParams, StartSessionResult, SummaryCard, TokenUsage,
 };
 
 use crate::session::Session;
@@ -211,6 +211,12 @@ impl Engine {
             });
         }
 
+        if session.state == SessionState::PatchShown
+            && matches!(action, Action::Retry | Action::EditPrompt)
+        {
+            session.pending_patch_cards.clear();
+        }
+
         let state = session.state.next(&action)?;
         if action == Action::Stop {
             session.state = SessionState::Finished;
@@ -359,6 +365,10 @@ impl Engine {
         let session_id = result.session_id.clone();
 
         if result.accepted {
+            let completes_goal = matches!(
+                session.cards.last(),
+                Some(Card::Patch(card)) if card.goal_complete
+            );
             let completed_steps = completed_patch_steps(session);
             let completed_step_signatures = completed_patch_signatures(session);
             session.completed_steps.extend(completed_steps);
@@ -370,6 +380,27 @@ impl Engine {
             session.goal_status = pair_protocol::GoalStatus::NeedsReview;
             session.next_step = None;
             if session.continuous_goal {
+                if let Some(next) = session.pending_patch_cards.pop_front() {
+                    session.state = SessionState::PatchShown;
+                    session.goal_status = pair_protocol::GoalStatus::Active;
+                    session.next_step = Some(next.explanation.clone());
+                    let card = Card::Patch(next);
+                    session.cards.push(card.clone());
+
+                    return Ok(ActionResult {
+                        session_id,
+                        card,
+                        goal: goal_progress(session),
+                        token_usage: session.token_usage.clone(),
+                        turn_token_usage: TokenUsage::default(),
+                        context_report: session.context.report.clone(),
+                        model: None,
+                        attempts: vec![],
+                    });
+                }
+                if completes_goal {
+                    return Ok(complete_goal_locally(&session_id, session));
+                }
                 return self
                     .goal_turn_taken(
                         &session_id,
@@ -415,6 +446,7 @@ impl Engine {
         }
 
         session.rejected_patches.extend(result.patch_ids.clone());
+        session.pending_patch_cards.clear();
         session.state = SessionState::PatchShown;
 
         if session.continuous_goal {
@@ -496,6 +528,17 @@ impl Engine {
     ) -> BackendRequest {
         let expected_kind = expected_card_kind(session, &action, expected);
 
+        let allow_goal_completion = matches!(expected, NextState::GoalLoop | NextState::GoalWhy);
+        let mut card_contract = CardContract {
+            expected_kind,
+            allow_goal_completion,
+            ..CardContract::default()
+        };
+        if allow_goal_completion && !matches!(expected, NextState::GoalWhy) {
+            card_contract.max_hunks_per_patch = MAX_GOAL_HUNKS_PER_PATCH;
+            card_contract.max_changed_lines = MAX_GOAL_CHANGED_LINES;
+        }
+
         BackendRequest {
             session: SessionSnapshot {
                 id: session.id.clone(),
@@ -513,11 +556,7 @@ impl Engine {
             },
             action,
             context,
-            card_contract: CardContract {
-                expected_kind,
-                allow_goal_completion: matches!(expected, NextState::GoalLoop | NextState::GoalWhy),
-                ..CardContract::default()
-            },
+            card_contract,
         }
     }
 
@@ -806,7 +845,11 @@ impl Engine {
                 if !matches!(next_state, NextState::GoalWhy) {
                     record_observations(session, &received);
                 }
-                received
+                if matches!(next_state, NextState::GoalLoop) {
+                    queue_goal_patch_cards(session, received)?
+                } else {
+                    received
+                }
             }
             Err(error) => rejected_card(session, &received, error, response.raw_output.as_deref()),
         };
@@ -988,6 +1031,48 @@ fn goal_progress(session: &Session) -> GoalProgress {
         known_observations: session.known_observations.clone(),
         status: session.goal_status,
         next_step: session.next_step.clone(),
+    }
+}
+
+fn complete_goal_locally(session_id: &str, session: &mut Session) -> ActionResult {
+    let mut changed_files = session
+        .completed_step_signatures
+        .iter()
+        .map(|(file, _)| file.clone())
+        .collect::<Vec<_>>();
+    changed_files.sort();
+    changed_files.dedup();
+
+    session.state = SessionState::Summary;
+    session.goal_status = pair_protocol::GoalStatus::Complete;
+    session.next_step = None;
+    let card = Card::Summary(SummaryCard {
+        id: session.next_card_id("complete"),
+        title: "Goal complete".into(),
+        summary: format!(
+            "Completed {} reviewed change{} for: {}",
+            session.completed_steps.len(),
+            if session.completed_steps.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            session.original_prompt
+        ),
+        changed_files,
+        next_actions: vec![Action::RunCheck, Action::Stop],
+    });
+    session.cards.push(card.clone());
+
+    ActionResult {
+        session_id: session_id.into(),
+        card,
+        goal: goal_progress(session),
+        token_usage: session.token_usage.clone(),
+        turn_token_usage: TokenUsage::default(),
+        context_report: session.context.report.clone(),
+        model: None,
+        attempts: vec![],
     }
 }
 
@@ -1266,7 +1351,16 @@ fn validate_backend_card(
     }
 
     validate_one_card(card)?;
-    PatchValidator::validate_card(card)?;
+    if matches!(next_state, NextState::GoalLoop) {
+        PatchValidator::validate_card_with_limits(
+            card,
+            1,
+            MAX_GOAL_HUNKS_PER_PATCH,
+            MAX_GOAL_CHANGED_LINES,
+        )?;
+    } else {
+        PatchValidator::validate_card(card)?;
+    }
     validate_patch_target(card, context)?;
     PatchValidator::validate_card_against_context(card, context)?;
     next_state.validate(card)?;
@@ -1472,6 +1566,54 @@ fn completed_patch_steps(session: &Session) -> Vec<String> {
         .collect()
 }
 
+fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Result<Card> {
+    let Card::Patch(card) = card else {
+        session.pending_patch_cards.clear();
+        return Ok(card);
+    };
+
+    let mut cards = Vec::new();
+    for patch in card.patches {
+        let diff = pair_patch::UnifiedDiff::parse(&patch.diff)?;
+        let hunk_count = diff.hunks.len();
+        for (index, hunk) in diff.hunks.into_iter().enumerate() {
+            let last_hunk = index + 1 == hunk_count;
+            let suffix = if hunk_count == 1 {
+                String::new()
+            } else {
+                format!(" ({}/{hunk_count})", index + 1)
+            };
+            let explanation = if hunk_count == 1 {
+                patch.explanation.clone()
+            } else {
+                format!("{} Hunk {}/{}.", patch.explanation, index + 1, hunk_count)
+            };
+            cards.push(pair_protocol::PatchCard {
+                id: format!("{}_h{}", card.id, cards.len() + 1),
+                title: format!("{}{}", card.title, suffix),
+                explanation: explanation.clone(),
+                warnings: card.warnings.clone(),
+                goal_complete: card.goal_complete && last_hunk,
+                patches: vec![pair_protocol::FilePatch {
+                    id: format!("{}_h{}", patch.id, index + 1),
+                    file: patch.file.clone(),
+                    diff: pair_patch::UnifiedDiff { hunks: vec![hunk] }.render(),
+                    explanation,
+                }],
+                actions: card.actions.clone(),
+            });
+        }
+    }
+
+    let mut cards = cards.into_iter();
+    let first = cards
+        .next()
+        .ok_or_else(|| anyhow!("goal patch contains no reviewable hunks"))?;
+    session.pending_patch_cards = cards.collect();
+
+    Ok(Card::Patch(first))
+}
+
 fn completed_patch_signatures(session: &Session) -> Vec<(std::path::PathBuf, String)> {
     let Some(Card::Patch(card)) = session.cards.last() else {
         return vec![];
@@ -1651,7 +1793,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use pair_backends::{
@@ -1707,6 +1849,7 @@ mod tests {
             title: "Extract validation".into(),
             explanation: "Keep validation local.".into(),
             warnings: vec![],
+            goal_complete: false,
             patches: vec![FilePatch {
                 id: "p_repeat".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -1744,47 +1887,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continuous_goal_advances_after_each_accepted_hunk_until_complete() {
-        let backend = Arc::new(MockBackend);
-        let mut engine = Engine::new(backend);
+    async fn continuous_goal_reviews_a_complete_batch_without_more_model_turns() {
+        let backend = Arc::new(BatchGoalBackend::default());
+        let mut engine = Engine::new(backend.clone());
         let mut goal = params();
         goal.mode = Mode::Auto;
+        goal.buffer_text = "first\nmiddle\nlast".into();
         let first = engine.start(goal).await.unwrap();
 
-        assert!(matches!(first.card, Card::Patch(_)));
+        let Card::Patch(first_patch) = &first.card else {
+            panic!("expected first review hunk");
+        };
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
 
         let result = PatchApplyResult {
             session_id: first.session_id,
             card_id: first.card.id().into(),
             accepted: true,
-            patch_ids: vec!["p_1".into()],
+            patch_ids: vec![first_patch.patches[0].id.clone()],
             changed_files: vec![PathBuf::from("src/work.ts")],
             error: None,
-            context: editor_context("payload = payload or {}"),
+            context: editor_context("FIRST\nmiddle\nlast"),
         };
 
         let second = engine.apply_result(result).await.unwrap();
 
         assert!(matches!(second.card, Card::Patch(_)));
-        assert!(second.turn_token_usage.total_tokens > 0);
+        assert_eq!(second.turn_token_usage.total_tokens, 0);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
         assert_eq!(second.goal.status, pair_protocol::GoalStatus::Active);
         assert_eq!(
-            engine.get(&second.session_id).unwrap().completed_steps,
-            vec!["src/work.ts: Keeps body present for callers."]
+            engine
+                .get(&second.session_id)
+                .unwrap()
+                .completed_steps
+                .len(),
+            1
         );
 
+        let Card::Patch(second_patch) = &second.card else {
+            unreachable!();
+        };
         let result = PatchApplyResult {
             session_id: second.session_id,
             card_id: second.card.id().into(),
             accepted: true,
-            patch_ids: vec!["p_1".into()],
+            patch_ids: vec![second_patch.patches[0].id.clone()],
             changed_files: vec![PathBuf::from("src/work.ts")],
             error: None,
-            context: editor_context("payload = payload or { data = {} }"),
+            context: editor_context("FIRST\nmiddle\nLAST"),
         };
         let complete = engine.apply_result(result).await.unwrap();
 
         assert!(matches!(complete.card, Card::Summary(_)));
+        assert_eq!(complete.turn_token_usage.total_tokens, 0);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
         assert_eq!(complete.goal.status, pair_protocol::GoalStatus::Complete);
         assert_eq!(complete.goal.completed_steps.len(), 2);
     }
@@ -1796,11 +1953,14 @@ mod tests {
         let mut goal = params();
         goal.mode = Mode::Auto;
         let first = engine.start(goal).await.unwrap();
+        let Card::Patch(first_patch) = &first.card else {
+            panic!("expected patch card");
+        };
         let result = PatchApplyResult {
             session_id: first.session_id,
             card_id: first.card.id().into(),
             accepted: false,
-            patch_ids: vec!["p_1".into()],
+            patch_ids: vec![first_patch.patches[0].id.clone()],
             changed_files: vec![],
             error: None,
             context: editor_context("placeholder"),
@@ -2185,6 +2345,53 @@ mod tests {
         failed: AtomicBool,
     }
 
+    #[derive(Default)]
+    struct BatchGoalBackend {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl BackendAdapter for BatchGoalBackend {
+        async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(req.card_contract.allow_goal_completion);
+            assert_eq!(
+                req.card_contract.max_hunks_per_patch,
+                MAX_GOAL_HUNKS_PER_PATCH
+            );
+            assert_eq!(req.card_contract.max_changed_lines, MAX_GOAL_CHANGED_LINES);
+
+            Ok(BackendResponse {
+                card: Card::Patch(PatchCard {
+                    id: "c_batch".into(),
+                    title: "Complete local change".into(),
+                    explanation: "Prepare both independent edits.".into(),
+                    warnings: vec![],
+                    goal_complete: true,
+                    patches: vec![FilePatch {
+                        id: "p_batch".into(),
+                        file: "src/work.ts".into(),
+                        diff: "@@ -1,2 +1,2 @@\n-first\n+FIRST\n middle\n@@ -2,2 +2,2 @@\n middle\n-last\n+LAST\n".into(),
+                        explanation: "Updates both required locations.".into(),
+                    }],
+                    actions: vec![Action::Apply, Action::Why, Action::Retry, Action::Stop],
+                }),
+                raw_output: None,
+                metadata: BackendMetadata {
+                    backend: "batch_goal".into(),
+                    model: None,
+                    token_usage: Some(TokenUsage::estimated(100, 20)),
+                    activities: vec![],
+                    attempts: vec![],
+                },
+            })
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            MockBackend::info()
+        }
+    }
+
     struct BadPatchBackend;
 
     #[derive(Default)]
@@ -2349,6 +2556,7 @@ mod tests {
                     title: "Bad patch".into(),
                     explanation: "Invalid patch.".into(),
                     warnings: vec![],
+                    goal_complete: false,
                     patches: vec![FilePatch {
                         id: "p_1".into(),
                         file: "src/work.ts".into(),
@@ -2404,6 +2612,7 @@ mod tests {
                         title: "Invalid first attempt".into(),
                         explanation: "This attempt has stale context.".into(),
                         warnings: vec![],
+                        goal_complete: false,
                         patches: vec![FilePatch {
                             id: "p_1".into(),
                             file: "src/work.ts".into(),
@@ -2420,6 +2629,7 @@ mod tests {
                         title: "Repaired local step".into(),
                         explanation: "Use exact current context.".into(),
                         warnings: vec![],
+                        goal_complete: false,
                         patches: vec![FilePatch {
                             id: "p_1".into(),
                             file: "src/work.ts".into(),
@@ -2710,6 +2920,7 @@ mod tests {
                         title: "Adjust icon size".into(),
                         explanation: "Sets the icon size on the component.".into(),
                         warnings: vec![],
+                        goal_complete: false,
                         patches: vec![FilePatch {
                             id: "p_1".into(),
                             file: req.context.file.clone(),
