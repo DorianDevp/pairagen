@@ -197,6 +197,9 @@ function M.control_lines(card, keys)
     if completed > 0 then
       table.insert(lines, "Done  " .. completed .. " accepted")
     end
+    if state.goal.next_step and state.goal.next_step ~= "" then
+      table.insert(lines, "Now   " .. M.truncate(state.goal.next_step, 52))
+    end
     local network = M.observation_network(state.goal.known_observations or {})
     if network ~= "" then
       table.insert(lines, "Map   " .. network)

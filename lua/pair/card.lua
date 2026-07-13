@@ -150,6 +150,13 @@ function M.goal(lines)
   if completed > 0 then
     table.insert(lines, string.format("Done  %d local step%s", completed, completed == 1 and "" or "s"))
   end
+  if goal.status == "needs_review" then
+    table.insert(lines, "State Needs goal assessment")
+  elseif goal.status == "complete" then
+    table.insert(lines, "State Goal complete")
+  elseif goal.next_step and goal.next_step ~= "" then
+    table.insert(lines, "Now   " .. M.short(goal.next_step, 54))
+  end
   M.observation_network(lines, goal.known_observations or {})
   table.insert(lines, "")
 end

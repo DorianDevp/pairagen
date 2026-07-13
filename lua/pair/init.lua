@@ -79,6 +79,7 @@ function M.start(text, mode, source)
     statement = text,
     completed_steps = {},
     known_observations = {},
+    status = "active",
   }
   state.workspace_hints = context.workspace_hints(text, params.cwd, captured.buf)
   params.hints = context.merge_hints(params.hints, state.workspace_hints)

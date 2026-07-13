@@ -188,6 +188,8 @@ impl Engine {
         let state = session.state.next(&action)?;
         if action == Action::Stop {
             session.state = SessionState::Finished;
+            session.goal_status = pair_protocol::GoalStatus::Stopped;
+            session.next_step = None;
             let card = session.stop_card();
             let token_usage = session.token_usage.clone();
 
@@ -329,6 +331,8 @@ impl Engine {
             session.completed_steps.extend(completed_steps);
             session.accepted_patches.extend(result.patch_ids.clone());
             session.state = SessionState::Summary;
+            session.goal_status = pair_protocol::GoalStatus::NeedsReview;
+            session.next_step = None;
             let changed_files = result.changed_files;
             let summary = if changed_files.is_empty() {
                 "The local patch was applied. Continue only if the goal needs another change."
@@ -669,6 +673,7 @@ impl Engine {
             Err(error) => rejected_card(session, &received, error, response.raw_output.as_deref()),
         };
 
+        update_goal_state(session, &card, &next_state);
         session.state = state_after_card(&card, &next_state);
         session.cards.push(card.clone());
 
@@ -843,6 +848,34 @@ fn goal_progress(session: &Session) -> GoalProgress {
         statement: session.original_prompt.clone(),
         completed_steps: session.completed_steps.clone(),
         known_observations: session.known_observations.clone(),
+        status: session.goal_status,
+        next_step: session.next_step.clone(),
+    }
+}
+
+fn update_goal_state(session: &mut Session, card: &Card, next_state: &NextState) {
+    if !matches!(next_state, NextState::GoalReview) {
+        return;
+    }
+
+    match card {
+        Card::Summary(_) => {
+            session.goal_status = pair_protocol::GoalStatus::Complete;
+            session.next_step = None;
+        }
+        Card::Finding(card) => {
+            session.goal_status = pair_protocol::GoalStatus::Active;
+            session.next_step = Some(card.finding.clone());
+        }
+        Card::Hypothesis(card) => {
+            session.goal_status = pair_protocol::GoalStatus::Active;
+            session.next_step = Some(card.claim.clone());
+        }
+        Card::Choice(_) => {
+            session.goal_status = pair_protocol::GoalStatus::Active;
+            session.next_step = None;
+        }
+        _ => {}
     }
 }
 
@@ -1499,6 +1532,8 @@ mod tests {
         };
         assert!(receipt.next_actions.contains(&Action::Next));
         assert_eq!(applied.turn_token_usage, TokenUsage::default());
+        assert_eq!(applied.goal.status, pair_protocol::GoalStatus::NeedsReview);
+        assert!(applied.goal.next_step.is_none());
         assert_eq!(
             engine.get(&applied.session_id).unwrap().completed_steps,
             vec!["src/work.ts: Keeps body present for callers."]
@@ -1509,6 +1544,11 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(next.card, Card::Finding(_)));
+        assert_eq!(next.goal.status, pair_protocol::GoalStatus::Active);
+        assert_eq!(
+            next.goal.next_step.as_deref(),
+            Some("The payload producer is fixed; inspect the caller that consumes body.data next.")
+        );
     }
 
     #[tokio::test]

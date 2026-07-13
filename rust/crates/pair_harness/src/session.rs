@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use pair_protocol::{
-    Card, CardKind, ContextBundle, ContextPolicy, Cursor, Location, Mode, ObservationProgress,
-    PatchId, Selection, StartSessionParams, TokenUsage,
+    Card, CardKind, ContextBundle, ContextPolicy, Cursor, GoalStatus, Location, Mode,
+    ObservationProgress, PatchId, Selection, StartSessionParams, TokenUsage,
 };
 use uuid::Uuid;
 
@@ -29,6 +29,8 @@ pub struct Session {
     pub opened_locations: Vec<Location>,
     pub constraints: Vec<String>,
     pub completed_steps: Vec<String>,
+    pub goal_status: GoalStatus,
+    pub next_step: Option<String>,
     pub known_observations: Vec<ObservationProgress>,
     pub observation_index: HashMap<String, usize>,
     pub state: SessionState,
@@ -57,6 +59,8 @@ impl Session {
             opened_locations: vec![],
             constraints: vec!["one card only".into(), "patches require user apply".into()],
             completed_steps: vec![],
+            goal_status: GoalStatus::Active,
+            next_step: None,
             known_observations: vec![],
             observation_index: HashMap::new(),
             state: SessionState::Thinking,

@@ -48,11 +48,14 @@ state.goal = {
   statement = long_goal,
   completed_steps = { "first", "second" },
   known_observations = {},
+  status = "active",
+  next_step = "Przenieś model podglądu do rekurencyjnego enuma",
 }
 state.details_expanded = false
 local compact = diff.control_lines(patch_card, config.values.keymaps)
 assert(compact[1]:match("%.%.%.$"))
 assert(table.concat(compact, "\n"):find("Expand details", 1, true))
+assert(table.concat(compact, "\n"):find("Now   Przenieś model", 1, true))
 assert(not table.concat(compact, "\n"):find(long_explanation, 1, true))
 
 state.details_expanded = true
