@@ -67,46 +67,80 @@ impl PatchNormalizer {
         for patch in &mut card.patches {
             let mut diff = UnifiedDiff::parse(&patch.diff)?;
             for hunk in &mut diff.hunks {
-                let expected = hunk
-                    .lines
-                    .iter()
-                    .filter_map(|line| match line {
-                        DiffLine::Context(text) | DiffLine::Remove(text) => Some(text.as_str()),
-                        DiffLine::Add(_) => None,
-                    })
-                    .collect::<Vec<_>>();
-                if expected.is_empty() {
-                    if hunk.old_len == 0 && source.is_empty() {
-                        hunk.old_start = context.buffer_start_line;
-                        hunk.new_start = context.buffer_start_line;
-                        continue;
-                    }
-                    return Err(anyhow!(
-                        "patch hunk without source context can only create an empty file"
-                    ));
-                }
+                // Models routinely miscount the `@@ -a,b +c,d @@` ranges. The
+                // counts are pure functions of the line list, so correct them
+                // instead of failing the contract and forcing a re-draft.
+                recompute_hunk_lengths(hunk);
 
-                let declared = hunk.old_start.checked_sub(context.buffer_start_line);
-                let start = if declared.is_some_and(|start| matches_at(&source, start, &expected)) {
-                    declared.unwrap()
-                } else {
-                    let matches = (0..=source.len().saturating_sub(expected.len()))
-                        .filter(|start| matches_at(&source, *start, &expected))
+                // Locate the hunk in `start`, dropping the borrow of `hunk.lines`
+                // before we canonicalize them below. `None` means an empty-file
+                // create that needs no source anchoring.
+                let start = {
+                    let expected = hunk
+                        .lines
+                        .iter()
+                        .filter_map(|line| match line {
+                            DiffLine::Context(text) | DiffLine::Remove(text) => Some(text.as_str()),
+                            DiffLine::Add(_) => None,
+                        })
                         .collect::<Vec<_>>();
-                    match matches.as_slice() {
-                        [start] => *start,
-                        [] => {
+                    if expected.is_empty() {
+                        if hunk.old_len == 0 && source.is_empty() {
+                            hunk.old_start = context.buffer_start_line;
+                            hunk.new_start = context.buffer_start_line;
+                            None
+                        } else {
                             return Err(anyhow!(
-                                "patch context was not found in the supplied buffer"
+                                "patch hunk without source context can only create an empty file"
                             ));
                         }
-                        _ => {
-                            return Err(anyhow!(
-                                "patch context is ambiguous in the supplied buffer"
-                            ));
-                        }
+                    } else {
+                        let declared = hunk.old_start.checked_sub(context.buffer_start_line);
+                        let located = if declared
+                            .is_some_and(|start| matches_at(&source, start, &expected))
+                        {
+                            declared.unwrap()
+                        } else {
+                            let matches = (0..=source.len().saturating_sub(expected.len()))
+                                .filter(|start| matches_at(&source, *start, &expected))
+                                .collect::<Vec<_>>();
+                            match matches.as_slice() {
+                                [start] => *start,
+                                [] => {
+                                    return Err(anyhow!(
+                                        "patch context was not found in the supplied buffer"
+                                    ));
+                                }
+                                _ => {
+                                    return Err(anyhow!(
+                                        "patch context is ambiguous in the supplied buffer"
+                                    ));
+                                }
+                            }
+                        };
+                        Some(located)
                     }
                 };
+
+                let Some(start) = start else {
+                    continue;
+                };
+
+                // Rewrite context/remove lines to the exact source text so the
+                // diff applies byte-exact downstream even if the model drifted
+                // on whitespace. Added lines are never touched.
+                let mut src_pos = start;
+                for line in &mut hunk.lines {
+                    match line {
+                        DiffLine::Context(text) | DiffLine::Remove(text) => {
+                            if let Some(actual) = source.get(src_pos) {
+                                *text = (*actual).to_string();
+                            }
+                            src_pos += 1;
+                        }
+                        DiffLine::Add(_) => {}
+                    }
+                }
 
                 let corrected_old_start = context.buffer_start_line + start;
                 let delta = hunk.new_start as isize - hunk.old_start as isize;
@@ -119,6 +153,26 @@ impl PatchNormalizer {
 
                 hunk.old_start = corrected_old_start;
                 hunk.new_start = corrected_new_start;
+            }
+            patch.diff = render_diff(&diff);
+        }
+
+        Ok(())
+    }
+
+    /// Correct each hunk's `@@ -a,b +c,d @@` line counts from its actual lines,
+    /// without needing source context. Runs before validation on a raw card so
+    /// a miscounted header (a very common model error) is fixed rather than
+    /// rejected — the counts are fully derivable from the body.
+    pub fn normalize_hunk_headers(card: &mut Card) -> Result<()> {
+        let Card::Patch(card) = card else {
+            return Ok(());
+        };
+
+        for patch in &mut card.patches {
+            let mut diff = UnifiedDiff::parse(&patch.diff)?;
+            for hunk in &mut diff.hunks {
+                recompute_hunk_lengths(hunk);
             }
             patch.diff = render_diff(&diff);
         }
@@ -296,14 +350,28 @@ fn validate_hunk_counts(hunk: &crate::Hunk, max_changed_lines: usize) -> Result<
 }
 
 fn matches_at(source: &[&str], start: usize, expected: &[&str]) -> bool {
-    expected
-        .iter()
-        .enumerate()
-        .all(|(offset, line)| source.get(start + offset).copied() == Some(*line))
+    expected.iter().enumerate().all(|(offset, line)| {
+        source
+            .get(start + offset)
+            .is_some_and(|actual| crate::line_matches(actual, line))
+    })
 }
 
 fn render_diff(diff: &UnifiedDiff) -> String {
     diff.render()
+}
+
+fn recompute_hunk_lengths(hunk: &mut crate::Hunk) {
+    hunk.old_len = hunk
+        .lines
+        .iter()
+        .filter(|line| matches!(line, DiffLine::Context(_) | DiffLine::Remove(_)))
+        .count();
+    hunk.new_len = hunk
+        .lines
+        .iter()
+        .filter(|line| matches!(line, DiffLine::Context(_) | DiffLine::Add(_)))
+        .count();
 }
 
 fn identifiers_for_lines(
@@ -625,6 +693,87 @@ mod tests {
             unreachable!();
         };
         assert!(card.patches[0].diff.starts_with("@@ -50,2 +50,2 @@"));
+    }
+
+    #[test]
+    fn recomputes_miscounted_hunk_headers_instead_of_rejecting() {
+        // Header claims 9,9 but the body is a single-line change. Raw validation
+        // rejects it; after normalizing headers it passes and the header is fixed.
+        let raw = FilePatch {
+            id: "p_1".into(),
+            file: PathBuf::from("src/work.ts"),
+            diff: "@@ -1,9 +1,9 @@\n context\n-old\n+new\n".into(),
+            explanation: "Fix.".into(),
+        };
+        assert!(
+            PatchValidator::validate_file_patch(&raw)
+                .unwrap_err()
+                .to_string()
+                .contains("header counts")
+        );
+
+        let mut card = Card::Patch(loopbiotic_protocol::PatchCard {
+            id: "c_1".into(),
+            title: "Fix".into(),
+            explanation: "Fix.".into(),
+            warnings: vec![],
+            goal_complete: false,
+            patches: vec![raw],
+            actions: vec![loopbiotic_protocol::Action::Apply],
+        });
+
+        PatchNormalizer::normalize_hunk_headers(&mut card).unwrap();
+        PatchValidator::validate_card(&card).unwrap();
+
+        let Card::Patch(card) = card else {
+            unreachable!()
+        };
+        assert!(card.patches[0].diff.starts_with("@@ -1,2 +1,2 @@"));
+    }
+
+    #[test]
+    fn normalizes_a_whitespace_drifted_hunk_to_exact_source() {
+        // Context/remove lines drift on indentation and trailing space; the
+        // normalizer must still locate the hunk and canonicalize it so the
+        // downstream exact-match validator passes.
+        let mut card = Card::Patch(loopbiotic_protocol::PatchCard {
+            id: "c_1".into(),
+            title: "Fix".into(),
+            explanation: "Fix the guard.".into(),
+            warnings: vec![],
+            goal_complete: false,
+            patches: vec![FilePatch {
+                id: "p_1".into(),
+                file: PathBuf::from("src/work.ts"),
+                diff: "@@ -1,2 +1,2 @@\n guard  \n-    old\n+    new\n".into(),
+                explanation: "Fix.".into(),
+            }],
+            actions: vec![loopbiotic_protocol::Action::Apply],
+        });
+        let context = ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from("src/work.ts"),
+            cursor: loopbiotic_protocol::Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: "\tguard\n\told\n".into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        };
+
+        PatchNormalizer::normalize_card(&mut card, &context).unwrap();
+        // The exact-match validator would fail on the original drifted diff;
+        // it passes because normalization rewrote context/remove to the source.
+        PatchValidator::validate_card_against_context(&card, &context).unwrap();
+
+        let Card::Patch(card) = card else {
+            unreachable!()
+        };
+        assert!(card.patches[0].diff.contains(" \tguard"));
+        assert!(card.patches[0].diff.contains("-\told"));
+        assert!(card.patches[0].diff.contains("+    new"));
     }
 
     #[test]

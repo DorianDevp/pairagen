@@ -1,0 +1,17 @@
+{
+  "name": "fulfillment-summary",
+  "prompt": "The fulfillment summary is unreliable and the code currently fails to compile. Once it builds, skus that are genuinely out of stock are never flagged, while skus that are fully in stock get reported as short. On top of that, generating a summary crashes outright whenever an order references a sku that is not in the product catalog.",
+  "entry": "summary.ts",
+  "cursor": { "line": 13, "column": 1 },
+  "mode": "auto",
+  "target_steps": 3,
+  "diagnostics": [
+    {
+      "file": "inventory.ts",
+      "line": 24,
+      "column": 5,
+      "severity": "error",
+      "message": "Object literal may only specify known properties, but 'shortfall' does not exist in type 'StockReport'. Did you mean to write 'shorfall'?"
+    }
+  ]
+}

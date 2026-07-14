@@ -13,7 +13,9 @@ publish = false
 anyhow.workspace = true
 loopbiotic_backends = { path = "../loopbiotic_backends" }
 loopbiotic_harness = { path = "../loopbiotic_harness" }
+loopbiotic_patch = { path = "../loopbiotic_patch" }
 loopbiotic_protocol = { path = "../loopbiotic_protocol" }
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true

@@ -1,0 +1,17 @@
+{
+  "name": "cart-checkout",
+  "prompt": "Checkout totals are consistently wrong. The very first item in a cart never seems to be counted in the total, and any order placed without a discount comes back as NaN instead of a dollar amount. The project also fails to compile.",
+  "entry": "pricing.ts",
+  "cursor": { "line": 16, "column": 1 },
+  "mode": "auto",
+  "target_steps": 1,
+  "diagnostics": [
+    {
+      "file": "pricing.ts",
+      "line": 20,
+      "column": 39,
+      "severity": "error",
+      "message": "Property 'quantiy' does not exist on type 'OrderLine'. Did you mean 'quantity'?"
+    }
+  ]
+}

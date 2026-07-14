@@ -21,6 +21,18 @@ pub enum DiffLine {
     Add(String),
 }
 
+/// True when a source line and a patch context/remove line are equal ignoring
+/// leading and trailing whitespace. Models routinely drift on indentation or
+/// trailing spaces when reproducing context, which used to fail the patch
+/// contract and force an expensive full re-draft. We locate the hunk with this
+/// tolerant comparison and then canonicalize the diff back to the exact source
+/// text, so the applied result is byte-for-byte correct — only the *matching*
+/// is fuzzy, never the output. Interior whitespace differences are still a real
+/// content mismatch and do not match.
+pub fn line_matches(source_line: &str, patch_line: &str) -> bool {
+    source_line.trim() == patch_line.trim()
+}
+
 impl UnifiedDiff {
     pub fn parse(diff: &str) -> Result<Self> {
         let mut hunks = Vec::new();

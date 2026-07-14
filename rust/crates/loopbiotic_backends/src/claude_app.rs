@@ -716,10 +716,33 @@ fn parse_stream_event(value: &Value) -> StreamEvent {
 
 fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
     let usage = value?;
-    let input = usage.get("input_tokens")?.as_u64()? as usize;
-    let output = usage.get("output_tokens")?.as_u64()? as usize;
+    let field = |name: &str| usage.get(name).and_then(Value::as_u64).unwrap_or(0) as usize;
 
-    Some(TokenUsage::reported(input, output))
+    // Claude Code splits input across three counters: `input_tokens` is only the
+    // fresh, uncached slice of the final request, while the (usually dominant)
+    // rest of the context is billed through `cache_creation_input_tokens` and
+    // `cache_read_input_tokens`. Reading `input_tokens` alone under-reported a
+    // tool-heavy turn by an order of magnitude (e.g. 3k of a real 41k input).
+    // The `result` event's usage is cumulative across the whole tool loop, so
+    // summing the three input counters yields the real billed input; the cached
+    // subset is the cache-read portion.
+    let fresh_input = field("input_tokens");
+    let cache_creation = field("cache_creation_input_tokens");
+    let cache_read = field("cache_read_input_tokens");
+    let output = field("output_tokens");
+
+    if fresh_input == 0 && cache_creation == 0 && cache_read == 0 && output == 0 {
+        return None;
+    }
+
+    let input = fresh_input + cache_creation + cache_read;
+    Some(TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: cache_read,
+        output_tokens: output,
+        total_tokens: input + output,
+        estimated: false,
+    })
 }
 
 fn optional_env(name: &str) -> Option<String> {
@@ -777,6 +800,32 @@ mod tests {
         let usage = token_usage.unwrap();
         assert_eq!(usage.input_tokens, 120);
         assert_eq!(usage.output_tokens, 30);
+        assert!(!usage.estimated);
+    }
+
+    #[test]
+    fn usage_counts_cached_and_cache_creation_input() {
+        // A tool-heavy turn: the fresh `input_tokens` is a small slice of the
+        // real billed input, which lives in the two cache counters.
+        let value = json!({
+            "type": "result",
+            "result": "{\"op\":\"finding\",\"title\":\"T\",\"finding\":\"F\"}",
+            "usage": {
+                "input_tokens": 3024,
+                "cache_creation_input_tokens": 20577,
+                "cache_read_input_tokens": 17371,
+                "output_tokens": 152
+            }
+        });
+
+        let StreamEvent::Result { token_usage, .. } = parse_stream_event(&value) else {
+            panic!("expected result event");
+        };
+        let usage = token_usage.unwrap();
+        assert_eq!(usage.input_tokens, 3024 + 20577 + 17371);
+        assert_eq!(usage.cached_input_tokens, 17371);
+        assert_eq!(usage.output_tokens, 152);
+        assert_eq!(usage.total_tokens, 3024 + 20577 + 17371 + 152);
         assert!(!usage.estimated);
     }
 

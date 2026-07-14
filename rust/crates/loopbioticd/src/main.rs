@@ -17,6 +17,8 @@ use loopbiotic_protocol::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+mod token_report;
+
 const OPEN_LOCATION_TIMEOUT: Duration = Duration::from_secs(120);
 const READ_FILE_TIMEOUT: Duration = Duration::from_secs(10);
 static NEXT_EDITOR_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -33,6 +35,9 @@ async fn main() -> Result<()> {
         [cmd, sub] if cmd == "schema" && sub == "card" => print_card_schema(),
         [cmd, sub] if cmd == "dev" && sub == "mock-session" => print_mock_session().await,
         [cmd, sub] if cmd == "dev" && sub == "stdio-agent" => run_stdio_agent(),
+        [cmd, sub, rest @ ..] if cmd == "dev" && sub == "token-report" => {
+            token_report::run(rest).await
+        }
         _ => print_help(),
     }
 }
@@ -228,7 +233,7 @@ async fn request_editor_context(
     }
 }
 
-fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
+pub(crate) fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
     match std::env::var("LOOPBIOTIC_BACKEND").as_deref() {
         Ok("codex_app") | Ok("codex") => Ok(Arc::new(CodexAppBackend::from_env()?)),
         Ok("claude_app") | Ok("claude") => Ok(Arc::new(ClaudeAppBackend::from_env()?)),
@@ -545,6 +550,9 @@ fn print_help() -> Result<()> {
     eprintln!("loopbioticd schema card");
     eprintln!("loopbioticd dev mock-session");
     eprintln!("loopbioticd dev stdio-agent");
+    eprintln!("loopbioticd dev token-report [--fixtures DIR] [--json FILE] [--max-turns N]");
+    eprintln!("loopbioticd dev token-report --render FILE");
+    eprintln!("loopbioticd dev token-report --check BASELINE CURRENT");
 
     Ok(())
 }
