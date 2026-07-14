@@ -121,6 +121,15 @@ function M.geometry(line_count, opts)
   width = math.max(width, 1)
   height = math.max(height, 1)
 
+  if opts.anchor and opts.avoid_anchor_row then
+    local gap = math.max(tonumber(opts.anchor_gap) or 0, 0)
+    local cursor_row = M.clamp((opts.anchor.row or 1) - 1, 0, viewport.height - 1)
+    local room_above = math.max(cursor_row - gap, 0)
+    local room_below = math.max(viewport.height - cursor_row - 1 - gap, 0)
+    local anchored_height = math.max(math.max(room_above, room_below) - border_size, 1)
+    height = math.min(height, anchored_height)
+  end
+
   local default_row = math.floor((viewport.height - height - border_size) / 2)
   local default_col = math.floor((viewport.width - width - border_size) / 2)
   local max_row = math.max(viewport.height - height - border_size, 0)
@@ -129,7 +138,7 @@ function M.geometry(line_count, opts)
   local col = M.number(opts.col)
 
   if opts.anchor then
-    row, col = M.near(opts.anchor, width, height, border_size, viewport)
+    row, col = M.near(opts.anchor, width, height, border_size, viewport, opts.anchor_gap)
   end
 
   return {
@@ -140,16 +149,17 @@ function M.geometry(line_count, opts)
   }
 end
 
-function M.near(anchor, width, height, border_size, viewport)
+function M.near(anchor, width, height, border_size, viewport, gap)
   local cursor_row = M.clamp((anchor.row or 1) - 1, 0, viewport.height - 1)
   local cursor_col = M.clamp((anchor.col or 1) - 1, 0, viewport.width - 1)
   local total_width = width + border_size
   local total_height = height + border_size
-  local row = cursor_row + 1
+  gap = math.max(tonumber(gap) or 0, 0)
+  local row = cursor_row + 1 + gap
   local col = cursor_col + 2
 
   if row + total_height > viewport.height then
-    row = cursor_row - total_height
+    row = cursor_row - total_height - gap
   end
   if col + total_width > viewport.width then
     col = cursor_col - total_width - 1

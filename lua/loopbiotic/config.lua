@@ -77,7 +77,7 @@ M.values = {
     details = "z",
     draft_accept = "<leader>pa",
     draft_reject = "<leader>pd",
-    draft_retry = "<leader>pr",
+    draft_retry = "<leader>pt",
   },
   prompt = {
     border = "rounded",

@@ -6,6 +6,20 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-14
+
+### Added
+
+- Added the Loopbiotic logo, the “WHERE HUMAN IS IN THE LOOP” slogan, and an
+  animated workflow demo to the README.
+
+### Fixed
+
+- Reveal and draft retry no longer share `<leader>pr`; retry now defaults to
+  `<leader>pt`, hidden cards cannot trigger actions, and draft action cards stay
+  one row clear of the proposal cursor. Actions that the current card no longer
+  offers are also ignored, preventing duplicate requests after a session stops.
+
 ## [0.3.1] - 2026-07-14
 
 ### Fixed
