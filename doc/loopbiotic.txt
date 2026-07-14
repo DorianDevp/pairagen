@@ -27,8 +27,14 @@ keeps that exact hunk pending and offers `Back to draft`.
 
 Navigation stays inside the current workspace. A location-bearing card moves
 the cursor to its evidence, while a draft moves it to the first non-blank
-character of the first added line. The action card follows the active tab and
-does not move the cursor back to an older window.
+character of the first added line. Its action card sits above or below that
+line with a one-row gap. The action card follows the active tab and does not
+move the cursor back to an older window. Use `keymaps.go_to` (`<leader>pg` by
+default) to return to the active proposal, `keymaps.resume` (`<leader>pr`) to
+reveal its action card, and `keymaps.draft_retry` (`<leader>pt`) to retry.
+Actions cannot be triggered while the card is hidden.
+Actions that are absent from the current card are also ignored, so repeated
+terminal keypresses do not send another request to a finished session.
 
 Long goals and patch explanations are compact by default. Focus the Loopbiotic card
 and press `z` to expand or collapse the full text. Configure this with

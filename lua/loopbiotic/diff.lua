@@ -181,7 +181,13 @@ function M.controls(card, opts)
   local buf, win = ui.render(state.card_buf, state.card_win, lines, {
     width = width,
     height = height,
-    anchor = ui.buffer_anchor(state.diff_buf, (state.diff_first_row or 0) + 1, 0),
+    anchor = ui.buffer_anchor(
+      state.diff_buf,
+      (state.diff_cursor or { (state.diff_first_row or 0) + 1, 0 })[1],
+      (state.diff_cursor or { 1, 0 })[2]
+    ),
+    anchor_gap = 1,
+    avoid_anchor_row = true,
     enter = opts.enter == true,
     title = " Loopbiotic: Draft ",
   })
@@ -243,7 +249,7 @@ function M.control_lines(card, keys)
     local label = state.details_expanded and "Collapse details" or "Expand details"
     table.insert(lines, string.format("[%s] %s", keys.details or "z", label))
   end
-  table.insert(lines, string.format("[%s] Go to change", keys.go_to))
+  table.insert(lines, string.format("[%s] Back to proposal", keys.go_to))
   table.insert(lines, string.format("[%s] Accept   [%s] Reject", keys.draft_accept, keys.draft_reject))
   table.insert(lines, string.format("[%s] Why this hunk", keys.why or "w"))
   table.insert(lines, string.format("[%s] Retry    edit the draft directly", keys.draft_retry))
@@ -304,6 +310,10 @@ function M.one_line(text)
 end
 
 function M.accept()
+  if not require("loopbiotic").require_actions_visible() then
+    return
+  end
+
   local card = state.card
   local patch = card and (card.patches or {})[1]
   local draft_buf = state.diff_buf
@@ -328,6 +338,10 @@ function M.accept()
 end
 
 function M.reject()
+  if not require("loopbiotic").require_actions_visible() then
+    return
+  end
+
   local card = state.card
   local patch = card and (card.patches or {})[1]
 
@@ -340,8 +354,12 @@ function M.reject()
 end
 
 function M.retry()
+  if not require("loopbiotic").require_actions_visible() then
+    return
+  end
+
   M.restore_source()
-  require("loopbiotic").action("retry")
+  require("loopbiotic").action("retry", { allow_hidden = true })
 end
 
 function M.valid_preview()

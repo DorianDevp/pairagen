@@ -84,6 +84,9 @@ function M.reply_prompt()
 
     return
   end
+  if not M.require_actions_visible() then
+    return
+  end
 
   prompt.reply()
 end
@@ -142,10 +145,18 @@ function M.start(text, mode, source)
   end)
 end
 
-function M.action(action)
+function M.action(action, opts)
+  opts = opts or {}
   if not state.session_id then
     ui.notify("No active session", vim.log.levels.WARN)
 
+    return
+  end
+  if not opts.allow_hidden and not M.require_actions_visible() then
+    return
+  end
+  if not M.action_available(state.card, action) then
+    ui.notify("Action is not available on this Loopbiotic card", vim.log.levels.WARN)
     return
   end
 
@@ -415,7 +426,7 @@ function M.open_and_retry()
 
   ui.close(state.card_win)
   state.card_win = nil
-  M.action("retry")
+  M.action("retry", { allow_hidden = true })
 end
 
 function M.go_to()
@@ -441,6 +452,39 @@ function M.go_to()
   end
 
   ui.notify("No Loopbiotic location to open", vim.log.levels.WARN)
+end
+
+function M.actions_visible()
+  return not state.thinking_request_id
+    and state.card_win
+    and vim.api.nvim_win_is_valid(state.card_win)
+    and vim.api.nvim_win_get_tabpage(state.card_win) == vim.api.nvim_get_current_tabpage()
+end
+
+function M.action_available(active_card, action)
+  if type(active_card) ~= "table" or type(action) ~= "string" then
+    return false
+  end
+
+  for _, available in ipairs(active_card.actions or active_card.next_actions or {}) do
+    if available == action or (action == "apply" and type(available) == "table") then
+      return true
+    end
+  end
+
+  return false
+end
+
+function M.require_actions_visible()
+  if M.actions_visible() then
+    return true
+  end
+
+  ui.notify(
+    "Loopbiotic actions are hidden; " .. tostring(config.values.keymaps.resume) .. " shows them",
+    vim.log.levels.WARN
+  )
+  return false
 end
 
 function M.hide()

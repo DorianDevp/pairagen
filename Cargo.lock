@@ -368,7 +368,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "loopbiotic_backends"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -381,14 +381,14 @@ dependencies = [
 
 [[package]]
 name = "loopbiotic_context"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "loopbiotic_protocol",
 ]
 
 [[package]]
 name = "loopbiotic_harness"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "loopbiotic_patch"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "loopbiotic_protocol",
@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "loopbiotic_protocol"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "loopbioticd"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "loopbiotic_backends",

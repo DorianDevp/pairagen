@@ -15,6 +15,15 @@ require("loopbiotic").setup({
 })
 assert(config.values.backend.prefetch == "off")
 assert(config.values.backend.token_budget == 50000)
+assert(config.values.keymaps.resume ~= config.values.keymaps.draft_retry)
+assert(config.values.keymaps.resume == "<leader>pr")
+assert(config.values.keymaps.draft_retry == "<leader>pt")
+
+local ui = require("loopbiotic.ui")
+local below_row = select(1, ui.near({ row = 5, col = 20 }, 20, 4, 2, { width = 80, height = 20 }, 1))
+local above_row = select(1, ui.near({ row = 18, col = 20 }, 20, 4, 2, { width = 80, height = 20 }, 1))
+assert(below_row == 6)
+assert(above_row == 10)
 
 local legacy_preferences = vim.fn.stdpath("state") .. "/pairagen/preferences.json"
 vim.fn.delete(config.preferences_path())
@@ -113,6 +122,7 @@ local focus_card = {
   kind = "patch",
   title = "Focus inserted text",
   explanation = "Keep the cursor on the change",
+  actions = { "apply", "why", "retry", "stop" },
   patches = {
     {
       id = "focus-patch",
@@ -121,12 +131,44 @@ local focus_card = {
     },
   },
 }
+local loopbiotic = require("loopbiotic")
+assert(loopbiotic.action_available(focus_card, "apply"))
+assert(loopbiotic.action_available(focus_card, "retry"))
+assert(loopbiotic.action_available({ actions = { { apply_patch = { patch_id = "focus-patch" } } } }, "apply"))
+assert(not loopbiotic.action_available(focus_card, "follow"))
+assert(not loopbiotic.action_available({ kind = "summary", next_actions = {} }, "stop"))
+state.session_id = "proposal-session"
 state.card = focus_card
 assert(diff.show(focus_card))
 assert(vim.api.nvim_get_current_buf() == state.diff_buf)
 assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 2, 2 }))
+local proposal_position = vim.fn.screenpos(state.diff_win, state.diff_cursor[1], state.diff_cursor[2] + 1)
+local action_config = vim.api.nvim_win_get_config(state.card_win)
+local action_top = math.floor(ui.number(action_config.row)) + 1
+local action_height = action_config.height + (ui.has_border(action_config.border) and 2 or 0)
+local action_bottom = action_top + action_height - 1
+assert(action_bottom < proposal_position.row - 1 or action_top > proposal_position.row + 1)
+assert(loopbiotic.actions_visible())
+loopbiotic.go_to()
+assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 2, 2 }))
+loopbiotic.hide()
+assert(not loopbiotic.actions_visible())
+local hidden_draft = state.diff_buf
+diff.retry()
+assert(state.diff_buf == hidden_draft)
+assert(diff.valid_preview())
+loopbiotic.resume()
+assert(loopbiotic.actions_visible())
+local proposal_card = state.card
+state.card = { id = "stopped-card", kind = "summary", title = "Stopped", next_actions = {} }
+loopbiotic.action("stop")
+assert(not state.thinking_request_id)
+state.card = proposal_card
+loopbiotic.go_to()
+assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 2, 2 }))
 diff.restore_source()
 assert(vim.api.nvim_get_current_buf() == focus_source)
+state.session_id = nil
 state.card = nil
 vim.api.nvim_buf_delete(focus_source, { force = true })
 local long_goal = "Mam tutaj problem, bo ta pętla nie uwzględnia wszystkich elementów z kolejnych przebiegów"
@@ -164,7 +206,7 @@ state.goal = nil
 state.details_expanded = false
 
 local installer = require("loopbiotic.installer")
-assert(installer.artifact("x86_64-unknown-linux-musl") == "loopbioticd-v0.3.1-x86_64-unknown-linux-musl.tar.gz")
+assert(installer.artifact("x86_64-unknown-linux-musl") == "loopbioticd-v0.3.2-x86_64-unknown-linux-musl.tar.gz")
 
 local log = require("loopbiotic.log")
 local sanitized = log.sanitize({ buffer_text = "secret source", event = "kept" })
