@@ -1,5 +1,12 @@
 local M = {}
 
+-- Two lines match if they are equal ignoring leading/trailing whitespace.
+-- Mirrors the daemon's tolerant patch matching so a hunk whose context drifted
+-- on indentation still applies against the live buffer.
+local function line_matches(a, b)
+  return vim.trim(a or "") == vim.trim(b or "")
+end
+
 function M.patch(file_patch)
   local buf = M.buffer(file_patch.file)
 
@@ -43,12 +50,13 @@ function M.apply_diff(source, diff)
 
   for _, line in ipairs(hunk.lines) do
     if line.kind == "context" then
-      if output[offset + 1] ~= line.text then
+      if not line_matches(output[offset + 1], line.text) then
         error("Patch context changed while applying")
       end
+      -- Keep the buffer's real line, not the model's whitespace-drifted copy.
       offset = offset + 1
     elseif line.kind == "remove" then
-      if output[offset + 1] ~= line.text then
+      if not line_matches(output[offset + 1], line.text) then
         error("Patch context changed while applying")
       end
       table.remove(output, offset + 1)
@@ -132,7 +140,7 @@ end
 
 function M.matches_at(source, start, expected)
   for index, line in ipairs(expected) do
-    if source[start + index] ~= line then
+    if not line_matches(source[start + index], line) then
       return false
     end
   end

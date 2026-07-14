@@ -6,7 +6,31 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-07-13
+## [0.3.1] - 2026-07-14
+
+### Fixed
+
+- Miscounted unified-diff hunk headers (`@@ -a,b +c,d @@` where the line counts
+  disagree with the body) are now recomputed from the actual lines instead of
+  failing the local patch contract. This was the dominant cause of the
+  expensive full-batch `contract_retry` re-draft: models frequently get the
+  range counts wrong even when the change itself is correct, and each rejection
+  re-ran the entire agentic pass, wasting roughly 50–80% of a turn's tokens and
+  doubling its wall-clock time.
+- Patch hunks whose context or removed lines drift on leading/trailing
+  whitespace or indentation are now located with a whitespace-insensitive match
+  and canonicalized back to the exact source text, rather than being rejected.
+- Both fixes live in the shared `loopbiotic_patch` normalizer/applier, so they
+  apply to every backend (Codex, Claude, Ollama, generic, and stdio); the
+  whitespace tolerance is mirrored in the editor's Lua patch applier. Added
+  lines are never altered, and genuine content mismatches and ambiguous
+  relocations are still rejected.
+
+### Changed
+
+- The card window's token line now splits usage into input (with the cached
+  portion in parentheses) and output, and shows an estimated cost per turn and
+  per session using per-model pricing.
 
 ### Changed
 

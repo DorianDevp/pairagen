@@ -281,54 +281,44 @@ function M.tokens(lines)
   end
 
   table.insert(lines, "")
-  local turn_raw = tonumber(usage.total_tokens) or 0
-  local turn_cached = tonumber(usage.cached_input_tokens) or 0
-  local turn_suffix = usage.estimated and " estimated" or ""
-  if turn_cached > 0 then
-    table.insert(lines, string.format(
-      "Turn  %s raw · %s cached · %s non-cached%s",
-      turn_raw,
-      turn_cached,
-      math.max(turn_raw - turn_cached, 0),
-      turn_suffix
-    ))
-  else
-    table.insert(lines, string.format("Turn  %s tokens%s", turn_raw, turn_suffix))
+
+  local pricing = require("loopbiotic.pricing")
+  local model = state.backend_model
+
+  -- One usage row: input (with cached in parentheses) · output · cost.
+  local function usage_line(label, u, estimated)
+    local input = tonumber(u.input_tokens) or 0
+    local cached = tonumber(u.cached_input_tokens) or 0
+    local output = tonumber(u.output_tokens) or 0
+    local text = string.format("%s in %s (%s cached) · out %s", label, input, cached, output)
+    local cost = pricing.format(pricing.cost(u, model))
+    if cost then
+      text = text .. " · " .. cost
+    end
+    if estimated then
+      text = text .. " · est"
+    end
+    table.insert(lines, text)
   end
 
+  usage_line("Turn ", usage, usage.estimated)
+
   local total = state.token_usage
+  if total and (tonumber(total.total_tokens) or 0) ~= (tonumber(usage.total_tokens) or 0) then
+    usage_line("Total", total, total.estimated)
+  end
+
   if total then
     local budget = tonumber(config.values.backend.token_budget) or 0
-    local used = total.total_tokens or 0
-    local cached = tonumber(total.cached_input_tokens) or 0
+    local used = tonumber(total.total_tokens) or 0
     if budget > 0 then
-      if cached > 0 then
-        table.insert(lines, string.format(
-          "Total %s/%s raw · %s cached · %s non-cached",
-          used,
-          budget,
-          cached,
-          math.max(used - cached, 0)
-        ))
-      else
-        table.insert(lines, string.format("Total %s/%s tokens", used, budget))
-      end
+      table.insert(lines, string.format("Budget %s/%s tokens", used, budget))
       if used >= budget then
         table.insert(lines, "Warning Session token budget exceeded")
       end
-    elseif used ~= usage.total_tokens then
-      if cached > 0 then
-        table.insert(lines, string.format(
-          "Total %s raw · %s cached · %s non-cached",
-          used,
-          cached,
-          math.max(used - cached, 0)
-        ))
-      else
-        table.insert(lines, string.format("Total %s tokens", used))
-      end
     end
   end
+
   local report = state.context_report
   if report and report.enabled then
     table.insert(lines, string.format(

@@ -841,6 +841,8 @@ impl Engine {
         }
 
         validate_one_card(candidate)?;
+        // Correct miscounted hunk headers before the count check rejects them.
+        PatchNormalizer::normalize_hunk_headers(candidate)?;
         PatchValidator::validate_card_with_limits(
             candidate,
             MAX_GOAL_PATCH_FILES,

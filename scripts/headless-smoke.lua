@@ -52,15 +52,29 @@ local new_lines = apply.apply_diff({ "" }, "@@ -1,0 +1,2 @@\n+<?php\n+final clas
 assert(new_lines[1] == "<?php")
 assert(new_lines[2] == "final class NewException {}")
 
+-- Whitespace-tolerant apply: context/remove lines drift on indentation and
+-- trailing space, but still match; the buffer's real indentation is preserved.
+local drifted = apply.apply_diff({ "\tguard", "\told" }, "@@ -1,2 +1,2 @@\n guard  \n-    old\n+    new\n")
+assert(drifted[1] == "\tguard")
+assert(drifted[2] == "    new")
+
 local state = require("loopbiotic.state")
 state.turn_token_usage = { total_tokens = 100, input_tokens = 90, cached_input_tokens = 80, output_tokens = 10 }
 state.token_usage = vim.deepcopy(state.turn_token_usage)
+state.backend_model = "claude-opus-4-8"
 local token_lines = {}
 require("loopbiotic.card").tokens(token_lines)
-assert(table.concat(token_lines, "\n"):find("80 cached", 1, true))
-assert(table.concat(token_lines, "\n"):find("20 non-cached", 1, true))
+local token_text = table.concat(token_lines, "\n")
+assert(token_text:find("in 90 (80 cached) · out 10", 1, true))
+-- Billing: 10 fresh input @ $5/1M + 80 cached @ $0.50/1M + 10 output @ $25/1M
+-- = 0.00005 + 0.00004 + 0.00025 = $0.00034, shown as $0.0003 at 4 decimals
+assert(token_text:find("$0.0003", 1, true))
+local pricing = require("loopbiotic.pricing")
+assert(math.abs(pricing.cost(state.turn_token_usage, "claude-opus-4-8") - 0.00034) < 1e-9)
+assert(pricing.cost(state.turn_token_usage, "some-unknown-model") == nil)
 state.turn_token_usage = nil
 state.token_usage = nil
+state.backend_model = nil
 
 local check_buf = vim.fn.bufadd(vim.fn.getcwd() .. "/src/check-test.lua")
 vim.fn.bufload(check_buf)
@@ -150,7 +164,7 @@ state.goal = nil
 state.details_expanded = false
 
 local installer = require("loopbiotic.installer")
-assert(installer.artifact("x86_64-unknown-linux-musl") == "loopbioticd-v0.3.0-x86_64-unknown-linux-musl.tar.gz")
+assert(installer.artifact("x86_64-unknown-linux-musl") == "loopbioticd-v0.3.1-x86_64-unknown-linux-musl.tar.gz")
 
 local log = require("loopbiotic.log")
 local sanitized = log.sanitize({ buffer_text = "secret source", event = "kept" })

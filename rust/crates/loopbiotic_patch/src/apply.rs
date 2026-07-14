@@ -21,8 +21,10 @@ impl PatchApply {
             for line in &hunk.lines {
                 match line {
                     DiffLine::Context(expected) => {
-                        require_line(&source, index, expected)?;
-                        output.push(expected.clone());
+                        // Keep the real source line, not the model's possibly
+                        // whitespace-drifted copy of it.
+                        let actual = require_line(&source, index, expected)?;
+                        output.push(actual);
                         index += 1;
                     }
                     DiffLine::Remove(expected) => {
@@ -70,22 +72,25 @@ fn resolve_start(source: &[String], hunk: &crate::Hunk) -> Result<usize> {
 }
 
 fn matches_at(source: &[String], start: usize, expected: &[&str]) -> bool {
-    expected
-        .iter()
-        .enumerate()
-        .all(|(index, line)| source.get(start + index).map(String::as_str) == Some(*line))
+    expected.iter().enumerate().all(|(index, line)| {
+        source
+            .get(start + index)
+            .is_some_and(|actual| crate::line_matches(actual, line))
+    })
 }
 
-fn require_line(source: &[String], index: usize, expected: &str) -> Result<()> {
+/// Verifies the source line matches (ignoring whitespace) and returns the
+/// actual source text so the applied output preserves the file verbatim.
+fn require_line(source: &[String], index: usize, expected: &str) -> Result<String> {
     let Some(actual) = source.get(index) else {
         return Err(anyhow!("patch exceeds source"));
     };
 
-    if actual != expected {
+    if !crate::line_matches(actual, expected) {
         return Err(anyhow!("patch context mismatch"));
     }
 
-    Ok(())
+    Ok(actual.clone())
 }
 
 #[cfg(test)]
@@ -108,5 +113,18 @@ mod tests {
         let output = PatchApply::apply_to_text("prefix\nbefore\nold\nafter\n", &diff).unwrap();
 
         assert_eq!(output, "prefix\nbefore\nnew\nafter\n");
+    }
+
+    #[test]
+    fn tolerates_whitespace_drift_and_preserves_source_indentation() {
+        // The model reproduced the context with the wrong leading indentation
+        // and a trailing space, but the removed/added intent is unambiguous.
+        let diff =
+            UnifiedDiff::parse("@@ -1,3 +1,3 @@\n  guard  \n-    old\n+    new\n  tail\n").unwrap();
+        let output = PatchApply::apply_to_text("\t\tguard\n\t\told\n\t\ttail\n", &diff).unwrap();
+
+        // Context lines keep the file's real tabs; only the added line is the
+        // model's text.
+        assert_eq!(output, "\t\tguard\n    new\n\t\ttail\n");
     }
 }
