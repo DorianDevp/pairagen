@@ -1,7 +1,14 @@
+<p align="center">
+  <img src="assets/loopbiotic.svg" width="96" alt="Loopbiotic logo">
+</p>
+<p align="center"><strong>WHERE HUMAN IS IN THE LOOP</strong></p>
+
 Repo ready for desloppification. I had fun with vibing this project,
 but because of growing size and complexity it's time take the steer.
 
 # Loopbiotic
+
+![Loopbiotic demo](assets/loopbiotic.gif)
 
 Loopbiotic is an interactive pair-programming stepper for Neovim.
 
@@ -170,11 +177,13 @@ Next editable hunk
 Repeat until completed-goal summary and local diagnostics check
 ```
 
-Cards stay anchored beside the source line and do not take focus. Use `<leader>pg`
-to jump to a finding or the first line of an inline draft, and `<leader>pr` to
-focus the current Loopbiotic card. Long goals and draft explanations stay compact by
-default; press `z` while the card is focused to expand or collapse their full
-text (`keymaps.details` changes this key).
+Cards stay anchored clear of the source line and do not take focus. Use `<leader>pg`
+to jump to a finding or return to the active proposal, and `<leader>pr` to reveal or
+focus the current Loopbiotic card. Draft retry uses `<leader>pt`; actions
+are disabled while their card is hidden or no longer offers them. Long goals
+and draft explanations stay compact by default; press `z` while the card is
+focused to expand or collapse their full text (`keymaps.details` changes this
+key).
 
 For a goal patch, Loopbiotic validates every returned file against its live editor
 buffer, queues the complete batch, and opens each location only when its hunk is
