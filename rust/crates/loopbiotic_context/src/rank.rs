@@ -123,6 +123,7 @@ pub(crate) struct CandidateQuery<'a> {
     pub(crate) terms: &'a [QueryTerm],
     pub(crate) paths: &'a [QueryPath],
     pub(crate) current_file: Option<&'a Path>,
+    pub(crate) cursor_line: usize,
     pub(crate) primary_start_line: usize,
     pub(crate) primary_end_line: usize,
     pub(crate) current_dependencies: &'a [String],
@@ -141,6 +142,7 @@ impl ProjectIndex {
             terms,
             paths,
             current_file,
+            cursor_line,
             primary_start_line,
             primary_end_line,
             current_dependencies,
@@ -241,24 +243,37 @@ impl ProjectIndex {
                     continue;
                 }
                 let line_index = diagnostic.line.saturating_sub(1).min(file.lines.len() - 1);
-                if in_primary(line_index) {
-                    continue;
-                }
                 let severity_bonus = match diagnostic.severity.as_str() {
                     "1" | "error" | "Error" => 30,
                     "2" | "warning" | "Warning" => 15,
                     _ => 0,
                 };
-                let score = 190 + severity_bonus;
+                let cursor_distance = diagnostic.line.abs_diff(cursor_line);
+                let cursor_bonus = if is_current_file {
+                    match cursor_distance {
+                        0..=2 => 80,
+                        3..=10 => 50,
+                        11..=30 => 20,
+                        _ => 0,
+                    }
+                } else {
+                    0
+                };
+                let score = 190 + severity_bonus + cursor_bonus;
                 if best
                     .as_ref()
                     .is_none_or(|(_, best_score, _, _)| score > *best_score)
                 {
+                    let proximity = if cursor_bonus > 0 {
+                        format!(" near cursor ({} line(s) away)", cursor_distance)
+                    } else {
+                        String::new()
+                    };
                     best = Some((
                         line_index,
                         score,
                         ContextArtifactKind::Diagnostic,
-                        format!("diagnostic: {}", diagnostic.message),
+                        format!("diagnostic{proximity}: {}", diagnostic.message),
                     ));
                 }
             }
@@ -700,7 +715,9 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use loopbiotic_protocol::{ContextArtifactKind, ContextHint, ContextHintKind, ContextPolicy};
+    use loopbiotic_protocol::{
+        ContextArtifactKind, ContextHint, ContextHintKind, ContextPolicy, Diagnostic,
+    };
 
     use crate::ContextOptimizer;
     use crate::test_support::context;
@@ -906,6 +923,67 @@ mod tests {
             .expect("remote definition from the current file should be selected");
         assert!(remote.start_line < 20);
         assert!(remote.text.contains("--text-vw-h3--font-weight"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cursor_local_error_outranks_distant_deprecation_in_primary_buffer() {
+        let root = std::env::temp_dir().join(format!(
+            "loopbiotic-context-local-diagnostic-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("static")).unwrap();
+        let mut lines = vec!["// filler"; 300];
+        lines[164] = "document.write(html);";
+        lines[258] = "body = new URLSearchParams(formData);";
+        fs::write(root.join("static/admin.js"), lines.join("\n")).unwrap();
+
+        let mut input = context(&root, &lines[234..270].join("\n"));
+        input.file = PathBuf::from("static/admin.js");
+        input.buffer_start_line = 235;
+        input.cursor.line = 259;
+        input.cursor.column = 16;
+        input.diagnostics = vec![
+            Diagnostic {
+                file: PathBuf::from("static/admin.js"),
+                line: 259,
+                column: 5,
+                severity: "1".into(),
+                message: "Type 'URLSearchParams' is not assignable to type 'FormData'.".into(),
+            },
+            Diagnostic {
+                file: PathBuf::from("static/admin.js"),
+                line: 165,
+                column: 16,
+                severity: "4".into(),
+                message: "The signature of 'document.write' is deprecated.".into(),
+            },
+        ];
+
+        let mut optimizer = ContextOptimizer::default();
+        let optimized =
+            optimizer.optimize(input, "What's wrong with it?", &ContextPolicy::default());
+
+        let diagnostic = optimized
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ContextArtifactKind::Diagnostic)
+            .expect("cursor-local diagnostic should remain explicit context");
+        assert_eq!(diagnostic.start_line, 254);
+        assert!(diagnostic.reason.contains("near cursor"));
+        assert!(diagnostic.reason.contains("URLSearchParams"));
+        assert!(!diagnostic.reason.contains("document.write"));
+        assert_eq!(diagnostic.score, 300);
+        let report = optimized.report.unwrap();
+        assert!(
+            report.candidates.iter().any(|candidate| {
+                candidate.selected
+                    && candidate.kind == ContextArtifactKind::Diagnostic
+                    && candidate.reason.contains("URLSearchParams")
+            }),
+            "telemetry should report the local error as delivered"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

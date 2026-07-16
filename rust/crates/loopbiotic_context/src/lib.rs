@@ -52,6 +52,7 @@ impl ContextOptimizer {
                 terms: &terms,
                 paths: &paths,
                 current_file: current_file.as_deref(),
+                cursor_line: context.cursor.line,
                 primary_start_line: context.buffer_start_line,
                 primary_end_line: context
                     .buffer_start_line

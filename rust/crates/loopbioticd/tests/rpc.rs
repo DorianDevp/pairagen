@@ -519,6 +519,175 @@ fn real_codex_auto_proposal_is_fast_and_non_mutating() {
     );
 }
 
+/// Real-agent regression for cursor intent: an error at the cursor must beat a
+/// distant deprecation in the same file, even though the error's source line is
+/// already present in the primary editor excerpt.
+///
+/// cargo test -p loopbioticd --test rpc \
+///   real_codex_prioritizes_cursor_local_error_over_distant_deprecation -- --ignored --nocapture
+#[test]
+#[ignore = "requires an authenticated real Codex CLI"]
+fn real_codex_prioritizes_cursor_local_error_over_distant_deprecation() {
+    let cwd = std::env::temp_dir().join(format!(
+        "loopbiotic-real-codex-local-diagnostic-{}",
+        std::process::id()
+    ));
+    let source = cwd.join("static/admin.js");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("create fixture");
+    let mut lines = (1..=300)
+        .map(|line| format!("// filler {line}"))
+        .collect::<Vec<_>>();
+    lines[164] = "document.write(html);".into();
+    lines[252] = "const formData = new FormData(form);".into();
+    lines[253] = "let body = formData;".into();
+    lines[258] = "body = new URLSearchParams(formData);".into();
+    lines[262] = "return navigate(form.action, { method: form.method, body });".into();
+    std::fs::write(&source, lines.join("\n")).expect("write fixture");
+    let excerpt = lines[234..270].join("\n");
+
+    let context = json!({
+        "cwd": cwd,
+        "file": "static/admin.js",
+        "cursor": {"line": 259, "column": 16},
+        "selection": null,
+        "buffer_text": excerpt,
+        "buffer_start_line": 235,
+        "diagnostics": [
+            {
+                "file": "static/admin.js",
+                "line": 259,
+                "column": 5,
+                "severity": "1",
+                "message": "Type 'URLSearchParams' is not assignable to type 'FormData'. Types of property 'append' are incompatible."
+            },
+            {
+                "file": "static/admin.js",
+                "line": 165,
+                "column": 16,
+                "severity": "4",
+                "message": "The signature of 'document.write' is deprecated."
+            }
+        ],
+        "hints": []
+    });
+    let params = json!({
+        "cwd": cwd,
+        "file": "static/admin.js",
+        "cursor": {"line": 259, "column": 16},
+        "selection": null,
+        "prompt": "What's wrong with it?",
+        "mode": "auto",
+        "buffer_text": excerpt,
+        "buffer_start_line": 235,
+        "diagnostics": context["diagnostics"],
+        "hints": []
+    });
+
+    let mut daemon = Daemon::spawn_codex();
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+
+    daemon.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "2",
+        "method": "session/start",
+        "params": params,
+    }));
+    let response = daemon.response_for_with_editor_context("2", Duration::from_secs(120), &context);
+    let result = daemon.finish_turn(response, Duration::from_secs(120), Some(&context));
+    assert_conversational(&result, "cursor-local diagnostic");
+
+    let card_text = result["card"].to_string().to_lowercase();
+    let location_line = result["card"]["location"]["line"]
+        .as_u64()
+        .or_else(|| result["card"]["next"]["line"].as_u64())
+        .unwrap_or_default();
+    let input = result["turn_token_usage"]["input_tokens"]
+        .as_u64()
+        .unwrap_or_default();
+    let cached = result["turn_token_usage"]["cached_input_tokens"]
+        .as_u64()
+        .unwrap_or_default();
+    eprintln!(
+        "real Codex local diagnostic: location={location_line} input={input} cached={cached} fresh={}",
+        input.saturating_sub(cached)
+    );
+
+    assert!(
+        card_text.contains("urlsearchparams")
+            || card_text.contains("formdata")
+            || card_text.contains("request body"),
+        "agent missed the cursor-local type error: {result}"
+    );
+    assert!(
+        (250..=265).contains(&location_line),
+        "agent navigated away from the cursor-local error: {result}"
+    );
+    assert!(
+        result["context_report"]["candidates"]
+            .as_array()
+            .is_some_and(|candidates| candidates.iter().any(|candidate| {
+                candidate["selected"] == json!(true)
+                    && candidate["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("URLSearchParams"))
+            })),
+        "optimizer did not deliver the cursor-local diagnostic: {result}"
+    );
+
+    let session_id = result["session_id"].as_str().expect("session id");
+    daemon.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "3",
+        "method": "session/action",
+        "params": {
+            "session_id": session_id,
+            "action": "fix",
+            "context": context,
+        },
+    }));
+    let fix_response =
+        daemon.response_for_with_editor_context("3", Duration::from_secs(120), &context);
+    let fix = daemon.finish_turn(fix_response, Duration::from_secs(120), Some(&context));
+    assert_eq!(
+        fix["card"]["kind"],
+        json!("patch"),
+        "Fix did not draft: {fix}"
+    );
+    let diff = fix["card"]["patches"][0]["diff"]
+        .as_str()
+        .expect("real Codex patch diff");
+    let parsed = UnifiedDiff::parse(diff).expect("real Codex returned parseable diff");
+    assert_eq!(parsed.hunks.len(), 1, "Fix must return one hunk: {diff}");
+    let patch_text = diff.to_lowercase();
+    let fix_input = fix["turn_token_usage"]["input_tokens"]
+        .as_u64()
+        .unwrap_or_default();
+    let fix_cached = fix["turn_token_usage"]["cached_input_tokens"]
+        .as_u64()
+        .unwrap_or_default();
+    eprintln!(
+        "real Codex local fix: old_start={} input={fix_input} cached={fix_cached} fresh={}",
+        parsed.hunks[0].old_start,
+        fix_input.saturating_sub(fix_cached)
+    );
+
+    assert!(
+        (250..=265).contains(&parsed.hunks[0].old_start),
+        "Fix patched away from the cursor-local error: {diff}"
+    );
+    assert!(
+        patch_text.contains("formdata")
+            || patch_text.contains("urlsearchparams")
+            || patch_text.contains("bodyinit"),
+        "Fix ignored the type-error block: {diff}"
+    );
+    assert!(
+        !patch_text.contains("document.write"),
+        "Fix returned to the distant deprecation: {diff}"
+    );
+}
+
 /// Full real-agent product gate: a question and reply stay conversational,
 /// Fix returns one small draft, and accepting it automatically yields a
 /// conversational next card without an intermediate summary.

@@ -576,7 +576,8 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
              - The code must remain type-correct after this hunk. Never change a field type while deferring its producer/initializer to a later card.\n\
              - If a safe step needs unseen references or more changed lines, limit this hunk to self-contained preparation such as adding only the new struct definition.\n\
              - Context and remove lines must be exact, contiguous source lines from the supplied buffer; never omit source lines between two context lines.\n\
-             - Use only the supplied buffer excerpt. Do not inspect the project or use tools.",
+             - Use the supplied buffer excerpt as the only patch source. Diagnostics and ranked context are evidence only; never patch a different file or unseen block.\n\
+             - Do not inspect the project or use tools.",
             req.card_contract.max_changed_lines
         )
     } else if post_accept {
@@ -587,6 +588,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             .into()
     } else {
         "- Find only one useful next move, not a plan for the whole solution.\n\
+         - Treat an editor diagnostic at or nearest the cursor as the strongest direct signal unless the source disproves it; a distant warning or deprecation must not displace a cursor-local error.\n\
          - Inspect the supplied ranked project context first. Use targeted project search only when those fragments are insufficient.\n\
          - Do not stop just because the initial excerpt is indirect or missing.\n\
          - When the user names a destination or consumer such as a template, API, caller, or renderer, prefer that consumer block as the next location before changing its producer.\n\
@@ -611,7 +613,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
 - error: {\"op\":\"error\",\"title\":string,\"message\":string}"
     };
 
-    let ranked_context = if (patch_turn && !goal_loop) || req.context.artifacts.is_empty() {
+    let ranked_context = if req.context.artifacts.is_empty() {
         "none".into()
     } else {
         req.context
@@ -631,19 +633,21 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let diagnostics = editor_diagnostics(req);
 
     let source_context = if include_context {
         format!(
-            "File: {}\nCursor: {}:{}\nBuffer starts at file line: {}\nBuffer excerpt:\n```text\n{}\n```\nRanked project context (read before using tools):\n```text\n{}\n```",
+            "File: {}\nCursor: {}:{}\nEditor diagnostics (nearest current-file diagnostic first):\n```text\n{}\n```\nBuffer starts at file line: {}\nBuffer excerpt:\n```text\n{}\n```\nRanked project context (read before using tools):\n```text\n{}\n```",
             req.context.file.display(),
             req.context.cursor.line,
             req.context.cursor.column,
+            diagnostics,
             req.context.buffer_start_line,
             req.context.buffer_text,
             ranked_context,
         )
     } else {
-        "Source context is unchanged from the preceding turn in this Loopbiotic thread. Reuse that exact buffer and ranked project context.".into()
+        "Source context is unchanged from the preceding turn in this Loopbiotic thread. Reuse those exact diagnostics, buffer, and ranked project context.".into()
     };
 
     // Block order is byte-order for the provider prompt cache: the static
@@ -687,6 +691,45 @@ Last card: {last}
         last = req.session.last_summary.as_deref().unwrap_or("none"),
         source_context = source_context,
     )
+}
+
+fn editor_diagnostics(req: &BackendRequest) -> String {
+    let mut diagnostics = req.context.diagnostics.iter().collect::<Vec<_>>();
+    diagnostics.sort_by_key(|diagnostic| {
+        let same_file = diagnostic.file == req.context.file
+            || diagnostic.file.ends_with(&req.context.file)
+            || req.context.file.ends_with(&diagnostic.file);
+        let distance = if same_file {
+            diagnostic.line.abs_diff(req.context.cursor.line)
+        } else {
+            usize::MAX
+        };
+        let severity = match diagnostic.severity.as_str() {
+            "1" | "error" | "Error" => 0,
+            "2" | "warning" | "Warning" => 1,
+            _ => 2,
+        };
+        (!same_file, distance, severity)
+    });
+
+    if diagnostics.is_empty() {
+        return "none".into();
+    }
+
+    diagnostics
+        .into_iter()
+        .map(|diagnostic| {
+            format!(
+                "- {}:{}:{} [severity {}] {}",
+                diagnostic.file.display(),
+                diagnostic.line,
+                diagnostic.column,
+                diagnostic.severity,
+                diagnostic.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn debug(message: &str) {
@@ -885,6 +928,70 @@ mod tests {
         let repeated = prompt(&request, false);
         assert!(!repeated.contains("unique source payload"));
         assert!(repeated.contains("Source context is unchanged"));
+    }
+
+    #[test]
+    fn prompt_puts_cursor_local_error_before_distant_deprecation() {
+        let mut request = request();
+        request.context.cursor.line = 259;
+        request.context.diagnostics = vec![
+            loopbiotic_protocol::Diagnostic {
+                file: "src/main.rs".into(),
+                line: 165,
+                column: 16,
+                severity: "4".into(),
+                message: "document.write is deprecated".into(),
+            },
+            loopbiotic_protocol::Diagnostic {
+                file: "src/main.rs".into(),
+                line: 259,
+                column: 5,
+                severity: "1".into(),
+                message: "URLSearchParams is not assignable to FormData".into(),
+            },
+        ];
+
+        let rendered = prompt(&request, true);
+        let local = rendered.find("URLSearchParams").unwrap();
+        let distant = rendered.find("document.write").unwrap();
+
+        assert!(local < distant);
+        assert!(rendered.contains("nearest the cursor as the strongest direct signal"));
+    }
+
+    #[test]
+    fn patch_prompt_receives_diagnostics_and_selected_context() {
+        let mut request = request();
+        request.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Patch);
+        request
+            .context
+            .diagnostics
+            .push(loopbiotic_protocol::Diagnostic {
+                file: "src/main.rs".into(),
+                line: 1,
+                column: 1,
+                severity: "1".into(),
+                message: "local type error".into(),
+            });
+        request
+            .context
+            .artifacts
+            .push(loopbiotic_protocol::ContextArtifact {
+                file: "src/main.rs".into(),
+                start_line: 1,
+                end_line: 1,
+                kind: loopbiotic_protocol::ContextArtifactKind::Diagnostic,
+                reason: "diagnostic near cursor: local type error".into(),
+                text: "unique ranked diagnostic source".into(),
+                estimated_tokens: 12,
+                score: 300,
+            });
+
+        let rendered = prompt(&request, true);
+
+        assert!(rendered.contains("local type error"));
+        assert!(rendered.contains("unique ranked diagnostic source"));
+        assert!(rendered.contains("evidence only"));
     }
 
     #[test]

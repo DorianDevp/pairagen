@@ -41,6 +41,10 @@ The project follows [Semantic Versioning](https://semver.org/).
   endings, markdown fences, matching git headers, and unambiguous `./`, `a/`,
   or `b/` path prefixes. Prose, rename/copy metadata, unmatched fences, and
   headers naming another file are rejected instead of being silently dropped.
+- Cursor-local editor errors remain explicit model context even when their
+  source line is already in the primary excerpt. Codex receives the diagnostic
+  text on discovery and patch turns, so a distant warning or deprecation no
+  longer displaces the error beside the cursor.
 - Push CI runs again: the workflow triggered on a nonexistent `main` branch.
 
 ### Changed

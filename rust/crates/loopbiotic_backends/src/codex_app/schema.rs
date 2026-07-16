@@ -32,16 +32,49 @@ pub(super) fn output_schema(req: &BackendRequest) -> Value {
 }
 
 fn conversation_schema() -> Value {
-    let mut schema = any_op_schema();
-    schema["properties"]["op"]["enum"] = json!([
-        "hypothesis",
-        "finding",
-        "choice",
-        "deny",
-        "open_location",
-        "error"
-    ]);
-    schema
+    object_schema(
+        &[
+            "op",
+            "title",
+            "claim",
+            "evidence",
+            "next",
+            "finding",
+            "location",
+            "annotation",
+            "question",
+            "options",
+            "reason",
+            "message",
+        ],
+        json!({
+            "op": {"type": "string", "enum": ["hypothesis", "finding", "choice", "deny", "open_location", "error"]},
+            "title": {"type": "string"},
+            "claim": {"type": ["string", "null"]},
+            "evidence": nullable_location_schema(),
+            "next": nullable_location_schema(),
+            "finding": {"type": ["string", "null"]},
+            "location": nullable_location_schema(),
+            "annotation": {"type": ["string", "null"]},
+            "question": {"type": ["string", "null"]},
+            "options": {
+                "type": ["array", "null"],
+                "items": object_schema(
+                    &["id", "label", "action"],
+                    json!({
+                        "id": {"type": "string"},
+                        "label": {"type": "string"},
+                        "action": {
+                            "type": "string",
+                            "enum": ["follow", "why", "fix", "goal", "other_lead", "retry", "edit_prompt", "open", "run_check", "stop"]
+                        }
+                    })
+                )
+            },
+            "reason": {"type": ["string", "null"]},
+            "message": {"type": ["string", "null"]}
+        }),
+    )
 }
 
 /// Schema for turns without a demanded kind: the agent picks whichever op
@@ -358,6 +391,13 @@ mod tests {
         assert!(ops.contains(&json!("choice")));
         assert!(!ops.contains(&json!("patch")));
         assert!(!ops.contains(&json!("summary")));
+        assert!(schema["properties"].get("patches").is_none());
+        assert!(schema["properties"].get("goal_complete").is_none());
+        assert!(schema["properties"].get("changed_files").is_none());
+        assert!(
+            serde_json::to_string(&schema).unwrap().len()
+                < serde_json::to_string(&any_op_schema()).unwrap().len()
+        );
     }
 
     #[test]
