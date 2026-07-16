@@ -28,12 +28,7 @@ function M.path()
     local ok = pcall(vim.fn.mkdir, directory, "p")
     if ok and vim.fn.isdirectory(directory) == 1 then
       M.prune(directory)
-      session_path = string.format(
-        "%s/%s-%s.jsonl",
-        directory,
-        os.date("%Y%m%dT%H%M%S"),
-        vim.fn.getpid()
-      )
+      session_path = string.format("%s/%s-%s.jsonl", directory, os.date("%Y%m%dT%H%M%S"), vim.fn.getpid())
     else
       session_path = vim.fn.tempname() .. "-loopbiotic.jsonl"
     end

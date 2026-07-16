@@ -29,8 +29,7 @@ function M.target()
 end
 
 function M.version()
-  return (config.values.distribution and config.values.distribution.version)
-    or require("loopbiotic.version").plugin
+  return (config.values.distribution and config.values.distribution.version) or require("loopbiotic.version").plugin
 end
 
 function M.artifact(target)
@@ -76,7 +75,8 @@ function M.resolve(callback)
     end
     return
   end
-  if (not distribution.repository or distribution.repository == "")
+  if
+    (not distribution.repository or distribution.repository == "")
     and (not distribution.base_url or distribution.base_url == "")
   then
     if vim.fn.executable("loopbioticd") == 1 then
@@ -124,12 +124,36 @@ function M.download(target, callback)
   vim.fn.delete(temporary, "rf")
   vim.fn.mkdir(temporary, "p")
 
-  M.run({ "curl", "-fL", "--retry", "2", "-o", checksums, base .. "/checksums.txt" }, function(first)
+  M.run({
+    "curl",
+    "-fL",
+    "--retry",
+    "2",
+    "--connect-timeout",
+    "10",
+    "--max-time",
+    "60",
+    "-o",
+    checksums,
+    base .. "/checksums.txt",
+  }, function(first)
     if first.code ~= 0 then
       callback(nil, "could not download loopbioticd checksums: " .. M.error_text(first))
       return
     end
-    M.run({ "curl", "-fL", "--retry", "2", "-o", archive, base .. "/" .. artifact }, function(second)
+    M.run({
+      "curl",
+      "-fL",
+      "--retry",
+      "2",
+      "--connect-timeout",
+      "10",
+      "--max-time",
+      "300",
+      "-o",
+      archive,
+      base .. "/" .. artifact,
+    }, function(second)
       if second.code ~= 0 then
         callback(nil, "could not download loopbioticd: " .. M.error_text(second))
         return
@@ -150,7 +174,9 @@ function M.download(target, callback)
         end
         local directory = M.install_dir(target)
         vim.fn.mkdir(directory, "p")
-        M.run({ "tar", "-xzf", archive, "-C", directory }, function(extracted)
+        -- Extract only the expected binary so an unexpected archive cannot
+        -- drop other files into the install directory.
+        M.run({ "tar", "-xzf", archive, "-C", directory, "loopbioticd" }, function(extracted)
           vim.fn.delete(temporary, "rf")
           if extracted.code ~= 0 then
             callback(nil, "could not extract loopbioticd: " .. M.error_text(extracted))

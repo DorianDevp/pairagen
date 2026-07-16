@@ -1,5 +1,6 @@
 local config = require("loopbiotic.config")
 local selection = require("loopbiotic.selection")
+local util = require("loopbiotic.util")
 
 local M = {}
 
@@ -101,7 +102,8 @@ function M.lsp_hints(buf, cursor, cwd)
     return {}
   end
 
-  local clients = vim.lsp.get_clients and vim.lsp.get_clients({ bufnr = buf }) or vim.lsp.get_active_clients({ bufnr = buf })
+  local clients = vim.lsp.get_clients and vim.lsp.get_clients({ bufnr = buf })
+    or vim.lsp.get_active_clients({ bufnr = buf })
   local methods = {
     { enabled = options.definition, method = "textDocument/definition", kind = "definition" },
     { enabled = options.declaration, method = "textDocument/declaration", kind = "declaration" },
@@ -154,7 +156,8 @@ function M.workspace_hints(prompt, cwd, buf)
     return {}
   end
 
-  local clients = vim.lsp.get_clients and vim.lsp.get_clients({ bufnr = buf }) or vim.lsp.get_active_clients({ bufnr = buf })
+  local clients = vim.lsp.get_clients and vim.lsp.get_clients({ bufnr = buf })
+    or vim.lsp.get_active_clients({ bufnr = buf })
   local queries = M.workspace_queries(prompt, options.max_workspace_queries or 3)
   local hints = {}
   local seen = {}
@@ -199,7 +202,7 @@ function M.workspace_queries(prompt, limit)
     potem = true,
     rzecz = true,
     struct = true,
-    structów = true,
+    ["structów"] = true,
     template = true,
   }
   local weighted = {}
@@ -260,9 +263,7 @@ function M.add_lsp_locations(hints, seen, result, kind, source, limit, cwd)
     local range = target.targetSelectionRange or target.targetRange or target.range
     if uri and range and range.start then
       local ok, filename = pcall(vim.uri_to_fname, uri)
-      local root = vim.fn.fnamemodify(cwd or vim.fn.getcwd(), ":p"):gsub("/$", "")
-      local absolute = ok and vim.fn.fnamemodify(filename, ":p") or ""
-      if ok and (absolute == root or absolute:sub(1, #root + 1) == root .. "/") then
+      if ok and util.in_workspace(filename, cwd) then
         local file = vim.fn.fnamemodify(filename, ":.")
         local line = range.start.line + 1
         local column = range.start.character + 1
@@ -334,11 +335,9 @@ function M.diagnostics(file, buf)
   local items = {}
   local limit = config.values.context.max_diagnostics
   local buffers = { buf or 0 }
-  local root = vim.fn.fnamemodify(vim.fn.getcwd(), ":p"):gsub("/$", "")
   for _, candidate in ipairs(vim.api.nvim_list_bufs()) do
     local candidate_file = vim.api.nvim_buf_get_name(candidate)
-    local absolute = candidate_file ~= "" and vim.fn.fnamemodify(candidate_file, ":p") or ""
-    local in_project = absolute == root or absolute:sub(1, #root + 1) == root .. "/"
+    local in_project = util.in_workspace(candidate_file)
     if candidate ~= buf and vim.api.nvim_buf_is_loaded(candidate) and in_project then
       table.insert(buffers, candidate)
     end

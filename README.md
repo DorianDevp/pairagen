@@ -40,7 +40,7 @@ Implemented capabilities include:
 - raw, cached, and non-cached session token usage plus a local error log
 - JSON-RPC over stdio
 - Rust session harness
-- continuous goal state machine with local hunk-by-hunk review
+- conversational-first state machine with explicit goals and local hunk review
 - patch gate
 - mock backend
 - generic CLI backend
@@ -159,22 +159,51 @@ restores it on the next Neovim start. A model explicitly configured in
 `setup()` always takes precedence. `:LoopbioticModel default` clears the stored model
 and returns that agent to its own default.
 
+The prompt window title always names the active agent and the concrete model
+the next turn will use, e.g. `codex / gpt-5.4-mini`. Without a configured
+model it shows the model the backend announces during warmup (or reported
+after the last turn), and `model?` until one is known — it never shows
+`default`. The title always names the patch-drafting model; when an agent
+runs discovery on a different model (the shipped Codex agent uses
+`gpt-5.4-mini` at low effort; Claude pins `discovery_model = "haiku"`), that
+is shown separately, e.g.
+`claude-fable-5 · discovery haiku`. Press `<C-l>` (`keymaps.models`) inside
+the prompt to pick a model from every known candidate: the configured model,
+the models the backend enumerates (Ollama's local tags; claude offers its
+stable CLI aliases `sonnet`, `opus`, `haiku`), an optional `models` list on
+the agent definition, and the model reported by the last turn. Picking sets
+the patch model; `discovery_model` stays as configured. The picked model
+persists per agent exactly like `:LoopbioticModel`; the prompt window and its
+typed text stay open.
+
+```lua
+require("loopbiotic").setup({
+  agents = {
+    ["local"] = {
+      kind = "ollama",
+      host = "http://127.0.0.1:11434",
+      models = { "qwen2.5-coder:7b", "llama3.1:8b" }, -- extra picker candidates
+    },
+  },
+  keymaps = {
+    models = "<C-l>", -- model picker inside the prompt window
+  },
+})
+```
+
 ## Flow
 
 ```text
 <leader>a
 Prompt
-Persistent agent goal
-Agent inspects the project and prepares the complete multi-file change
-One local editable hunk
-Edit the inline draft
-Accept, Reject, edit, message, or ask Why
-Why → explanation → Back to the same pending draft
-Accept → advance to the next queued hunk without calling the agent
-Reject → agent automatically reworks the hunk
-Next file opens automatically inside the workspace without calling the agent
-Next editable hunk
-Repeat until completed-goal summary and local diagnostics check
+Conversational answer, finding, or question — never an implicit patch
+Follow up or reply back-to-back
+Draft → one local editable hunk
+Accept → automatic read-only next card, without an intermediate summary
+Reject → stop locally; Retry only when explicitly requested
+Goal → explicitly authorize a sequence of small reviewed hunks
+While a goal hunk is reviewed, only its next small hunk may be prepared
+Repeat until one final goal summary and local diagnostics check
 ```
 
 Cards stay anchored clear of the source line and do not take focus. Use `<leader>pg`
@@ -185,13 +214,19 @@ and draft explanations stay compact by default; press `z` while the card is
 focused to expand or collapse their full text (`keymaps.details` changes this
 key).
 
-For a goal patch, Loopbiotic validates every returned file against its live editor
-buffer, queues the complete batch, and opens each location only when its hunk is
-ready for review. Navigation and acceptance are local operations and do not
-start another model turn. Automatic navigation is restricted to the current
-workspace; edits are still inert drafts until the user accepts each hunk. If
-the agent could not inspect a required file, `open_location` remains a fallback
-that supplies its buffer in a subsequent turn.
+Conversational turns have a 10-second interaction deadline and work turns have
+a 20-second deadline. Crossing it yields a focusable `Working` card instead of
+holding Neovim; the agent continues in the background, and `Cancel` interrupts
+the real backend turn. Slow-turn timing is recorded in the local trace and a
+compact, content-free instruction is injected into the next turn so the agent
+prioritizes an earlier useful response.
+
+For an explicit goal, each backend turn may return at most one file, one
+coherent hunk, and 32 changed lines, plus a plan of the remaining coherent
+steps. The next hunk may be prepared while the current one is reviewed.
+Accepting normally surfaces it immediately; rejecting cancels it and never
+generates a replacement without `Retry`. Automatic navigation stays inside the
+workspace, and every edit remains an inert draft until accepted.
 
 Loopbiotic moves directly to the evidence for a location-bearing card and to the
 first non-blank character of the first added line for a draft, including drafts
@@ -207,27 +242,22 @@ with `/{kind}` to demand a specific card instead — `/hypothesis`, `/finding`,
 Unknown words after `/` are treated as normal prompt text, so paths like
 `/tmp/project` are safe.
 
-The goal and accepted-step count stay visible on cards and editable drafts. In
-the default `auto` mode the agent owns the complete process: it inspects the
-project and prepares the complete change across the required files in one turn.
-Loopbiotic then presents that batch hunk by hunk; `Accept` advances locally without
-another model call, and accepting the final complete hunk closes the goal
-locally. `Reject`, `Retry`, a file the agent could not inspect, or an explicit
-question can return control to the agent. User control is the hunk gate, not a
-repeated discovery/assess/draft ceremony. Asking `Why`
-opens a side conversation about the pending hunk and then returns to that exact
-draft without advancing or replacing it. Explicit
-`/{kind}` prompts and investigate/explain/review modes remain available for
-one-card workflows.
+The goal and accepted-step count stay visible on cards and editable drafts, but
+`auto` is conversational: it never starts goal execution or returns a patch on
+the first turn. Use `Goal` (`<leader>pG` or `:LoopbioticGoal`) to authorize
+persistent execution, and send a normal message at any time to pause it and get
+a conversational answer. Asking `Why` explains the pending hunk and returns to
+that exact draft without advancing or replacing it.
 
 When the goal completes, Loopbiotic automatically checks error-level diagnostics in
 the changed, loaded buffers after a short delay. `Check` repeats the same local
 operation without spending model tokens, saving buffers, or running shell test
 commands.
 
-Speculative patch prefetch is off by default because an unused draft still costs
-a full model turn. Set `backend.prefetch = "fix"` only when that latency/cost
-tradeoff is intentional.
+Ordinary speculation is read-only: by default
+`backend.prefetch = "read_only"` prepares only the conversational card that
+follows an accepted non-goal draft. Set it to `"off"` to disable this. Patch
+speculation is allowed only inside an explicitly active goal.
 
 Cards show raw, cached, and non-cached turn and session usage against
 `backend.token_budget` (50,000 raw tokens by default).
@@ -327,7 +357,7 @@ Choosing `Fix` on a card first moves the source context to the card's
 The patch agent therefore receives the recommended consumer or template instead
 of the file where discovery happened.
 
-The future optional classical-ML ranking design is documented in [`ml.md`](ml.md).
+The future optional classical-ML ranking design is documented in [`doc/ml.md`](doc/ml.md).
 The current implementation does not train or run an ML model.
 
 ## Commands
@@ -336,6 +366,8 @@ The current implementation does not train or run an ML model.
 :Loopbiotic
 :LoopbioticReply
 :LoopbioticFix
+:LoopbioticGoal
+:LoopbioticCancel
 :LoopbioticWhy
 :LoopbioticFollow
 :LoopbioticOther

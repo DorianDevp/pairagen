@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Action, Card, ChoiceCard, ChoiceOption, DenyCard, ErrorCard, FilePatch, FindingCard,
+    Action, Card, ChoiceCard, ChoiceOption, DenyCard, ErrorCard, FilePatch, FindingCard, GoalPlan,
     HypothesisCard, Location, LocationEvidence, NextMove, OpenLocationCard, PatchCard, SummaryCard,
 };
 
@@ -27,6 +27,8 @@ pub enum AgentOp {
         explanation: String,
         #[serde(default)]
         goal_complete: Option<bool>,
+        #[serde(default)]
+        plan: Option<GoalPlan>,
         patches: Vec<AgentPatch>,
     },
     Choice {
@@ -206,6 +208,7 @@ impl AgentOp {
                     Action::Follow,
                     Action::Why,
                     Action::Fix,
+                    Action::Goal,
                     Action::OtherLead,
                     Action::Stop,
                 ],
@@ -225,6 +228,7 @@ impl AgentOp {
                     Action::Open,
                     Action::Why,
                     Action::Fix,
+                    Action::Goal,
                     Action::OtherLead,
                     Action::Stop,
                 ],
@@ -233,6 +237,7 @@ impl AgentOp {
                 title,
                 explanation,
                 goal_complete,
+                plan,
                 patches,
             } => Card::Patch(PatchCard {
                 id,
@@ -240,6 +245,7 @@ impl AgentOp {
                 explanation,
                 warnings: vec![],
                 goal_complete: goal_complete.unwrap_or(false),
+                plan,
                 patches: patches
                     .into_iter()
                     .enumerate()
@@ -310,7 +316,7 @@ impl AgentOp {
                 title,
                 summary,
                 changed_files,
-                next_actions: vec![Action::Next, Action::RunCheck, Action::Stop],
+                next_actions: vec![Action::RunCheck, Action::Stop],
             }),
             Self::Error { title, message } => Card::Error(ErrorCard {
                 id,
@@ -519,6 +525,35 @@ mod tests {
             card.location.file,
             PathBuf::from("src/Exception/OAuth/OAuthAccountNotActiveException.php")
         );
+    }
+
+    #[test]
+    fn maps_patch_op_plan_onto_the_card() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"patch","title":"Slice A","explanation":"First file.","goal_complete":false,"plan":{"remaining":[{"file":"src/caller.ts","summary":"Update the consumer."}],"complete":false},"patches":[{"file":"src/work.ts","diff":"@@ -1,1 +1,1 @@\n-a\n+b\n","explanation":"E"}]}"#,
+        )
+        .unwrap();
+        let card = op.into_card("c_1");
+
+        let Card::Patch(card) = card else {
+            panic!("expected patch card");
+        };
+        let plan = card.plan.expect("plan must survive the op mapping");
+        assert!(!plan.complete);
+        assert_eq!(plan.remaining[0].file, "src/caller.ts");
+    }
+
+    #[test]
+    fn parses_patch_op_without_plan() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"patch","title":"T","explanation":"E","patches":[{"file":"src/work.ts","diff":"@@ -1,1 +1,1 @@\n-a\n+b\n","explanation":"E"}]}"#,
+        )
+        .unwrap();
+
+        let Card::Patch(card) = op.into_card("c_1") else {
+            panic!("expected patch card");
+        };
+        assert_eq!(card.plan, None);
     }
 
     #[test]

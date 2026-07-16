@@ -1,14 +1,50 @@
 local M = {}
 
+---@class LoopbioticBackendConfig
+---@field command string|nil explicit loopbioticd path; nil resolves/installs one
+---@field args string[]
+---@field mode string default prompt mode ("auto", "fix", "explain", ...)
+---@field agent string key into LoopbioticConfig.agents
+---@field prefetch "off"|"read_only" read-only post-accept prefetch
+---@field token_budget integer ask before another turn past this session total; 0 disables
+
+---@class LoopbioticAgentConfig
+---@field kind "mock"|"agent"|"codex_app"|"claude_app"|"ollama"|"generic"
+---@field command? string
+---@field args? string[]
+---@field model? string
+---@field model_flag? string
+---@field models? string[] extra model-picker candidates for this agent
+---@field effort? string codex_app only
+---@field discovery_model? string codex_app/claude_app
+---@field discovery_effort? string codex_app only
+---@field discovery_thinking? integer claude_app only
+---@field host? string ollama only
+---@field keep_alive? string ollama only
+
+---@class LoopbioticConfig
+---@field backend LoopbioticBackendConfig
+---@field distribution { repository?: string, base_url?: string, auto_install?: boolean, version?: string }
+---@field logging { enabled: boolean, include_content: boolean, max_files: integer }
+---@field agents table<string, LoopbioticAgentConfig>
+---@field keymaps table<string, string>
+---@field prompt { border: string, width: integer, height: integer, padding_x: integer, padding_y: integer, zindex: integer }
+---@field card { border: string, max_width: integer, max_height: integer }
+---@field thinking { enabled: boolean, interval: integer }
+---@field context table context capture limits, optimization policy, and LSP hint options
+---@field navigation { open: "current"|"tab"|"split"|"vsplit", annotate: boolean }
+---@field diff { layout: string, apply_to_buffer: boolean, max_changed_lines: integer }
+
+---@type LoopbioticConfig
 M.values = {
   backend = {
     command = nil,
     args = {},
     mode = "auto",
     agent = "mock",
-    -- Speculative prefetch spends a patch turn before the user asks for it.
-    -- Keep it opt-in with "fix"; "off" never starts speculative model work.
-    prefetch = "off",
+    -- Ordinary speculation never drafts code: it prepares only the
+    -- conversational card shown after an accepted local patch.
+    prefetch = "read_only",
     -- Ask before starting another model turn after this session total.
     -- Set to 0 to disable the guard.
     token_budget = 50000,
@@ -30,6 +66,8 @@ M.values = {
       kind = "codex_app",
       command = "codex",
       effort = "low",
+      discovery_model = "gpt-5.4-mini",
+      discovery_effort = "low",
       models = {},
       args = {
         "app-server",
@@ -68,6 +106,8 @@ M.values = {
     follow = "<leader>pf",
     why = "<leader>pw",
     fix = "<leader>px",
+    goal = "<leader>pG",
+    cancel = "<leader>pc",
     other_lead = "<leader>pn",
     stop = "<leader>pq",
     hide = "<leader>ph",
@@ -78,6 +118,8 @@ M.values = {
     draft_accept = "<leader>pa",
     draft_reject = "<leader>pd",
     draft_retry = "<leader>pt",
+    -- Model picker inside the prompt window (buffer-local, insert and normal).
+    models = "<C-l>",
   },
   prompt = {
     border = "rounded",
@@ -302,7 +344,7 @@ end
 function M.backend_env()
   local _, agent = M.agent_config()
   local env = M.agent_env(agent)
-  env.LOOPBIOTIC_PREFETCH = M.values.backend.prefetch or "off"
+  env.LOOPBIOTIC_PREFETCH = M.values.backend.prefetch or "read_only"
 
   return env
 end
@@ -335,6 +377,8 @@ function M.agent_env(agent)
       LOOPBIOTIC_CODEX_ARGS_JSON = vim.json.encode(args),
       LOOPBIOTIC_CODEX_MODEL = agent.model or "",
       LOOPBIOTIC_CODEX_EFFORT = agent.effort or "low",
+      LOOPBIOTIC_CODEX_DISCOVERY_MODEL = agent.discovery_model or "",
+      LOOPBIOTIC_CODEX_DISCOVERY_EFFORT = agent.discovery_effort or "low",
     }
   end
 
@@ -348,9 +392,7 @@ function M.agent_env(agent)
       LOOPBIOTIC_CLAUDE_ARGS_JSON = vim.json.encode(args),
       LOOPBIOTIC_CLAUDE_MODEL = agent.model or "",
       LOOPBIOTIC_CLAUDE_DISCOVERY_MODEL = agent.discovery_model or "",
-      LOOPBIOTIC_CLAUDE_DISCOVERY_THINKING = agent.discovery_thinking
-          and tostring(agent.discovery_thinking)
-        or "",
+      LOOPBIOTIC_CLAUDE_DISCOVERY_THINKING = agent.discovery_thinking and tostring(agent.discovery_thinking) or "",
     }
   end
 

@@ -16,14 +16,20 @@ Loopbiotic presents one hypothesis, finding, or editable patch at a time. It is
 designed for explicit user-controlled pair-programming steps rather than an
 open-ended chat session.
 
-In the default auto mode, one prompt starts a persistent goal loop. The agent
-inspects the project and returns the complete multi-file change as one batch.
-Loopbiotic validates that batch against live editor buffers and presents it one
-hunk at a time. Accepting a hunk advances through the local queue without a new
-model turn; rejecting or retrying returns control to the agent. The loop ends
-only after the complete batch is accepted and local diagnostics are checked.
-Use `keymaps.why` (`<leader>pw` by default) on a draft to ask why; the answer
-keeps that exact hunk pending and offers `Back to draft`.
+The default auto mode is conversational. Its first turn returns an answer,
+finding, hypothesis, or question, never an implicit patch. Use `Fix` for one
+local editable hunk or `Goal` to explicitly authorize a persistent sequence.
+Goal turns remain small: one file, one coherent hunk, at most 32 changed
+lines, plus a plan of the remaining coherent steps. Only an active goal may
+prepare the next patch while the current hunk is reviewed.
+
+Conversation turns yield after 10 seconds and work turns after 20 seconds.
+The focusable `Working` card leaves Neovim usable while the real agent
+continues in the background; `Cancel` interrupts that backend turn. Accepting
+a non-goal draft automatically shows a read-only conversational next card
+without an intermediate summary. Rejecting stays local and never regenerates
+code until `Retry`. Use `keymaps.why` (`<leader>pw`) on a draft to explain the
+same pending hunk and return to it.
 
 Navigation stays inside the current workspace. A location-bearing card moves
 the cursor to its evidence, while a draft moves it to the first non-blank
@@ -43,6 +49,19 @@ and press `z` to expand or collapse the full text. Configure this with
 The session token total is shown against `backend.token_budget` (50000 by
 default). Loopbiotic asks for confirmation before another agent turn after that
 budget is reached. Set it to 0 to disable the guard.
+
+The prompt window title names the active agent and the concrete model the
+next turn will use, falling back to the backend-announced model and then
+`model?` — it never shows `default`. The title always names the
+patch-drafting model; a differing pinned discovery model (the shipped claude
+agent uses `discovery_model = "haiku"` and Codex uses `gpt-5.4-mini` at low
+effort) is shown separately, e.g.
+`claude-fable-5 · discovery haiku`. Press `keymaps.models` (`<C-l>` by
+default) inside the prompt to pick from the known models: the configured
+model, the models the backend enumerates (claude offers the CLI aliases
+`sonnet`, `opus`, `haiku`), the agent's `models` list in `setup()`, and the
+model reported by the last turn. Picking sets the patch model and persists
+per agent like |:LoopbioticModel|, keeping the prompt window and text open.
 
 Loopbiotic has been tested primarily with the Codex CLI app-server backend.
 
@@ -67,6 +86,10 @@ COMMANDS                                                 *loopbiotic-commands*
 :LoopbioticReply             Send a message in the active session.
                                                        *:LoopbioticFix*
 :LoopbioticFix               Request one local editable patch.
+                                                       *:LoopbioticGoal*
+:LoopbioticGoal              Explicitly start or continue the persistent goal.
+                                                       *:LoopbioticCancel*
+:LoopbioticCancel            Interrupt the current Working turn.
                                                        *:LoopbioticFollow*
 :LoopbioticFollow            Follow the current observation.
                                                        *:LoopbioticWhy*
@@ -74,9 +97,9 @@ COMMANDS                                                 *loopbiotic-commands*
                                                        *:LoopbioticOther*
 :LoopbioticOther             Request another lead.
                                                        *:LoopbioticAssess*
-:LoopbioticAssess            Assess the whole goal and locate one unresolved step.
+:LoopbioticAssess            Compatibility alias for |:LoopbioticGoal|.
                                                        *:LoopbioticNext*
-:LoopbioticNext              Compatibility alias for |:LoopbioticAssess|.
+:LoopbioticNext              Compatibility alias for |:LoopbioticGoal|.
                                                        *:LoopbioticStop*
 :LoopbioticStop              Finish the active session.
                                                        *:LoopbioticHide*

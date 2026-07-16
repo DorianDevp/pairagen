@@ -1,11 +1,14 @@
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use loopbiotic_protocol::{
     Card, ContextBundle, FilePatch, MAX_CHANGED_LINES, MAX_HUNKS_PER_PATCH, MAX_PATCH_FILES,
+    ViolationClass,
 };
 
 use crate::unified_diff::{DiffLine, UnifiedDiff};
+use crate::violation::violation;
 
 pub struct PatchValidator;
 pub struct PatchNormalizer;
@@ -63,8 +66,18 @@ impl PatchNormalizer {
             return Ok(());
         };
         let source = context.buffer_text.lines().collect::<Vec<_>>();
+        let expected_file = workspace_relative_file(context);
 
         for patch in &mut card.patches {
+            normalize_patch_file(&mut patch.file, Some(&expected_file));
+            patch.diff = strip_diff_envelope(&patch.diff, &patch.file)?;
+            // Models drafting against an LF buffer sometimes emit CRLF line
+            // endings; drop the mechanical `\r` so added lines match the
+            // buffer's endings. A buffer that itself carries `\r` makes the
+            // intent ambiguous, so it is left for the retry path.
+            if patch.diff.contains('\r') && !context.buffer_text.contains('\r') {
+                patch.diff = patch.diff.replace("\r\n", "\n");
+            }
             let mut diff = UnifiedDiff::parse(&patch.diff)?;
             for hunk in &mut diff.hunks {
                 // Models routinely miscount the `@@ -a,b +c,d @@` ranges. The
@@ -90,8 +103,9 @@ impl PatchNormalizer {
                             hunk.new_start = context.buffer_start_line;
                             None
                         } else {
-                            return Err(anyhow!(
-                                "patch hunk without source context can only create an empty file"
+                            return Err(violation(
+                                ViolationClass::ContextMismatch,
+                                "patch hunk without source context can only create an empty file",
                             ));
                         }
                     } else {
@@ -107,13 +121,15 @@ impl PatchNormalizer {
                             match matches.as_slice() {
                                 [start] => *start,
                                 [] => {
-                                    return Err(anyhow!(
-                                        "patch context was not found in the supplied buffer"
+                                    return Err(violation(
+                                        ViolationClass::ContextMismatch,
+                                        "patch context was not found in the supplied buffer",
                                     ));
                                 }
                                 _ => {
-                                    return Err(anyhow!(
-                                        "patch context is ambiguous in the supplied buffer"
+                                    return Err(violation(
+                                        ViolationClass::ContextMismatch,
+                                        "patch context is ambiguous in the supplied buffer",
                                     ));
                                 }
                             }
@@ -146,9 +162,17 @@ impl PatchNormalizer {
                 let delta = hunk.new_start as isize - hunk.old_start as isize;
                 let corrected_new_start = corrected_old_start
                     .checked_add_signed(delta)
-                    .ok_or_else(|| anyhow!("corrected patch coordinates are outside the file"))?;
+                    .ok_or_else(|| {
+                        violation(
+                            ViolationClass::HunkHeaderMismatch,
+                            "corrected patch coordinates are outside the file",
+                        )
+                    })?;
                 if corrected_new_start == 0 {
-                    return Err(anyhow!("corrected patch coordinates must start at 1"));
+                    return Err(violation(
+                        ViolationClass::HunkHeaderMismatch,
+                        "corrected patch coordinates must start at 1",
+                    ));
                 }
 
                 hunk.old_start = corrected_old_start;
@@ -170,6 +194,10 @@ impl PatchNormalizer {
         };
 
         for patch in &mut card.patches {
+            // No context is available here, so only the always-safe repairs
+            // run: `./` on the target path and the diff envelope.
+            normalize_patch_file(&mut patch.file, None);
+            patch.diff = strip_diff_envelope(&patch.diff, &patch.file)?;
             let mut diff = UnifiedDiff::parse(&patch.diff)?;
             for hunk in &mut diff.hunks {
                 recompute_hunk_lengths(hunk);
@@ -202,12 +230,18 @@ impl PatchValidator {
         };
 
         if card.patches.is_empty() {
-            return Err(anyhow!("patch card has no patches"));
+            return Err(violation(
+                ViolationClass::MissingField,
+                "patch card has no patches",
+            ));
         }
         if card.patches.len() > max_patch_files {
-            return Err(anyhow!(
-                "patch card changes {} files; maximum is {max_patch_files}",
-                card.patches.len(),
+            return Err(violation(
+                ViolationClass::MultiHunk,
+                format!(
+                    "patch card changes {} files; maximum is {max_patch_files}",
+                    card.patches.len(),
+                ),
             ));
         }
 
@@ -228,22 +262,31 @@ impl PatchValidator {
         max_changed_lines: usize,
     ) -> Result<()> {
         if patch.id.trim().is_empty() {
-            return Err(anyhow!("patch id is empty"));
+            return Err(violation(ViolationClass::MissingField, "patch id is empty"));
         }
 
         if patch.file.as_os_str().is_empty() {
-            return Err(anyhow!("patch file is empty"));
+            return Err(violation(
+                ViolationClass::MissingField,
+                "patch file is empty",
+            ));
         }
 
         if patch.file.is_absolute() {
-            return Err(anyhow!("patch file must be relative"));
+            return Err(violation(
+                ViolationClass::WrongFile,
+                "patch file must be relative",
+            ));
         }
 
         let diff = UnifiedDiff::parse(&patch.diff)?;
         if diff.hunks.len() > max_hunks_per_patch {
-            return Err(anyhow!(
-                "patch has {} hunks; maximum is {max_hunks_per_patch}",
-                diff.hunks.len(),
+            return Err(violation(
+                ViolationClass::MultiHunk,
+                format!(
+                    "patch has {} hunks; maximum is {max_hunks_per_patch}",
+                    diff.hunks.len(),
+                ),
             ));
         }
 
@@ -267,7 +310,10 @@ impl PatchValidator {
                     .old_start
                     .checked_sub(context.buffer_start_line)
                     .ok_or_else(|| {
-                        anyhow!("patch hunk starts before the supplied buffer excerpt")
+                        violation(
+                            ViolationClass::ContextMismatch,
+                            "patch hunk starts before the supplied buffer excerpt",
+                        )
                     })?;
                 let expected = hunk
                     .lines
@@ -282,21 +328,28 @@ impl PatchValidator {
                     if hunk.old_len == 0 && source.is_empty() && start == 0 {
                         continue;
                     }
-                    return Err(anyhow!(
-                        "patch hunk without source context can only create an empty file"
+                    return Err(violation(
+                        ViolationClass::ContextMismatch,
+                        "patch hunk without source context can only create an empty file",
                     ));
                 }
 
                 for (offset, expected) in expected.into_iter().enumerate() {
                     let line = context.buffer_start_line + start + offset;
                     let actual = source.get(start + offset).copied().ok_or_else(|| {
-                        anyhow!(
-                            "patch source context at line {line} is outside the supplied buffer"
+                        violation(
+                            ViolationClass::ContextMismatch,
+                            format!(
+                                "patch source context at line {line} is outside the supplied buffer"
+                            ),
                         )
                     })?;
                     if actual != expected {
-                        return Err(anyhow!(
-                            "patch source context mismatch at line {line}: expected {expected:?}, got {actual:?}"
+                        return Err(violation(
+                            ViolationClass::ContextMismatch,
+                            format!(
+                                "patch source context mismatch at line {line}: expected {expected:?}, got {actual:?}"
+                            ),
                         ));
                     }
                 }
@@ -321,18 +374,27 @@ fn validate_hunk_counts(hunk: &crate::Hunk, max_changed_lines: usize) -> Result<
 
     if old_count == 0 {
         if hunk.old_len != 0 {
-            return Err(anyhow!("hunk has no source context"));
+            return Err(violation(
+                ViolationClass::HunkHeaderMismatch,
+                "hunk has no source context",
+            ));
         }
         if !hunk
             .lines
             .iter()
             .any(|line| matches!(line, DiffLine::Add(_)))
         {
-            return Err(anyhow!("new-file hunk has no added lines"));
+            return Err(violation(
+                ViolationClass::MalformedDiff,
+                "new-file hunk has no added lines",
+            ));
         }
     }
     if old_count != hunk.old_len || new_count != hunk.new_len {
-        return Err(anyhow!("hunk header counts do not match its lines"));
+        return Err(violation(
+            ViolationClass::HunkHeaderMismatch,
+            "hunk header counts do not match its lines",
+        ));
     }
 
     let changed_lines = hunk
@@ -341,8 +403,9 @@ fn validate_hunk_counts(hunk: &crate::Hunk, max_changed_lines: usize) -> Result<
         .filter(|line| matches!(line, DiffLine::Remove(_) | DiffLine::Add(_)))
         .count();
     if changed_lines > max_changed_lines {
-        return Err(anyhow!(
-            "hunk changes {changed_lines} lines; maximum is {max_changed_lines}"
+        return Err(violation(
+            ViolationClass::MultiHunk,
+            format!("hunk changes {changed_lines} lines; maximum is {max_changed_lines}"),
         ));
     }
 
@@ -359,6 +422,170 @@ fn matches_at(source: &[&str], start: usize, expected: &[&str]) -> bool {
 
 fn render_diff(diff: &UnifiedDiff) -> String {
     diff.render()
+}
+
+/// The workspace-relative form of the context's file — the form patch cards
+/// are required to target.
+fn workspace_relative_file(context: &ContextBundle) -> PathBuf {
+    if context.file.is_absolute() {
+        context
+            .file
+            .strip_prefix(&context.cwd)
+            .unwrap_or(&context.file)
+            .to_path_buf()
+    } else {
+        context.file.clone()
+    }
+}
+
+/// Repairs mechanical prefixes on a patch target path. A leading `./` is an
+/// identity and always dropped; git's `a/`/`b/` prefixes are only dropped
+/// when the stripped path is exactly the expected workspace-relative target,
+/// since a project may genuinely contain an `a/` or `b/` directory.
+fn normalize_patch_file(file: &mut PathBuf, expected: Option<&Path>) {
+    if let Ok(stripped) = file.strip_prefix("./")
+        && !stripped.as_os_str().is_empty()
+    {
+        *file = stripped.to_path_buf();
+    }
+    if let Some(expected) = expected
+        && file != expected
+        && let Some(stripped) = strip_diff_path_prefix(file)
+        && stripped == expected
+    {
+        *file = stripped;
+    }
+}
+
+/// Returns the path without git's mechanical `a/` or `b/` diff prefix, or
+/// `None` when it carries no such prefix.
+pub fn strip_diff_path_prefix(file: &Path) -> Option<PathBuf> {
+    ["a", "b"].iter().find_map(|prefix| {
+        file.strip_prefix(prefix)
+            .ok()
+            .filter(|stripped| !stripped.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    })
+}
+
+/// Strips a mechanical model-added envelope from a diff: markdown code fences
+/// wrapping it, and a leading git-style header block whose paths already name
+/// `file` (modulo `a/`, `b/`, and `./` prefixes) or `/dev/null`. Anything
+/// else before the first hunk — prose, headers naming another file,
+/// rename/copy headers — is rejected so it cannot be silently discarded by a
+/// parser or applied to the wrong target.
+fn strip_diff_envelope(diff: &str, file: &Path) -> Result<String> {
+    let lines = diff.lines().collect::<Vec<_>>();
+    let mut start = 0;
+    let mut end = lines.len();
+
+    while start < end && lines[start].trim().is_empty() {
+        start += 1;
+    }
+    while end > start && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+
+    let has_opening_fence = start < end && is_code_fence(lines[start]);
+    let has_closing_fence = end > start && lines[end - 1].trim() == "```";
+    match (has_opening_fence, has_closing_fence) {
+        (true, true) => {
+            start += 1;
+            end -= 1;
+        }
+        (false, false) => {}
+        _ => {
+            return Err(violation(
+                ViolationClass::MalformedDiff,
+                "diff has an unmatched markdown code fence",
+            ));
+        }
+    }
+
+    while start < end && lines[start].trim().is_empty() {
+        start += 1;
+    }
+    while end > start && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+
+    // A leading git header block, verified line by line.
+    while start < end && !lines[start].starts_with("@@") {
+        let Some(paths) = header_line_paths(lines[start]) else {
+            return Err(violation(
+                ViolationClass::MalformedDiff,
+                format!(
+                    "unexpected content before first diff hunk: {}",
+                    lines[start]
+                ),
+            ));
+        };
+        if !paths.iter().all(|path| header_path_matches(path, file)) {
+            return Err(violation(
+                ViolationClass::WrongFile,
+                format!(
+                    "diff header targets a different file than {}",
+                    file.display()
+                ),
+            ));
+        }
+        start += 1;
+    }
+
+    if !lines.get(start).is_some_and(|line| line.starts_with("@@")) {
+        return Err(violation(
+            ViolationClass::MalformedDiff,
+            "diff has no hunks",
+        ));
+    }
+
+    let mut body = lines[start..end].join("\n");
+    body.push('\n');
+    Ok(body)
+}
+
+fn is_code_fence(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("```")
+        .is_some_and(|language| language.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// Recognizes one line of a git-style diff header, returning the paths it
+/// names (empty when it names none). `None` means the line is not a purely
+/// mechanical header — rename/copy headers carry intent and are not stripped.
+fn header_line_paths(line: &str) -> Option<Vec<&str>> {
+    if let Some(rest) = line.strip_prefix("diff --git ") {
+        return Some(rest.split_whitespace().collect());
+    }
+    if let Some(rest) = line
+        .strip_prefix("--- ")
+        .or_else(|| line.strip_prefix("+++ "))
+    {
+        // The classic format may append a tab-separated timestamp.
+        return Some(vec![rest.split('\t').next().unwrap_or(rest).trim()]);
+    }
+
+    const PATHLESS: &[&str] = &[
+        "index ",
+        "new file mode ",
+        "deleted file mode ",
+        "old mode ",
+        "new mode ",
+    ];
+    PATHLESS
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+        .then(Vec::new)
+}
+
+fn header_path_matches(path: &str, file: &Path) -> bool {
+    if path == "/dev/null" {
+        return true;
+    }
+    let path = Path::new(path);
+    let path = path.strip_prefix("./").unwrap_or(path);
+
+    path == file || strip_diff_path_prefix(path).is_some_and(|stripped| stripped == file)
 }
 
 fn recompute_hunk_lengths(hunk: &mut crate::Hunk) {
@@ -460,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_batch_accepts_a_formatting_hunk_over_the_review_limit() {
+    fn work_turns_do_not_bypass_the_review_limit() {
         let mut diff = "@@ -1,20 +1,20 @@\n".to_string();
         for index in 0..20 {
             diff.push_str(&format!("-line {index}\n"));
@@ -474,6 +701,7 @@ mod tests {
             explanation: "Indent the block.".into(),
             warnings: vec![],
             goal_complete: true,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_format".into(),
                 file: PathBuf::from("templates/view.html"),
@@ -484,13 +712,6 @@ mod tests {
         });
 
         assert!(PatchValidator::validate_card(&card).is_err());
-        PatchValidator::validate_card_with_limits(
-            &card,
-            1,
-            loopbiotic_protocol::MAX_GOAL_HUNKS_PER_PATCH,
-            loopbiotic_protocol::MAX_GOAL_CHANGED_LINES,
-        )
-        .unwrap();
     }
 
     #[test]
@@ -527,6 +748,7 @@ mod tests {
             explanation: "Add the missing exception type.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_new".into(),
                 file: PathBuf::from("src/Exception/NewException.php"),
@@ -560,6 +782,7 @@ mod tests {
             explanation: "Insert without an anchor.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_insert".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -593,6 +816,7 @@ mod tests {
             explanation: "Rename the value.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -628,6 +852,7 @@ mod tests {
             explanation: "Rename the value.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -662,6 +887,7 @@ mod tests {
             explanation: "Rename the value.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -718,6 +944,7 @@ mod tests {
             explanation: "Fix.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![raw],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
@@ -742,6 +969,7 @@ mod tests {
             explanation: "Fix the guard.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -784,6 +1012,7 @@ mod tests {
             explanation: "Rename the value.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -810,6 +1039,244 @@ mod tests {
         assert!(error.to_string().contains("ambiguous"));
     }
 
+    fn patch_card(patch: FilePatch) -> Card {
+        Card::Patch(loopbiotic_protocol::PatchCard {
+            id: "c_1".into(),
+            title: "Fix".into(),
+            explanation: "Fix.".into(),
+            warnings: vec![],
+            goal_complete: false,
+            plan: None,
+            patches: vec![patch],
+            actions: vec![loopbiotic_protocol::Action::Apply],
+        })
+    }
+
+    fn file_patch(file: &str, diff: &str) -> FilePatch {
+        FilePatch {
+            id: "p_1".into(),
+            file: PathBuf::from(file),
+            diff: diff.into(),
+            explanation: "Fix.".into(),
+        }
+    }
+
+    fn context(file: &str, buffer_text: &str) -> ContextBundle {
+        ContextBundle {
+            cwd: PathBuf::from("/tmp/project"),
+            file: PathBuf::from(file),
+            cursor: loopbiotic_protocol::Cursor { line: 1, column: 1 },
+            selection: None,
+            buffer_text: buffer_text.into(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            artifacts: vec![],
+            report: None,
+        }
+    }
+
+    fn normalized_diff(card: Card) -> String {
+        let Card::Patch(card) = card else {
+            unreachable!()
+        };
+        card.patches[0].diff.clone()
+    }
+
+    const HUNK: &str = "@@ -1,1 +1,1 @@\n-old\n+new\n";
+
+    #[test]
+    fn envelope_passes_a_plain_diff_through_untouched() {
+        let mut card = patch_card(file_patch("src/work.ts", HUNK));
+
+        PatchNormalizer::normalize_hunk_headers(&mut card).unwrap();
+
+        assert_eq!(normalized_diff(card), HUNK);
+    }
+
+    #[test]
+    fn envelope_strips_markdown_fences_around_the_diff() {
+        for wrapped in [
+            format!("```\n{HUNK}```\n"),
+            format!("```diff\n{HUNK}```"),
+            format!("```diff\n{HUNK}```\n\n"),
+        ] {
+            let mut card = patch_card(file_patch("src/work.ts", &wrapped));
+
+            PatchNormalizer::normalize_hunk_headers(&mut card).unwrap();
+
+            assert_eq!(normalized_diff(card), HUNK, "input: {wrapped:?}");
+        }
+    }
+
+    #[test]
+    fn envelope_strips_a_git_header_block_naming_the_target_file() {
+        let wrapped = format!(
+            "diff --git a/src/work.ts b/src/work.ts\nindex 1111111..2222222 100644\n--- a/src/work.ts\n+++ b/src/work.ts\n{HUNK}"
+        );
+        let mut card = patch_card(file_patch("src/work.ts", &wrapped));
+
+        PatchNormalizer::normalize_hunk_headers(&mut card).unwrap();
+
+        assert_eq!(normalized_diff(card), HUNK);
+    }
+
+    #[test]
+    fn envelope_strips_a_new_file_header_with_dev_null_source() {
+        let wrapped = format!("--- /dev/null\n+++ b/src/work.ts\n{HUNK}");
+        let mut card = patch_card(file_patch("src/work.ts", &wrapped));
+
+        PatchNormalizer::normalize_hunk_headers(&mut card).unwrap();
+
+        assert_eq!(normalized_diff(card), HUNK);
+    }
+
+    #[test]
+    fn envelope_strips_fences_and_header_together() {
+        let wrapped = format!("```diff\n--- a/src/work.ts\n+++ b/src/work.ts\n{HUNK}```\n");
+        let mut card = patch_card(file_patch("src/work.ts", &wrapped));
+
+        PatchNormalizer::normalize_hunk_headers(&mut card).unwrap();
+
+        assert_eq!(normalized_diff(card), HUNK);
+    }
+
+    #[test]
+    fn envelope_rejects_a_header_naming_another_file() {
+        let wrapped = format!("--- a/src/other.ts\n+++ b/src/other.ts\n{HUNK}");
+        let mut card = patch_card(file_patch("src/work.ts", &wrapped));
+
+        let error = PatchNormalizer::normalize_hunk_headers(&mut card).unwrap_err();
+
+        assert_eq!(
+            crate::violation_class(&error),
+            Some(ViolationClass::WrongFile)
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_a_rename_header() {
+        let wrapped = format!("rename from src/old.ts\nrename to src/work.ts\n{HUNK}");
+        let mut card = patch_card(file_patch("src/work.ts", &wrapped));
+
+        let error = PatchNormalizer::normalize_hunk_headers(&mut card).unwrap_err();
+
+        assert_eq!(
+            crate::violation_class(&error),
+            Some(ViolationClass::MalformedDiff)
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_prose_and_a_fenced_non_diff() {
+        let prose = format!("Here is the fix:\n```diff\n{HUNK}```\n");
+        let mut card = patch_card(file_patch("src/work.ts", &prose));
+        let error = PatchNormalizer::normalize_hunk_headers(&mut card).unwrap_err();
+        assert_eq!(
+            crate::violation_class(&error),
+            Some(ViolationClass::MalformedDiff)
+        );
+
+        let mut card = patch_card(file_patch("src/work.ts", "```\nnot a diff\n```\n"));
+        let error = PatchNormalizer::normalize_hunk_headers(&mut card).unwrap_err();
+        assert_eq!(
+            crate::violation_class(&error),
+            Some(ViolationClass::MalformedDiff)
+        );
+    }
+
+    #[test]
+    fn envelope_rejects_unmatched_markdown_fences() {
+        for wrapped in [format!("```diff\n{HUNK}"), format!("{HUNK}```\n")] {
+            let mut card = patch_card(file_patch("src/work.ts", &wrapped));
+
+            let error = PatchNormalizer::normalize_hunk_headers(&mut card).unwrap_err();
+
+            assert_eq!(
+                crate::violation_class(&error),
+                Some(ViolationClass::MalformedDiff),
+                "input: {wrapped:?}"
+            );
+            assert!(error.to_string().contains("unmatched"));
+        }
+    }
+
+    #[test]
+    fn normalizes_a_crlf_diff_against_an_lf_buffer() {
+        let mut card = patch_card(file_patch(
+            "src/work.ts",
+            "@@ -1,1 +1,1 @@\r\n-old\r\n+new\r\n",
+        ));
+        let context = context("src/work.ts", "old");
+
+        PatchNormalizer::normalize_card(&mut card, &context).unwrap();
+        PatchValidator::validate_card_against_context(&card, &context).unwrap();
+
+        let diff = normalized_diff(card);
+        assert_eq!(diff, HUNK);
+        assert!(!diff.contains('\r'));
+    }
+
+    #[test]
+    fn crlf_diff_with_wrong_context_still_fails() {
+        let mut card = patch_card(file_patch(
+            "src/work.ts",
+            "@@ -1,1 +1,1 @@\r\n-stale\r\n+new\r\n",
+        ));
+        let context = context("src/work.ts", "current");
+
+        let error = PatchNormalizer::normalize_card(&mut card, &context).unwrap_err();
+
+        assert!(error.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn normalizes_current_dir_and_git_prefixes_on_the_patch_path() {
+        for prefixed in ["./src/work.ts", "a/src/work.ts", "b/src/work.ts"] {
+            let mut card = patch_card(file_patch(prefixed, HUNK));
+            let context = context("src/work.ts", "old");
+
+            PatchNormalizer::normalize_card(&mut card, &context).unwrap();
+
+            let Card::Patch(card) = card else {
+                unreachable!()
+            };
+            assert_eq!(
+                card.patches[0].file,
+                PathBuf::from("src/work.ts"),
+                "input: {prefixed}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_a_prefixed_path_that_does_not_name_the_target() {
+        // `a/` could be a real directory; without a match against the accepted
+        // location the prefix is kept and the mismatch surfaces downstream.
+        let mut card = patch_card(file_patch("a/src/other.ts", HUNK));
+        let context = context("src/work.ts", "old");
+
+        PatchNormalizer::normalize_card(&mut card, &context).unwrap();
+
+        let Card::Patch(card) = card else {
+            unreachable!()
+        };
+        assert_eq!(card.patches[0].file, PathBuf::from("a/src/other.ts"));
+    }
+
+    #[test]
+    fn keeps_a_prefixed_path_when_the_target_really_lives_under_it() {
+        let mut card = patch_card(file_patch("a/src/work.ts", HUNK));
+        let context = context("a/src/work.ts", "old");
+
+        PatchNormalizer::normalize_card(&mut card, &context).unwrap();
+
+        let Card::Patch(card) = card else {
+            unreachable!()
+        };
+        assert_eq!(card.patches[0].file, PathBuf::from("a/src/work.ts"));
+    }
+
     #[test]
     fn warns_about_an_incomplete_local_rename() {
         let mut card = Card::Patch(loopbiotic_protocol::PatchCard {
@@ -818,6 +1285,7 @@ mod tests {
             explanation: "Rename response to rpc_response.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.rs"),
@@ -846,6 +1314,7 @@ mod tests {
             explanation: "Rename response to rpc_response.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.rs"),

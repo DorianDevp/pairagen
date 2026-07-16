@@ -150,10 +150,43 @@ pub struct AgentAttempt {
     pub token_usage: TokenUsage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Why the attempt violated the card contract, as a closed telemetry
+    /// class. Present on contract-retry/rejected attempts; never carries
+    /// buffer or card content, so trace redaction passes it through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violation_class: Option<ViolationClass>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_card: Option<Card>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activities: Vec<String>,
+}
+
+/// A closed classification of contract violations, used to aggregate which
+/// model mistakes still cost a retry turn. One class per distinct error
+/// construction site; `Other` only covers errors nothing has classified yet.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViolationClass {
+    /// Context/remove lines were not found (or ambiguous) in the buffer.
+    ContextMismatch,
+    /// `@@` header coordinates or counts are inconsistent with the hunk body.
+    HunkHeaderMismatch,
+    /// The diff text is not a parseable unified diff.
+    MalformedDiff,
+    /// The patch targets a different file than the accepted source location.
+    WrongFile,
+    /// The card exceeds the file/hunk/changed-line limits.
+    MultiHunk,
+    /// A required card field is empty or structurally invalid.
+    MissingField,
+    /// The card kind is not allowed in the current session state.
+    KindMismatch,
+    /// The card repeats an observation or an already accepted patch step.
+    DuplicateStep,
+    /// A goal batch could not be validated coherently across its files.
+    IncoherentBatch,
+    /// A violation no construction site has classified.
+    Other,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -170,7 +203,9 @@ pub struct GoalProgress {
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
     #[default]
+    Idle,
     Active,
+    Paused,
     NeedsReview,
     Complete,
     Stopped,
@@ -215,5 +250,42 @@ mod tests {
         let json = serde_json::to_value(response).unwrap();
 
         assert!(json.get("error").is_none());
+    }
+
+    #[test]
+    fn attempt_serializes_violation_class_as_snake_case() {
+        let attempt = AgentAttempt {
+            number: 2,
+            backend: "mock".into(),
+            outcome: "contract_retry".into(),
+            violation_class: Some(ViolationClass::ContextMismatch),
+            ..AgentAttempt::default()
+        };
+        let json = serde_json::to_value(&attempt).unwrap();
+
+        assert_eq!(json["violation_class"], json!("context_mismatch"));
+
+        let parsed: AgentAttempt = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            parsed.violation_class,
+            Some(ViolationClass::ContextMismatch)
+        );
+    }
+
+    #[test]
+    fn attempt_without_violation_class_omits_the_field_and_still_parses() {
+        let attempt = AgentAttempt {
+            number: 1,
+            backend: "mock".into(),
+            outcome: "accepted".into(),
+            ..AgentAttempt::default()
+        };
+        let json = serde_json::to_value(&attempt).unwrap();
+
+        assert!(json.get("violation_class").is_none());
+
+        // Older traces without the field must keep deserializing.
+        let parsed: AgentAttempt = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.violation_class, None);
     }
 }

@@ -1,18 +1,22 @@
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{Action, BackendInfo, Card, ErrorCard, TokenUsage};
+use loopbiotic_protocol::{BackendInfo, Card, TokenUsage};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
+use crate::support::{
+    Phase, TurnTimedOut, action_value, args_from_env, await_turn, context_fingerprint, error_card,
+    optional_env, report_progress, turn_phase, turn_timeout_from_env,
+};
 use crate::{
-    BackendAction, BackendAdapter, BackendMetadata, BackendProgress, BackendRequest,
+    BackendAdapter, BackendIdentity, BackendMetadata, BackendPhaseModels, BackendRequest,
     BackendResponse, ProgressReporter, enforce_card_contract, estimate_tokens,
 };
 
@@ -21,43 +25,38 @@ Every user message is a JSON Loopbiotic request. Reply with exactly one JSON Loo
 The discriminator field is named "op". Allowed ops, with exact shapes:
 - {"op":"hypothesis","title":string,"claim":string,"evidence":LOC|null,"next":LOC|null}
 - {"op":"finding","title":string,"finding":string,"location":LOC|null,"annotation":string|null}
-- {"op":"patch","title":string,"explanation":string,"goal_complete":bool,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}]}
+- {"op":"patch","title":string,"explanation":string,"goal_complete":bool,"plan":{"remaining":[{"file":string,"summary":string}],"complete":bool}|null,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}]}
 - {"op":"choice","title":string,"question":string,"options":[{"id":string,"label":string,"action":string}]}
 - {"op":"deny","title":string,"reason":string,"location":LOC|null}
 - {"op":"open_location","reason":string,"location":LOC}
 - {"op":"summary","title":string,"summary":string,"changed_files":[string]}
 - {"op":"error","title":string,"message":string}
 LOC is an object {"file":string,"line":int,"column":int,"annotation":string|null} with 1-based line and column; never a plain string.
-choice option action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop.
+choice option action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|open|run_check|stop.
 Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. error is only for technical failures.
 If you can only proceed from a different file or location — for example the change belongs in another file than the supplied buffer — return open_location IMMEDIATELY with that exact place instead of attempting a patch. The editor asks the user for permission, opens the file, and the next message continues this same turn with a.kind "location_granted" and fresh ctx for that buffer; then produce the real op. Never draft a patch against a file that is not the supplied buffer. Use deny only for refusals that navigation cannot solve.
 limits.expected, when set, names the op you must return (deny is always allowed instead; a clarifying choice is also accepted for hypothesis and finding). When limits.expected is null, choose whichever op fits best and ask via choice when the request is ambiguous.
-Patch only for fix actions or when limits.goal_completion is true. patch.diff must be unified diff hunks starting with @@ against the corresponding project source.
-When limits.goal_completion is true, drive the original goal from start to finish in one work turn. Inspect every required file with read-only tools and return the complete multi-file patch batch within limits.patch_files, limits.hunks_per_patch, and limits.changed_lines. Tool reads are valid patch source because Loopbiotic verifies every hunk against the live editor buffer before review. Loopbiotic reviews the batch locally without another model turn. Create missing files directly in the same batch. Set goal_complete=true when accepting the complete batch finishes the original goal. Use open_location only when a required source cannot be inspected. Return summary only when every stated requirement was already satisfied. Continue automatically from completed_steps and never repeat accepted work.
+Patch only for fix actions or when limits.goal_completion is true. When limits.conversation_only is true, never return patch or summary. patch.diff must be unified diff hunks starting with @@ against the corresponding project source.
+When limits.goal_completion is true, advance the explicitly authorized goal one small, compilable hunk per work turn. Return at most one file and exactly one hunk within limits.changed_lines plus plan listing remaining coherent steps; a file may repeat. Set plan.complete=true only on the final step. A concise finding or choice is allowed when programmer attention is needed. Inspect only enough source for the next step, preserve completed_steps, and never repeat accepted work.
 When limits.goal_completion is true and limits.expected is finding because the user asked why, explain the currently pending hunk without replacing it or advancing the goal. The same draft remains pending after the answer.
-A non-goal patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. A goal patch contains the complete change for the current buffer and may contain multiple hunks within the supplied limits.
+A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Non-goal patches have a null plan.
 Prefer the supplied context; you may use at most two targeted read-only searches when it is insufficient. Never edit files or run commands."#;
 
 /// Keeps `claude` CLI processes alive across turns using its stream-json
 /// stdin/stdout mode. Each Loopbiotic session gets up to two processes: a discovery
 /// process (hypothesis/finding/choice turns, optionally on a faster model
 /// with a capped thinking budget) and a patch process (full model). Separate
-/// processes let a speculative patch prefetch run while the user keeps
-/// navigating discovery cards, and are required anyway because the CLI cannot
-/// switch models within one process.
+/// processes let explicit-goal patch continuation run independently from
+/// read-only conversation, and are required because the CLI cannot switch
+/// models within one process.
 pub struct ClaudeAppBackend {
     command: String,
     args: Vec<String>,
     model: Option<String>,
     discovery_model: Option<String>,
     discovery_thinking: Option<String>,
+    turn_timeout: Option<Duration>,
     state: Mutex<ClaudeAppState>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum Phase {
-    Discovery,
-    Patch,
 }
 
 #[derive(Default)]
@@ -67,6 +66,10 @@ struct ClaudeAppState {
     // Pre-spawned discovery process created by warmup() before a session
     // exists, adopted by the next session's first discovery turn.
     warm: Option<Arc<Mutex<ClaudeSlot>>>,
+    // Model a flagless CLI process reported — its true default. Only ever
+    // written from processes that ran without --model, so a pinned
+    // discovery model can never masquerade as the CLI default.
+    cli_default_model: Option<String>,
 }
 
 #[derive(Default)]
@@ -75,6 +78,19 @@ struct ClaudeSlot {
     context_fingerprint: Option<u64>,
     model: Option<String>,
     reported_model: Option<String>,
+}
+
+impl ClaudeSlot {
+    /// Kills a wedged CLI and forgets its conversation so the next turn
+    /// spawns a fresh process with full context.
+    fn kill_process(&mut self) {
+        if let Some(process) = self.process.as_mut() {
+            let _ = process.child.start_kill();
+        }
+        self.process = None;
+        self.context_fingerprint = None;
+        self.reported_model = None;
+    }
 }
 
 struct ClaudeAppProcess {
@@ -89,6 +105,7 @@ impl Drop for ClaudeAppProcess {
     }
 }
 
+#[derive(Debug)]
 struct TurnOutput {
     text: String,
     token_usage: Option<TokenUsage>,
@@ -206,7 +223,7 @@ impl ClaudeAppBackend {
     pub fn from_env() -> Result<Self> {
         let command =
             std::env::var("LOOPBIOTIC_CLAUDE_COMMAND").unwrap_or_else(|_| "claude".into());
-        let args = args_from_env("LOOPBIOTIC_CLAUDE_ARGS_JSON", "LOOPBIOTIC_CLAUDE_ARGS")?;
+        let args = args_from_env("LOOPBIOTIC_CLAUDE_ARGS_JSON", "LOOPBIOTIC_CLAUDE_ARGS", "")?;
         let model = optional_env("LOOPBIOTIC_CLAUDE_MODEL");
         let discovery_model = optional_env("LOOPBIOTIC_CLAUDE_DISCOVERY_MODEL");
         let discovery_thinking = optional_env("LOOPBIOTIC_CLAUDE_DISCOVERY_THINKING");
@@ -227,12 +244,33 @@ impl ClaudeAppBackend {
         discovery_model: Option<String>,
         discovery_thinking: Option<String>,
     ) -> Self {
+        Self::with_turn_timeout(
+            command,
+            args,
+            model,
+            discovery_model,
+            discovery_thinking,
+            turn_timeout_from_env(),
+        )
+    }
+
+    /// Internal constructor that fixes the per-turn deadline instead of
+    /// reading it from the environment; tests use it to avoid env races.
+    pub(crate) fn with_turn_timeout(
+        command: impl Into<String>,
+        args: Vec<String>,
+        model: Option<String>,
+        discovery_model: Option<String>,
+        discovery_thinking: Option<String>,
+        turn_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             command: command.into(),
             args,
             model,
             discovery_model,
             discovery_thinking,
+            turn_timeout,
             state: Mutex::new(ClaudeAppState::default()),
         }
     }
@@ -340,6 +378,54 @@ impl ClaudeAppBackend {
         Ok(())
     }
 
+    /// Resolves the CLI's own default model (what a process spawned without
+    /// --model runs): cached, else read from the warm discovery process when
+    /// discovery itself is flagless, else from a short-lived flagless probe.
+    async fn cli_default_model(&self) -> Option<String> {
+        if let Some(model) = self.state.lock().await.cli_default_model.clone() {
+            return Some(model);
+        }
+
+        let model = if self.phase_model(Phase::Discovery).is_none() {
+            self.warm_init_model().await
+        } else {
+            self.probe_default_model().await
+        };
+
+        if let Some(model) = model.as_ref() {
+            self.state.lock().await.cli_default_model = Some(model.clone());
+        }
+
+        model
+    }
+
+    async fn warm_init_model(&self) -> Option<String> {
+        self.warm_up().await.ok()?;
+        let warm = self.state.lock().await.warm.clone()?;
+        let mut slot = warm.lock().await;
+        if slot.reported_model.is_none() {
+            // The warm process has not run a turn yet, so its init event is
+            // still unread on stdout.
+            slot.reported_model = read_init_model(&mut slot).await;
+        }
+
+        slot.reported_model.clone()
+    }
+
+    /// The warm discovery process runs a pinned model, so it cannot reveal
+    /// the CLI default; spawn a flagless process just long enough to read
+    /// its init event.
+    async fn probe_default_model(&self) -> Option<String> {
+        let mut slot = ClaudeSlot {
+            process: self.spawn_process(&None, &None).ok(),
+            ..ClaudeSlot::default()
+        };
+        let model = read_init_model(&mut slot).await;
+        slot.kill_process();
+
+        model
+    }
+
     /// Returns the slot for this turn's phase, creating it (or adopting the
     /// warm process) as needed. The outer state lock is held only for the
     /// bookkeeping; the returned slot's own lock serializes the actual turn,
@@ -397,6 +483,42 @@ impl ClaudeAppBackend {
         let slot = self.slot(&req.session.id, phase).await;
         let mut slot = slot.lock().await;
 
+        self.guarded_turn(&mut slot, req, phase, progress).await
+    }
+
+    /// Runs one turn under the per-turn deadline. On expiry the wedged CLI is
+    /// killed and its slot cleared so the next turn spawns a fresh process.
+    async fn guarded_turn(
+        &self,
+        slot: &mut ClaudeSlot,
+        req: &BackendRequest,
+        phase: Phase,
+        progress: Option<&ProgressReporter>,
+    ) -> Result<TurnOutput> {
+        let result = await_turn(
+            "Claude",
+            self.turn_timeout,
+            self.run_turn(slot, req, phase, progress),
+        )
+        .await;
+
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is::<TurnTimedOut>())
+        {
+            slot.kill_process();
+        }
+
+        result
+    }
+
+    async fn run_turn(
+        &self,
+        slot: &mut ClaudeSlot,
+        req: &BackendRequest,
+        phase: Phase,
+        progress: Option<&ProgressReporter>,
+    ) -> Result<TurnOutput> {
         report_progress(
             progress,
             &req.session.id,
@@ -417,12 +539,12 @@ impl ClaudeAppBackend {
         let include_context = slot.context_fingerprint != Some(fingerprint);
         slot.context_fingerprint = Some(fingerprint);
 
-        if let Err(error) = send_turn(&mut slot, &turn_prompt(req, include_context)).await {
+        if let Err(error) = send_turn(slot, &turn_prompt(req, include_context)).await {
             // The process may have died between turns; retry once on a fresh
             // process with full context before giving up.
             slot.process = Some(self.spawn_process(&slot.model, &self.phase_thinking(phase))?);
             slot.context_fingerprint = Some(fingerprint);
-            send_turn(&mut slot, &turn_prompt(req, true))
+            send_turn(slot, &turn_prompt(req, true))
                 .await
                 .map_err(|retry| anyhow!("could not reach claude: {error}; retry: {retry}"))?;
         }
@@ -489,13 +611,33 @@ impl ClaudeAppBackend {
     }
 
     fn error_card(message: impl Into<String>) -> Card {
-        Card::Error(ErrorCard {
-            id: "c_claude_error".into(),
-            title: "Claude error".into(),
-            message: message.into(),
-            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
-        })
+        error_card("c_claude_error", "Claude error", message)
     }
+}
+
+/// Reads the freshly spawned CLI's init/system event, which names the model
+/// the process will use. Bounded by a short deadline so identity() can never
+/// hang on a wedged CLI; only called before the process's first turn.
+async fn read_init_model(slot: &mut ClaudeSlot) -> Option<String> {
+    const INIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let process = slot.process.as_mut()?;
+    let init = async {
+        while let Ok(Some(line)) = process.stdout.next_line().await {
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let StreamEvent::Init(model) = parse_stream_event(&value) {
+                return model;
+            }
+        }
+        None
+    };
+
+    tokio::time::timeout(INIT_TIMEOUT, init)
+        .await
+        .ok()
+        .flatten()
 }
 
 async fn send_turn(slot: &mut ClaudeSlot, prompt: &str) -> Result<()> {
@@ -531,6 +673,11 @@ impl BackendAdapter for ClaudeAppBackend {
         progress: Option<ProgressReporter>,
     ) -> Result<BackendResponse> {
         let output = self.ask(&req, progress.as_ref()).await?;
+        if let Some(model) = output.model.as_ref() {
+            if self.phase_model(turn_phase(&req)).is_none() {
+                self.state.lock().await.cli_default_model = Some(model.clone());
+            }
+        }
         let card = crate::parse_card(&output.text).unwrap_or_else(|error| {
             Self::error_card(format!("{error}\n\nRaw output:\n{}", output.text))
         });
@@ -559,6 +706,58 @@ impl BackendAdapter for ClaudeAppBackend {
         self.warm_up().await
     }
 
+    async fn cancel_turn(&self, session_id: &str) -> Result<()> {
+        let slots = {
+            let state = self.state.lock().await;
+            if state.session_key.as_deref() != Some(session_id) {
+                return Ok(());
+            }
+            state.slots.values().cloned().collect::<Vec<_>>()
+        };
+
+        for slot in slots {
+            slot.lock().await.kill_process();
+        }
+
+        Ok(())
+    }
+
+    async fn identity(&self) -> BackendIdentity {
+        // `model` names the patch-phase model — the one that writes code.
+        // A pinned discovery model is reported separately via `phases` so a
+        // cheap discovery default is never presented as "the" model.
+        let patch = match self.model.clone() {
+            Some(model) => Some(model),
+            None => self.cli_default_model().await,
+        };
+        let discovery = self.discovery_model.clone().or_else(|| patch.clone());
+        let phases = (discovery != patch).then(|| BackendPhaseModels {
+            discovery: discovery.clone(),
+            patch: patch.clone(),
+        });
+
+        // The CLI has no model-listing API; offer the concrete models we
+        // know about plus the stable aliases the CLI resolves server-side.
+        let mut models: Vec<String> = vec![];
+        for candidate in [&patch, &discovery].into_iter().flatten() {
+            if !models.contains(candidate) {
+                models.push(candidate.clone());
+            }
+        }
+        for alias in ["sonnet", "opus", "haiku"] {
+            if !models.iter().any(|known| known == alias) {
+                models.push(alias.into());
+            }
+        }
+
+        BackendIdentity {
+            backend: "claude_app".into(),
+            model: patch,
+            models,
+            phases,
+        }
+    }
+
     fn capabilities(&self) -> BackendInfo {
         BackendInfo {
             name: "claude_app".into(),
@@ -571,80 +770,83 @@ impl BackendAdapter for ClaudeAppBackend {
     }
 }
 
-fn turn_phase(req: &BackendRequest) -> Phase {
-    if req.card_contract.expected_kind == Some(loopbiotic_protocol::CardKind::Patch)
-        || req.card_contract.allow_goal_completion
-    {
-        Phase::Patch
-    } else {
-        Phase::Discovery
-    }
-}
-
 fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
-    let mut value = json!({
-        "s": {
-            "id": req.session.id,
-            "p": req.session.prompt,
-            "completed_steps": req.session.completed_steps,
-            "known_observations": req.session.known_observations,
-            "mode": req.session.mode,
-            "n": req.session.card_count,
-            "last": req.session.last_summary
+    let goal_turn = req.card_contract.allow_goal_completion
+        && req.card_contract.expected_kind != Some(loopbiotic_protocol::CardKind::Finding);
+
+    // Provider prompt caches key on byte-stable prefixes, so fields serialize
+    // stable-first: the session-stable block, then blocks that only change
+    // when the turn kind changes, then the truly per-turn data. The static
+    // contract itself lives in SYSTEM_PROMPT, which the conversation carries
+    // once per process. `ordered_json_object` preserves exactly this order;
+    // `json!` alone would sort keys alphabetically and put volatile bytes
+    // first.
+    let mut fields: Vec<(&str, Value)> = vec![
+        // Session-stable: identical bytes on every turn of one session.
+        (
+            "s",
+            json!({
+                "id": req.session.id,
+                "mode": req.session.mode,
+                "p": req.session.prompt,
+            }),
+        ),
+        // Turn-kind-stable: constant across all turns of the same kind
+        // (expected op and the goal/non-goal limit set).
+        (
+            "limits",
+            json!({
+                "one": req.card_contract.one_card_only,
+                "max": req.card_contract.max_body_chars,
+                "patch_files": req.card_contract.max_patch_files,
+                "hunks_per_patch": req.card_contract.max_hunks_per_patch,
+                "changed_lines": req.card_contract.max_changed_lines,
+                "goal_completion": req.card_contract.allow_goal_completion,
+                "conversation_only": req.card_contract.conversation_only,
+                "expected": req.card_contract.expected_kind,
+            }),
+        ),
+    ];
+
+    if goal_turn {
+        fields.push((
+            "slice",
+            json!(
+                if matches!(
+                    req.action,
+                    crate::BackendAction::User(loopbiotic_protocol::Action::Goal)
+                ) {
+                    "Continue with the next planned coherent step: one small hunk plus the refreshed plan."
+                } else {
+                    "Return exactly one small, compilable hunk plus plan {remaining:[{file,summary}],complete}."
+                }
+            ),
+        ));
+    }
+
+    // Append-only within a session: the serialized prefix of these lists
+    // stays byte-stable as they grow.
+    fields.push(("completed_steps", json!(req.session.completed_steps)));
+    fields.push(("known_observations", json!(req.session.known_observations)));
+
+    // Volatile: changes every turn, so it must trail everything cacheable.
+    fields.push((
+        "interaction_feedback",
+        json!(req.session.interaction_feedback),
+    ));
+    fields.push(("a", action_value(&req.action)));
+    fields.push(("last", json!(req.session.last_summary)));
+    fields.push(("n", json!(req.session.card_count)));
+    fields.push((
+        "ctx",
+        if include_context {
+            crate::backend_context(&req.context)
+        } else {
+            json!("unchanged; reuse the context from the previous message")
         },
-        "a": action_value(&req.action),
-        "limits": {
-            "one": req.card_contract.one_card_only,
-            "max": req.card_contract.max_body_chars,
-            "patch_files": req.card_contract.max_patch_files,
-            "hunks_per_patch": req.card_contract.max_hunks_per_patch,
-            "changed_lines": req.card_contract.max_changed_lines,
-            "goal_completion": req.card_contract.allow_goal_completion,
-            "expected": req.card_contract.expected_kind
-        }
-    });
+    ));
 
-    if include_context {
-        value["ctx"] = crate::backend_context(&req.context);
-    } else {
-        value["ctx"] = json!("unchanged; reuse the context from the previous message");
-    }
-
-    serde_json::to_string(&value).unwrap_or_default()
-}
-
-fn context_fingerprint(req: &BackendRequest) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    req.context.file.hash(&mut hasher);
-    req.context.cursor.line.hash(&mut hasher);
-    req.context.cursor.column.hash(&mut hasher);
-    req.context.buffer_start_line.hash(&mut hasher);
-    req.context.buffer_text.hash(&mut hasher);
-    for diagnostic in &req.context.diagnostics {
-        diagnostic.file.hash(&mut hasher);
-        diagnostic.line.hash(&mut hasher);
-        diagnostic.message.hash(&mut hasher);
-    }
-    for artifact in &req.context.artifacts {
-        artifact.file.hash(&mut hasher);
-        artifact.start_line.hash(&mut hasher);
-        artifact.text.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn action_value(action: &BackendAction) -> Value {
-    match action {
-        BackendAction::Start => json!({"kind": "start"}),
-        BackendAction::User(action) => {
-            json!({"kind": "user", "action": serde_json::to_value(action).unwrap_or_default()})
-        }
-        BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
-        BackendAction::ContractRetry(reason) => {
-            json!({"kind": "contract_retry", "reason": reason})
-        }
-        BackendAction::LocationGranted => json!({"kind": "location_granted"}),
-    }
+    crate::support::ordered_json_object(&fields)
 }
 
 fn parse_stream_event(value: &Value) -> StreamEvent {
@@ -743,41 +945,6 @@ fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
         total_tokens: input + output,
         estimated: false,
     })
-}
-
-fn optional_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn args_from_env(json_name: &str, plain_name: &str) -> Result<Vec<String>> {
-    if let Ok(value) = std::env::var(json_name)
-        && !value.trim().is_empty()
-    {
-        return Ok(serde_json::from_str(&value)?);
-    }
-
-    Ok(std::env::var(plain_name)
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(str::to_string)
-        .collect())
-}
-
-fn report_progress(
-    progress: Option<&ProgressReporter>,
-    session_id: &str,
-    phase: &str,
-    message: &str,
-) {
-    if let Some(progress) = progress {
-        progress(BackendProgress {
-            session_id: session_id.into(),
-            phase: phase.into(),
-            message: message.into(),
-        });
-    }
 }
 
 #[cfg(test)]
@@ -916,17 +1083,181 @@ mod tests {
         assert_eq!(extract_string_field(r#"{"titl"#, "title"), None);
     }
 
+    #[tokio::test]
+    async fn wedged_claude_process_times_out_and_clears_the_slot() {
+        // A `sleep` child stands in for a wedged CLI: it accepts the turn on
+        // stdin but never writes a stream event to stdout.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut slot = ClaudeSlot {
+            process: Some(ClaudeAppProcess {
+                child,
+                stdin,
+                stdout: BufReader::new(stdout).lines(),
+            }),
+            ..ClaudeSlot::default()
+        };
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            None,
+            None,
+            None,
+            Some(Duration::from_millis(100)),
+        );
+
+        let error = backend
+            .guarded_turn(&mut slot, &crate::test_request(), Phase::Discovery, None)
+            .await
+            .unwrap_err();
+
+        assert!(error.is::<TurnTimedOut>(), "unexpected error: {error}");
+        assert!(
+            slot.process.is_none(),
+            "timed-out process must be cleared so the next turn spawns fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_reports_the_configured_model_without_spawning() {
+        // "claude-unused" does not exist; the configured path must answer
+        // without ever spawning a process.
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            Some("claude-fable-5".into()),
+            None,
+            None,
+            None,
+        );
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.backend, "claude_app");
+        assert_eq!(identity.model.as_deref(), Some("claude-fable-5"));
+        assert!(identity.phases.is_none());
+        assert_eq!(
+            identity.models,
+            ["claude-fable-5", "sonnet", "opus", "haiku"]
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_reports_phase_models_when_discovery_differs() {
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            Some("claude-opus-4-8".into()),
+            Some("claude-haiku-4-5".into()),
+            None,
+            None,
+        );
+
+        let identity = backend.identity().await;
+
+        // The patch model is "the" model; the pinned discovery model rides
+        // along in phases instead of hijacking the headline.
+        assert_eq!(identity.model.as_deref(), Some("claude-opus-4-8"));
+        let phases = identity.phases.expect("differing phases must be reported");
+        assert_eq!(phases.discovery.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(phases.patch.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[tokio::test]
+    async fn identity_never_reports_a_pinned_discovery_model_as_the_model() {
+        // The shipped default config: discovery pinned to a cheap model, no
+        // patch model configured. The probe command does not exist, so the
+        // CLI default stays unknown — identity must say so rather than
+        // claim the discovery model is what patch turns will run.
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            None,
+            Some("haiku".into()),
+            None,
+            None,
+        );
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.model, None);
+        let phases = identity.phases.expect("differing phases must be reported");
+        assert_eq!(phases.discovery.as_deref(), Some("haiku"));
+        assert_eq!(phases.patch, None);
+        assert_eq!(identity.models, ["haiku", "sonnet", "opus"]);
+    }
+
+    #[tokio::test]
+    async fn identity_falls_back_to_the_cached_cli_default() {
+        let backend =
+            ClaudeAppBackend::with_turn_timeout("claude-unused", vec![], None, None, None, None);
+        backend.state.lock().await.cli_default_model = Some("claude-fable-5".into());
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.model.as_deref(), Some("claude-fable-5"));
+        assert!(identity.phases.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_init_model_parses_the_init_event_from_the_process_stream() {
+        // `echo` stands in for the CLI: it prints the init event and exits.
+        let init = json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "model": "claude-fable-5"
+        });
+        let mut child = Command::new("echo")
+            .arg(init.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut slot = ClaudeSlot {
+            process: Some(ClaudeAppProcess {
+                child,
+                stdin,
+                stdout: BufReader::new(stdout).lines(),
+            }),
+            ..ClaudeSlot::default()
+        };
+
+        assert_eq!(
+            read_init_model(&mut slot).await.as_deref(),
+            Some("claude-fable-5")
+        );
+    }
+
     #[test]
-    fn routes_patch_turns_to_the_patch_phase() {
+    fn turn_prompt_adds_the_slice_instruction_only_on_goal_turns() {
         let mut req = crate::test_request();
-        assert!(matches!(turn_phase(&req), Phase::Discovery));
+        assert!(!turn_prompt(&req, true).contains("\"slice\""));
 
-        req.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Patch);
-        assert!(matches!(turn_phase(&req), Phase::Patch));
-
-        req.card_contract.expected_kind = None;
         req.card_contract.allow_goal_completion = true;
-        assert!(matches!(turn_phase(&req), Phase::Patch));
+        req.card_contract.expected_kind = None;
+        let goal = turn_prompt(&req, true);
+        assert!(goal.contains("exactly one small, compilable hunk"));
+        assert!(!goal.contains("next planned coherent step"));
+
+        req.action = crate::BackendAction::User(loopbiotic_protocol::Action::Goal);
+        let continuation = turn_prompt(&req, true);
+        assert!(continuation.contains("Continue with the next planned coherent step"));
+
+        // The goal "why" turn explains the pending hunk; it must not be asked
+        // to produce another slice.
+        req.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Finding);
+        assert!(!turn_prompt(&req, true).contains("\"slice\""));
     }
 
     #[test]
@@ -938,5 +1269,98 @@ mod tests {
         assert!(with_context.contains("buffer_text"));
         assert!(!without_context.contains("buffer_text"));
         assert!(without_context.contains("unchanged"));
+    }
+
+    #[test]
+    fn turn_prompt_keeps_a_stable_prefix_across_turns_of_one_session() {
+        let turn_a = crate::test_request();
+        let mut turn_b = crate::test_request();
+        turn_b.action = crate::BackendAction::User(loopbiotic_protocol::Action::Follow);
+        turn_b
+            .session
+            .completed_steps
+            .push("renamed the helper".into());
+        turn_b
+            .session
+            .known_observations
+            .push("the guard drops zero".into());
+        turn_b.session.card_count = 3;
+        turn_b.session.last_summary = Some("Renamed the helper".into());
+        turn_b.context.buffer_text = "fn main() { changed() }".into();
+        turn_b.context.cursor.line = 9;
+
+        let a = turn_prompt(&turn_a, true);
+        let b = turn_prompt(&turn_b, true);
+
+        // Everything before the append-only lists — the session-stable `s`
+        // block and the turn-kind-stable `limits` block — must stay
+        // byte-identical so a provider prompt cache can reuse it. Volatile
+        // fields (action, counts, context) may only trail that prefix.
+        let stable_block_len = a.find("\"completed_steps\"").expect("lists present");
+        assert_eq!(Some(stable_block_len), b.find("\"completed_steps\""));
+        let shared = crate::common_prefix_len(&a, &b);
+        assert!(
+            shared >= stable_block_len,
+            "volatile bytes leaked into the stable prefix: shared {shared} < stable {stable_block_len}\nA: {a}\nB: {b}"
+        );
+    }
+
+    #[test]
+    fn goal_turn_prompt_keeps_a_stable_prefix_across_slices() {
+        let mut turn_a = crate::test_request();
+        turn_a.card_contract.allow_goal_completion = true;
+        turn_a.action = crate::BackendAction::User(loopbiotic_protocol::Action::Next);
+        let mut turn_b = turn_a.clone();
+        turn_b.session.completed_steps.push("patched lib.rs".into());
+        turn_b.session.card_count = 2;
+        turn_b.context.buffer_text = "pub fn changed() {}".into();
+
+        let a = turn_prompt(&turn_a, true);
+        let b = turn_prompt(&turn_b, true);
+
+        // Consecutive goal continuations share `s`, `limits`, and the slice
+        // instruction; only the accepted-step history and context change.
+        let stable_block_len = a.find("\"completed_steps\"").expect("lists present");
+        assert!(a[..stable_block_len].contains("\"slice\""));
+        assert!(crate::common_prefix_len(&a, &b) >= stable_block_len);
+    }
+
+    #[test]
+    fn turn_prompt_static_lead_is_stable_across_sessions() {
+        let session_a = crate::test_request();
+        let mut session_b = crate::test_request();
+        session_b.session.id = "s_2".into();
+        session_b.session.prompt = "add retry logic to the fetcher".into();
+
+        let a = turn_prompt(&session_a, true);
+        let b = turn_prompt(&session_b, true);
+
+        // Cross-session cache reuse comes from SYSTEM_PROMPT, delivered once
+        // per process via --append-system-prompt; the turn prompt itself only
+        // guarantees its structural lead-in before the session id.
+        let static_lead = "{\"s\":{\"id\":\"";
+        assert!(a.starts_with(static_lead), "unexpected lead: {a}");
+        assert!(crate::common_prefix_len(&a, &b) >= static_lead.len());
+    }
+
+    #[test]
+    fn spawn_args_carry_the_static_contract_and_no_session_data() {
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            Some("claude-fable-5".into()),
+            None,
+            None,
+            None,
+        );
+
+        let first = backend.spawn_args(&Some("claude-fable-5".into()));
+        let second = backend.spawn_args(&Some("claude-fable-5".into()));
+
+        // The spawn arguments define the process-level static block (system
+        // prompt included); they must be identical for every spawn of the
+        // same configuration so the provider cache keys stay byte-stable.
+        assert_eq!(first, second);
+        assert!(first.contains(&SYSTEM_PROMPT.to_string()));
     }
 }

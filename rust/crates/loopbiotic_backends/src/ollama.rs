@@ -1,13 +1,20 @@
+use std::time::Duration;
+
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{Action, BackendInfo, Card, ErrorCard, TokenUsage};
+use loopbiotic_protocol::{BackendInfo, Card, TokenUsage};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
+use crate::support::{error_card, optional_env, report_progress, turn_timeout_from_env};
 use crate::{
-    BackendAdapter, BackendMetadata, BackendProgress, BackendRequest, BackendResponse,
+    BackendAdapter, BackendIdentity, BackendMetadata, BackendRequest, BackendResponse,
     ProgressReporter, enforce_card_contract, estimate_tokens,
 };
+
+/// Listing installed models is identity garnish, not a turn; a hung server
+/// must not stall the warmup RPC for the full turn deadline.
+const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Talks to a local Ollama server over its HTTP API instead of spawning
 /// `ollama run` per card. The server keeps the model loaded between turns
@@ -37,14 +44,10 @@ impl OllamaBackend {
     pub fn from_env() -> Result<Self> {
         let model = std::env::var("LOOPBIOTIC_OLLAMA_MODEL")
             .map_err(|_| anyhow!("LOOPBIOTIC_OLLAMA_MODEL is required"))?;
-        let host = std::env::var("LOOPBIOTIC_OLLAMA_HOST")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        let host = optional_env("LOOPBIOTIC_OLLAMA_HOST")
             .unwrap_or_else(|| "http://127.0.0.1:11434".into());
-        let keep_alive = std::env::var("LOOPBIOTIC_OLLAMA_KEEP_ALIVE")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "30m".into());
+        let keep_alive =
+            optional_env("LOOPBIOTIC_OLLAMA_KEEP_ALIVE").unwrap_or_else(|| "30m".into());
 
         Ok(Self::new(host, model, keep_alive))
     }
@@ -54,11 +57,17 @@ impl OllamaBackend {
         model: impl Into<String>,
         keep_alive: impl Into<String>,
     ) -> Self {
+        // There is no child process to kill here, so a hung Ollama server is
+        // bounded by the same turn deadline the process backends use.
+        let mut builder = reqwest::Client::builder();
+        if let Some(limit) = turn_timeout_from_env() {
+            builder = builder.timeout(limit);
+        }
         Self {
             host: host.into().trim_end_matches('/').to_string(),
             model: model.into(),
             keep_alive: keep_alive.into(),
-            client: reqwest::Client::new(),
+            client: builder.build().unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -88,14 +97,41 @@ impl OllamaBackend {
         Ok(response.json().await?)
     }
 
-    fn error_card(message: impl Into<String>) -> Card {
-        Card::Error(ErrorCard {
-            id: "c_ollama_error".into(),
-            title: "Ollama error".into(),
-            message: message.into(),
-            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
-        })
+    /// Names the models installed on the server via `GET /api/tags`. Any
+    /// failure yields an empty list: identity must never fail because the
+    /// listing did.
+    async fn list_models(&self) -> Vec<String> {
+        let response = self
+            .client
+            .get(format!("{}/api/tags", self.host))
+            .timeout(LIST_MODELS_TIMEOUT)
+            .send()
+            .await;
+
+        match response {
+            Ok(response) if response.status().is_success() => response
+                .json::<Value>()
+                .await
+                .map(|tags| model_names(&tags))
+                .unwrap_or_default(),
+            _ => vec![],
+        }
     }
+
+    fn error_card(message: impl Into<String>) -> Card {
+        error_card("c_ollama_error", "Ollama error", message)
+    }
+}
+
+/// Extracts `models[].name` from an `/api/tags` response body.
+fn model_names(tags: &Value) -> Vec<String> {
+    tags.get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
 }
 
 #[async_trait]
@@ -142,6 +178,17 @@ impl BackendAdapter for OllamaBackend {
         })
     }
 
+    async fn identity(&self) -> BackendIdentity {
+        BackendIdentity {
+            backend: "ollama".into(),
+            // The model env is required, so the next turn's model is always
+            // known without asking the server.
+            model: Some(self.model.clone()),
+            models: self.list_models().await,
+            phases: None,
+        }
+    }
+
     fn capabilities(&self) -> BackendInfo {
         BackendInfo {
             name: "ollama".into(),
@@ -154,17 +201,39 @@ impl BackendAdapter for OllamaBackend {
     }
 }
 
-fn report_progress(
-    progress: Option<&ProgressReporter>,
-    session_id: &str,
-    phase: &str,
-    message: &str,
-) {
-    if let Some(progress) = progress {
-        progress(BackendProgress {
-            session_id: session_id.into(),
-            phase: phase.into(),
-            message: message.into(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_names_extracts_names_from_a_tags_response() {
+        let tags = json!({
+            "models": [
+                {"name": "qwen3:8b", "size": 5},
+                {"name": "llama3.2:3b"},
+                {"size": 7}
+            ]
         });
+
+        assert_eq!(model_names(&tags), vec!["qwen3:8b", "llama3.2:3b"]);
+    }
+
+    #[test]
+    fn model_names_tolerates_malformed_responses() {
+        assert!(model_names(&json!({})).is_empty());
+        assert!(model_names(&json!({"models": "nope"})).is_empty());
+        assert!(model_names(&json!(null)).is_empty());
+    }
+
+    #[tokio::test]
+    async fn identity_reports_the_required_model_when_listing_fails() {
+        // Nothing listens on this port; the listing must fail quietly.
+        let backend = OllamaBackend::new("http://127.0.0.1:9", "qwen3:8b", "30m");
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.backend, "ollama");
+        assert_eq!(identity.model.as_deref(), Some("qwen3:8b"));
+        assert!(identity.models.is_empty());
     }
 }

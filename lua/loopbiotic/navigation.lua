@@ -1,6 +1,7 @@
 local config = require("loopbiotic.config")
 local extmarks = require("loopbiotic.extmarks")
 local state = require("loopbiotic.state")
+local util = require("loopbiotic.util")
 
 local M = {}
 
@@ -60,12 +61,18 @@ function M.open_location(location)
   end
   target_win = target_buf and M.current_tab_window(target_buf) or nil
 
+  -- Ex/tab commands issued from a focused float can leave that float as the
+  -- originating tab's tp_curwin. If a later async render closes it from
+  -- another tab, Neovim's tabline may dereference the freed window.
+  local normal = M.normal_window()
+  if normal ~= vim.api.nvim_get_current_win() then
+    vim.api.nvim_set_current_win(normal)
+  end
+
   if target_win then
     vim.api.nvim_set_current_win(target_win)
   elseif target_buf and open == "current" then
-    local win = M.normal_window()
-    vim.api.nvim_set_current_win(win)
-    vim.api.nvim_win_set_buf(win, target_buf)
+    vim.api.nvim_win_set_buf(normal, target_buf)
   elseif open == "tab" then
     local existing = target_buf and M.any_window(target_buf) or nil
     if existing then
@@ -84,13 +91,13 @@ function M.open_location(location)
     vim.cmd("edit " .. vim.fn.fnameescape(file))
   end
 
-  local line = location.line or 1
-  local column = location.column or 1
+  local buf = vim.api.nvim_get_current_buf()
+  local pos = util.clamp_cursor(buf, location.line, (location.column or 1) - 1)
 
-  vim.api.nvim_win_set_cursor(0, { line, math.max(column - 1, 0) })
-  state.source_buf = vim.api.nvim_get_current_buf()
-  state.source_cursor = { line, math.max(column - 1, 0) }
-  extmarks.annotate(0, line, location.annotation)
+  vim.api.nvim_win_set_cursor(0, pos)
+  state.source_buf = buf
+  state.source_cursor = pos
+  extmarks.annotate(0, pos[1], location.annotation)
   vim.cmd("normal! zz")
 
   return true
@@ -101,15 +108,7 @@ function M.from_card(card)
 end
 
 function M.card_location(card)
-  if type(card.next_move) == "table" and card.next_move.kind == "open_location" then
-    return card.next_move
-  elseif type(card.evidence) == "table" then
-    return card.evidence
-  elseif type(card.location) == "table" then
-    return card.location
-  end
-
-  return nil
+  return util.card_location(card)
 end
 
 return M

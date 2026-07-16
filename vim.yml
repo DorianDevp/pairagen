@@ -1,0 +1,7 @@
+# Minimal Neovim standard library definition for selene.
+# The plugin targets Neovim 0.10+ (LuaJIT / Lua 5.1).
+---
+base: lua51
+globals:
+  vim:
+    any: true

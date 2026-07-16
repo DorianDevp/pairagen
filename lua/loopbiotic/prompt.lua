@@ -4,48 +4,292 @@ local ui = require("loopbiotic.ui")
 
 local M = {}
 
+-- Which window kind ("Prompt"/"Reply") is currently open, so the async
+-- warmup response can re-render the matching frame title. open_footer keeps
+-- the default footer so a cleared preflight error can restore it.
+local open_kind = "Prompt"
+local open_footer = nil
+
 function M.open(mode)
   local source = require("loopbiotic.context").capture()
 
   -- Let the backend pay its startup cost (CLI boot, process spawn) while the
-  -- user is still typing the prompt.
-  require("loopbiotic.rpc").request("backend/warmup", {}, function() end)
+  -- user is still typing the prompt. The response also carries the backend
+  -- identity (concrete model, known models) used for the title and picker.
+  require("loopbiotic.rpc").request("backend/warmup", {}, M.on_warmup)
 
+  open_kind = "Prompt"
   M.open_for({
     title = M.title("Prompt"),
-    footer = " /kind forces card type  Ctrl-s submit  Esc normal  q close ",
+    footer = " Ctrl-l model  /kind forces card type  Ctrl-s submit  Esc normal  q close ",
     submit = function(text)
       require("loopbiotic").start(text, mode, source)
     end,
   })
+
+  M.prefill()
+  M.refresh_footer()
 end
 
 function M.reply()
+  open_kind = "Reply"
   M.open_for({
     title = M.title("Reply"),
-    footer = " Ctrl-s send  Esc normal  q close ",
+    footer = " Ctrl-l model  Ctrl-s send  Esc normal  q close ",
     submit = function(text)
       require("loopbiotic").reply(text)
     end,
   })
 end
 
+-- Store the identity reported by backend/warmup and refresh the open prompt
+-- title with it. Old daemons answer {ok = true} without an identity field;
+-- tolerate that by keeping the previous state. A warmup error is surfaced
+-- immediately in the open prompt window's footer (and one WARN notification)
+-- so the user learns the backend is broken before composing a full prompt.
+---@param message table RPC response ({ result = ... } or { error = ... })
+function M.on_warmup(message)
+  if message.error then
+    local error_message = tostring(type(message.error) == "table" and message.error.message or message.error)
+
+    if state.backend_preflight_error ~= error_message then
+      state.backend_preflight_error = error_message
+      ui.notify(
+        "Loopbiotic backend not ready: " .. error_message .. " — see :checkhealth loopbiotic",
+        vim.log.levels.WARN
+      )
+    end
+    M.refresh_footer()
+
+    return
+  end
+
+  if type(message.result) ~= "table" then
+    return
+  end
+
+  if state.backend_preflight_error then
+    state.backend_preflight_error = nil
+    M.refresh_footer()
+  end
+
+  local identity = message.result.identity
+  if type(identity) ~= "table" then
+    return
+  end
+
+  state.agent_identity = identity
+  M.refresh_title()
+end
+
+-- Re-render the frame title of the currently open prompt window, if any.
+-- Callers may run outside the main loop (RPC callbacks), hence the schedule.
+function M.refresh_title()
+  vim.schedule(function()
+    local frame_win = state.prompt_frame_win
+    if not (frame_win and vim.api.nvim_win_is_valid(frame_win)) then
+      return
+    end
+
+    pcall(vim.api.nvim_win_set_config, frame_win, { title = M.title(open_kind), title_pos = "left" })
+  end)
+end
+
+-- Re-render the frame footer of the currently open prompt window, if any:
+-- the preflight-error footer while a warmup failure is stored, otherwise the
+-- default keymap hints. Mirrors refresh_title (schedule + validity check).
+function M.refresh_footer()
+  vim.schedule(function()
+    local frame_win = state.prompt_frame_win
+    if not (frame_win and vim.api.nvim_win_is_valid(frame_win)) then
+      return
+    end
+
+    local footer = open_footer
+    if type(state.backend_preflight_error) == "string" and state.backend_preflight_error ~= "" then
+      footer = M.preflight_footer(state.backend_preflight_error)
+    end
+
+    pcall(vim.api.nvim_win_set_config, frame_win, { footer = footer, footer_pos = "right" })
+  end)
+end
+
+-- Footer line shown while the backend fails its warmup preflight.
+---@param error_message string
+---@return string
+function M.preflight_footer(error_message)
+  return " backend not ready: " .. M.short_error(error_message) .. " — :checkhealth loopbiotic "
+end
+
+-- One-line, footer-sized rendering of a backend error message.
+---@param error_message string
+---@return string
+function M.short_error(error_message)
+  local text = tostring(error_message or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  if #text > 60 then
+    text = text:sub(1, 57) .. "..."
+  end
+
+  return text
+end
+
+-- Pre-fill the freshly opened prompt buffer with text stashed by a failed
+-- session start, cursor at the end, so the composed prompt is not lost.
+function M.prefill()
+  local stash = state.prompt_stash
+  local buf = state.prompt_buf
+  if type(stash) ~= "string" or stash == "" or not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    return
+  end
+
+  local lines = vim.split(stash, "\n", { plain = true })
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+  local win = state.prompt_win
+  if win and vim.api.nvim_win_is_valid(win) then
+    pcall(vim.api.nvim_win_set_cursor, win, { #lines, #lines[#lines] })
+    if vim.api.nvim_get_current_win() == win then
+      -- Append after the restored text instead of before its last character.
+      vim.cmd("startinsert!")
+    end
+  end
+end
+
+-- Pure state transition for the prompt stash: submitting stashes the
+-- composed text (the window is closed before the backend answers), a
+-- successful start clears it, and a failed start keeps it for the next
+-- prompt.open to pre-fill.
+---@param stash string|nil current stash
+---@param event "submit"|"start_ok"|"start_error"
+---@param text string|nil submitted text (only used for "submit")
+---@return string|nil next stash
+function M.next_stash(stash, event, text)
+  if event == "submit" then
+    return text
+  end
+  if event == "start_ok" then
+    return nil
+  end
+
+  return stash
+end
+
+-- Pick the concrete model out of the fixed resolution order: configured
+-- model, then the model the warmup identity announced for the next turn,
+-- then the model the backend reported after a turn. Returns nil when none
+-- is known. vim.NIL (JSON null) and empty strings count as unknown.
+---@param configured string|nil
+---@param identity_model string|nil
+---@param backend_model string|nil
+---@return string|nil
+function M.resolved_model(configured, identity_model, backend_model)
+  local candidates = { configured, identity_model, backend_model }
+
+  for index = 1, 3 do
+    local value = candidates[index]
+    if type(value) == "string" and value ~= "" then
+      return value
+    end
+  end
+
+  return nil
+end
+
+-- Title-ready model name; "model?" until any concrete model is known. The
+-- word "default" is never rendered. When the backend runs a different
+-- discovery model (identity.phases), it is shown alongside the patch model
+-- instead of being presented as "the" model.
+---@param configured string|nil
+---@param identity table|nil backend/warmup identity ({ model, models, phases })
+---@param backend_model string|nil
+---@return string
+function M.model_label(configured, identity, backend_model)
+  local identity_model = type(identity) == "table" and identity.model or nil
+  local label = M.resolved_model(configured, identity_model, backend_model) or "model?"
+  local phases = type(identity) == "table" and type(identity.phases) == "table" and identity.phases or nil
+  local discovery = phases and phases.discovery
+
+  if type(discovery) == "string" and discovery ~= "" and discovery ~= label then
+    return label .. " · discovery " .. discovery
+  end
+
+  return label
+end
+
+-- Deduped model-picker candidates, in resolution-priority order: configured
+-- model, identity model, backend-enumerated models, the agent's `models`
+-- config list, the model reported after the last turn.
+---@param configured string|nil
+---@param identity table|nil backend/warmup identity ({ model, models })
+---@param agent_models string[]|nil the agent's `models` config list
+---@param backend_model string|nil
+---@return string[]
+function M.model_candidates(configured, identity, agent_models, backend_model)
+  local seen = {}
+  local candidates = {}
+  local function add(value)
+    if type(value) == "string" and value ~= "" and not seen[value] then
+      seen[value] = true
+      table.insert(candidates, value)
+    end
+  end
+
+  add(configured)
+  if type(identity) == "table" then
+    add(identity.model)
+    if type(identity.phases) == "table" then
+      add(identity.phases.patch)
+      add(identity.phases.discovery)
+    end
+    if type(identity.models) == "table" then
+      for _, name in ipairs(identity.models) do
+        add(name)
+      end
+    end
+  end
+  for _, name in ipairs(agent_models or {}) do
+    add(name)
+  end
+  add(backend_model)
+
+  return candidates
+end
+
 function M.title(kind)
   local agent = config.agent()
-  local model = config.model()
-  if not model or model == "" then
-    -- No model configured: show what the backend reported it is actually
-    -- using, once a turn has completed.
-    model = state.backend_model
-  end
-  local active = model and model ~= "" and (agent .. " / " .. model) or (agent .. " / default")
+  local model = M.model_label(config.model(), state.agent_identity, state.backend_model)
 
-  return string.format(" Loopbiotic %s · %s ", kind, active)
+  return string.format(" Loopbiotic %s · %s / %s ", kind, agent, model)
+end
+
+-- Open a picker over every model known for the active agent. The choice
+-- goes through the regular model-switch entry point (persisting the
+-- per-agent preference); only the frame title changes, the typed prompt
+-- text and window stay as they are.
+function M.pick_model()
+  local agent = config.agent()
+  local identity = state.agent_identity
+  local candidates = M.model_candidates(config.model(), identity, config.model_names(), state.backend_model)
+
+  if #candidates == 0 then
+    ui.notify("No known models for " .. agent .. " — use :LoopbioticModel <name>", vim.log.levels.WARN)
+    return
+  end
+
+  vim.ui.select(candidates, { prompt = "Loopbiotic model (" .. agent .. ")" }, function(choice)
+    if not choice or choice == "" then
+      return
+    end
+
+    require("loopbiotic").model(choice)
+    M.refresh_title()
+  end)
 end
 
 function M.open_for(opts)
   M.close()
 
+  open_footer = opts.footer
   local size = M.size()
   local position = M.position(size)
   local row = position.row
@@ -112,6 +356,13 @@ function M.bind(buf, submit)
     M.submit(buf, submit)
   end, { buffer = buf, nowait = true, silent = true })
 
+  local models_key = config.values.keymaps.models
+  if models_key and models_key ~= "" then
+    vim.keymap.set({ "i", "n" }, models_key, function()
+      M.pick_model()
+    end, { buffer = buf, nowait = true, silent = true })
+  end
+
   vim.keymap.set("n", "<CR>", function()
     M.submit(buf, submit)
   end, { buffer = buf, nowait = true, silent = true })
@@ -132,6 +383,9 @@ function M.submit(buf, submit)
     vim.cmd("stopinsert")
   end
 
+  -- The window closes before the backend answers, so stash the composed text
+  -- now; a successful start clears it, a failed one leaves it for prefill.
+  state.prompt_stash = M.next_stash(state.prompt_stash, "submit", text)
   M.close()
   submit(text)
 end

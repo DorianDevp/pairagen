@@ -5,6 +5,7 @@ pub mod mock;
 pub mod ollama;
 pub mod stdio_agent;
 pub mod stream;
+pub(crate) mod support;
 
 use std::sync::Arc;
 
@@ -43,7 +44,43 @@ pub trait BackendAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Interrupts in-flight work for one Loopbiotic session. Persistent
+    /// backends override this so cancelling a Working card stops the actual
+    /// agent, not only the daemon future waiting for it.
+    async fn cancel_turn(&self, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Reports who will answer the next turn: the adapter name, the concrete
+    /// model it resolves to (configured, else discovered, else unknown), and
+    /// any models the backend can enumerate for switching.
+    async fn identity(&self) -> BackendIdentity {
+        BackendIdentity {
+            backend: self.capabilities().name,
+            model: None,
+            models: vec![],
+            phases: None,
+        }
+    }
+
     fn capabilities(&self) -> BackendInfo;
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BackendIdentity {
+    pub backend: String,
+    pub model: Option<String>,
+    pub models: Vec<String>,
+    /// Set when the backend runs different models per turn phase; `model`
+    /// then names the patch-phase model (the one that writes code).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phases: Option<BackendPhaseModels>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BackendPhaseModels {
+    pub discovery: Option<String>,
+    pub patch: Option<String>,
 }
 
 pub type ProgressReporter = Arc<dyn Fn(BackendProgress) + Send + Sync>;
@@ -96,6 +133,9 @@ pub enum BackendAction {
     Start,
     User(Action),
     Reply(String),
+    /// Continue after an accepted non-goal patch with a read-only,
+    /// conversational response.
+    PostAccept,
     ContractRetry(String),
     // The editor granted an open_location request mid-turn; the request's
     // context carries the freshly opened buffer.
@@ -108,6 +148,9 @@ pub struct CardContract {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_kind: Option<CardKind>,
     pub allow_goal_completion: bool,
+    /// Conversational turns may answer, point to evidence, or ask a question,
+    /// but must never return a patch or completion summary.
+    pub conversation_only: bool,
     pub max_body_chars: usize,
     pub max_patch_files: usize,
     pub max_hunks_per_patch: usize,
@@ -120,6 +163,7 @@ impl Default for CardContract {
             one_card_only: true,
             expected_kind: None,
             allow_goal_completion: false,
+            conversation_only: false,
             max_body_chars: 1_200,
             max_patch_files: MAX_PATCH_FILES,
             max_hunks_per_patch: MAX_HUNKS_PER_PATCH,
@@ -135,6 +179,19 @@ pub fn enforce_card_contract(
     raw_output: &str,
 ) -> Card {
     let Some(expected_kind) = contract.expected_kind else {
+        if contract.conversation_only
+            && matches!(card, Card::Patch(_) | Card::Summary(_) | Card::Working(_))
+        {
+            return Card::Error(ErrorCard {
+                id: "c_backend_contract_error".into(),
+                title: "Backend returned work during conversation".into(),
+                message: format!(
+                    "{backend} returned a {:?} card, but this turn requires a conversational response.",
+                    card.kind()
+                ),
+                actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+            });
+        }
         return card;
     };
 
@@ -208,6 +265,8 @@ pub fn estimate_tokens(text: &str) -> usize {
 pub struct SessionSnapshot {
     pub id: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interaction_feedback: Vec<String>,
     pub completed_steps: Vec<String>,
     pub known_observations: Vec<String>,
     pub mode: Mode,
@@ -216,12 +275,23 @@ pub struct SessionSnapshot {
     pub last_summary: Option<String>,
 }
 
+/// Length of the shared byte prefix of two prompts — the part a provider
+/// prompt cache can reuse across the two requests.
+#[cfg(test)]
+pub(crate) fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.bytes()
+        .zip(b.bytes())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
 #[cfg(test)]
 pub(crate) fn test_request() -> BackendRequest {
     BackendRequest {
         session: SessionSnapshot {
             id: "s_1".into(),
             prompt: "payload is empty".into(),
+            interaction_feedback: vec![],
             completed_steps: vec![],
             known_observations: vec![],
             mode: Mode::Auto,
@@ -250,6 +320,35 @@ pub(crate) fn test_request() -> BackendRequest {
 mod tests {
     use super::*;
     use loopbiotic_protocol::{HypothesisCard, SummaryCard};
+
+    struct BareAdapter;
+
+    #[async_trait]
+    impl BackendAdapter for BareAdapter {
+        async fn next_card(&self, _req: BackendRequest) -> Result<BackendResponse> {
+            unreachable!("identity tests never run a turn")
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "bare".into(),
+                streaming: false,
+                patches: false,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_identity_reports_the_adapter_name_without_a_model() {
+        let identity = BareAdapter.identity().await;
+
+        assert_eq!(identity.backend, "bare");
+        assert_eq!(identity.model, None);
+        assert!(identity.models.is_empty());
+    }
 
     fn hypothesis() -> Card {
         Card::Hypothesis(HypothesisCard {

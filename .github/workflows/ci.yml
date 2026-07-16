@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 permissions:
@@ -22,6 +22,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --no-fail-fast
 
+  lua-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: stylua,selene
+      - run: stylua --check lua/ tests/ scripts/headless-smoke.lua
+      - run: selene lua/
+
   neovim:
     runs-on: ubuntu-24.04
     steps:
@@ -30,9 +40,22 @@ jobs:
         with:
           version: stable
           neovim: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Lua unit tests
+        run: nvim --headless -u NONE -i NONE -l tests/lua/run.lua
       - name: Run headless smoke test
         env:
           XDG_STATE_HOME: ${{ runner.temp }}/state
           XDG_DATA_HOME: ${{ runner.temp }}/data
           XDG_CACHE_HOME: ${{ runner.temp }}/cache
+        run: nvim --headless -u NONE -i NONE -l scripts/headless-smoke.lua
+      - name: Build loopbioticd
+        run: cargo build -p loopbioticd
+      - name: Run real daemon round-trip
+        env:
+          XDG_STATE_HOME: ${{ runner.temp }}/state
+          XDG_DATA_HOME: ${{ runner.temp }}/data
+          XDG_CACHE_HOME: ${{ runner.temp }}/cache
+          LOOPBIOTIC_SMOKE_BIN: target/debug/loopbioticd
         run: nvim --headless -u NONE -i NONE -l scripts/headless-smoke.lua

@@ -62,7 +62,7 @@ function M.check()
 
   local agent_name, agent = config.agent_config()
   info("Active agent: " .. agent_name)
-  info("Active model: " .. (agent.model or "default"))
+  info("Active model: " .. require("loopbiotic").model_display())
   if agent.command then
     if vim.fn.executable(agent.command) == 1 then
       ok("Agent command: " .. agent.command)

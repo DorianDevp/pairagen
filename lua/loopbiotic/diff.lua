@@ -3,12 +3,24 @@ local context = require("loopbiotic.context")
 local log = require("loopbiotic.log")
 local navigation = require("loopbiotic.navigation")
 local rpc = require("loopbiotic.rpc")
+local session = require("loopbiotic.session")
 local state = require("loopbiotic.state")
 local thinking = require("loopbiotic.thinking")
 local ui = require("loopbiotic.ui")
+local util = require("loopbiotic.util")
 
 local M = {}
 local namespace = vim.api.nvim_create_namespace("loopbiotic-patch")
+
+local function bind(buf, keys, callback)
+  local seen = {}
+  for _, key in ipairs(keys) do
+    if key and key ~= "" and not seen[key] then
+      seen[key] = true
+      vim.keymap.set("n", key, callback, { buffer = buf, nowait = true, silent = true })
+    end
+  end
+end
 
 function M.show(card, opts)
   opts = opts or {}
@@ -36,30 +48,34 @@ function M.show(card, opts)
     return false
   end
 
+  -- Queued patches were validated daemon-side, so a failure here means the
+  -- draft went stale in review: parse failures are a malformed diff, while
+  -- resolve/apply failures mean the buffer drifted after the draft was made
+  -- (cards carry no queue-time changedtick, so resolution failure itself is
+  -- the drift signal). Offer recovery instead of dead-ending the goal.
   local source_lines = vim.api.nvim_buf_get_lines(source_buf, 0, -1, false)
   local hunk_ok, hunk = pcall(apply.parse_hunk, patch.diff)
   if not hunk_ok then
-    ui.notify(hunk, vim.log.levels.ERROR)
-    return false
+    return M.recover(card, "malformed", hunk)
   end
   local start_ok, source_start = pcall(apply.resolve_start, source_lines, hunk)
   if not start_ok then
-    ui.notify(source_start, vim.log.levels.ERROR)
-    return false
+    return M.recover(card, "drift", source_start)
   end
   local draft_ok, draft_lines = pcall(apply.apply_diff, source_lines, patch.diff)
   if not draft_ok then
-    ui.notify(draft_lines, vim.log.levels.ERROR)
-    return false
+    return M.recover(card, "drift", draft_lines)
   end
 
   local annotations = M.annotations(hunk, source_start)
   local change_cursor = M.change_cursor(draft_lines, annotations)
-  if not navigation.open_location({
-    file = patch.file,
-    line = change_cursor[1],
-    column = change_cursor[2] + 1,
-  }) then
+  if
+    not navigation.open_location({
+      file = patch.file,
+      line = change_cursor[1],
+      column = change_cursor[2] + 1,
+    })
+  then
     ui.notify("Source location is not visible", vim.log.levels.WARN)
     return false
   end
@@ -99,6 +115,69 @@ function M.show(card, opts)
   M.focus_change()
 
   return true
+end
+
+-- Decide what recovery to offer for a queued patch that failed to preview.
+-- Pure (kinds and actions in, choices out) so headless tests can cover the
+-- decision table directly.
+--
+-- Retrying redrafts the current goal slice against the live buffer, which is
+-- cheap, so it comes first: recovery is one keypress. There is no "skip this
+-- hunk" choice because no skip path exists — patch cards carry a single hunk
+-- and rejecting a draft stops at an explicit retry/edit/stop decision.
+---@param kind "malformed"|"drift" parse failure vs. stale buffer context
+---@param actions (string|table)[]|nil the card's available actions
+---@return { reason: string, choices: { label: string, action: "retry"|"cancel" }[] }|nil plan nil when the card cannot retry
+function M.recovery_plan(kind, actions)
+  local can_retry = false
+  for _, action in ipairs(actions or {}) do
+    if action == "retry" then
+      can_retry = true
+    end
+  end
+  if not can_retry then
+    return nil
+  end
+
+  return {
+    reason = kind == "malformed" and "the drafted patch is malformed"
+      or "draft no longer matches the buffer (edited since it was drafted)",
+    choices = {
+      { label = "Retry slice with current buffer", action = "retry" },
+      { label = "Cancel", action = "cancel" },
+    },
+  }
+end
+
+-- A queued patch failed to preview: prompt for recovery instead of leaving
+-- the goal at a dead end. The retry turn costs tokens, so it only fires on
+-- the user's explicit pick — never automatically. Always returns false so
+-- callers fall back to the plain card while the choice is pending.
+---@param card LoopbioticCard
+---@param kind "malformed"|"drift"
+---@param err string the underlying parse/resolve/apply error
+---@return boolean shown always false
+function M.recover(card, kind, err)
+  log.write("patch preview failed", { kind = kind, error = err })
+
+  local plan = M.recovery_plan(kind, card.actions or card.next_actions)
+  if not plan then
+    ui.notify(err, vim.log.levels.ERROR)
+    return false
+  end
+
+  vim.ui.select(plan.choices, {
+    prompt = "Loopbiotic: " .. plan.reason,
+    format_item = function(choice)
+      return choice.label
+    end,
+  }, function(choice)
+    if choice and choice.action == "retry" then
+      require("loopbiotic").action("retry", { allow_hidden = true })
+    end
+  end)
+
+  return false
 end
 
 function M.annotations(hunk, source_start)
@@ -203,16 +282,15 @@ function M.controls(card, opts)
     end
   end
 
-  vim.keymap.set("n", "a", M.accept, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "q", M.reject, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "r", M.retry, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "w", function()
+  bind(buf, { "a", keys.draft_accept }, M.accept)
+  bind(buf, { "q", keys.draft_reject }, M.reject)
+  bind(buf, { "r", keys.draft_retry }, M.retry)
+  bind(buf, { "w", keys.why }, function()
     require("loopbiotic").action("why")
-  end, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "e", function()
+  end)
+  bind(buf, { "e", "g", keys.go_to }, function()
     M.focus_change()
-  end, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "g", M.focus_change, { buffer = buf, nowait = true, silent = true })
+  end)
   local details_key = keys.details or "z"
   pcall(vim.keymap.del, "n", details_key, { buffer = buf })
   if M.details_available(card) then
@@ -226,8 +304,7 @@ function M.control_lines(card, keys)
   keys = keys or require("loopbiotic.config").values.keymaps
   local lines = {}
   if state.goal and state.goal.statement then
-    local goal = state.details_expanded and M.one_line(state.goal.statement)
-      or M.truncate(state.goal.statement, 52)
+    local goal = state.details_expanded and M.one_line(state.goal.statement) or M.truncate(state.goal.statement, 52)
     table.insert(lines, "Goal  " .. goal)
     local completed = #(state.goal.completed_steps or {})
     if completed > 0 then
@@ -263,8 +340,7 @@ end
 function M.details_available(card)
   local goal = state.goal and state.goal.statement
   local explanation = card.explanation or card.title or "Local change"
-  return goal and vim.fn.strdisplaywidth(M.one_line(goal)) > 52
-    or vim.fn.strdisplaywidth(M.one_line(explanation)) > 58
+  return goal and vim.fn.strdisplaywidth(M.one_line(goal)) > 52 or vim.fn.strdisplaywidth(M.one_line(explanation)) > 58
 end
 
 function M.toggle_details(card)
@@ -292,10 +368,7 @@ end
 function M.observation_network(observations)
   local nodes = {}
   for index, observation in ipairs(observations) do
-    local kind = observation.kind == "hypothesis" and "H" or observation.kind == "signal" and "S" or "F"
-    local active = observation.active and "*" or "."
-    local repeats = (observation.occurrences or 1) > 1 and "x" .. observation.occurrences or ""
-    table.insert(nodes, string.format("[%s%d%s%s]", kind, index, active, repeats))
+    table.insert(nodes, util.observation_node(observation, index))
   end
 
   return table.concat(nodes, "--")
@@ -402,7 +475,7 @@ end
 
 function M.send(accepted, patch_ids, changed_files, error)
   local session_id = state.session_id
-  local request_id = thinking.start(accepted and "Continuing" or "Reworking", session_id)
+  local request_id = thinking.start(accepted and "Continuing" or "Rejecting", session_id)
 
   rpc.request("patch/apply_result", {
     session_id = session_id,
@@ -429,14 +502,17 @@ function M.send(accepted, patch_ids, changed_files, error)
       return
     end
 
-    state.token_usage = message.result.token_usage
-    state.turn_token_usage = message.result.turn_token_usage
-    state.context_report = message.result.context_report
-    log.event("context_optimization", message.result.context_report or {})
-    log.event("agent_attempts", message.result.attempts or {})
-    state.goal = message.result.goal or state.goal
-    require("loopbiotic.card").show(message.result.card)
+    -- Patch results historically never updated state.backend_model.
+    session.apply_turn_result(message.result, {
+      update_model = false,
+      track_backend_error = accepted,
+    })
   end)
 end
+
+-- Error boundary: the draft preview is reached from RPC callbacks and
+-- keymaps; a preview bug must log and notify, not kill the session. The
+-- guarded wrapper returns nil on error, which callers treat as "not shown".
+M.show = util.guard("diff.show", M.show)
 
 return M

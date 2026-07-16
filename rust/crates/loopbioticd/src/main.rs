@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,13 @@ mod token_report;
 
 const OPEN_LOCATION_TIMEOUT: Duration = Duration::from_secs(120);
 const READ_FILE_TIMEOUT: Duration = Duration::from_secs(10);
+/// JSON-RPC error code returned by `initialize` when the client announces a
+/// protocol version that differs from [`loopbiotic_protocol::PROTOCOL_VERSION`].
+const PROTOCOL_MISMATCH_CODE: i64 = -32001;
 static NEXT_EDITOR_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TURN_ID: AtomicU64 = AtomicU64::new(1);
+const DEFAULT_CONVERSATION_DEADLINE: Duration = Duration::from_secs(10);
+const DEFAULT_WORK_DEADLINE: Duration = Duration::from_secs(20);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -66,23 +72,29 @@ async fn serve_stdio() -> Result<()> {
     // response; the main loop drains them before reading new lines.
     let deferred = Arc::new(Mutex::new(VecDeque::<String>::new()));
 
-    let mut server = Server::new(backend, progress_reporter(stdout.clone()));
-    server.engine.set_location_granter(location_granter(
-        stdout.clone(),
-        lines.clone(),
-        deferred.clone(),
-    ));
-    server
-        .engine
-        .set_source_context_provider(source_context_provider(
+    let mut server = Server::new(backend, progress_reporter(stdout.clone()), stdout.clone());
+    {
+        let mut engine = server.engine.lock().await;
+        engine.set_location_granter(location_granter(
             stdout.clone(),
             lines.clone(),
             deferred.clone(),
         ));
+        engine.set_source_context_provider(source_context_provider(
+            stdout.clone(),
+            lines.clone(),
+            deferred.clone(),
+        ));
+    }
 
     loop {
         let line = {
-            let queued = deferred.lock().expect("deferred lock").pop_front();
+            // A poisoned lock only means another thread panicked while holding
+            // it; the queue holds whole lines, so the inner data is still valid.
+            let queued = deferred
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pop_front();
             match queued {
                 Some(line) => line,
                 None => match lines.lock().await.recv().await {
@@ -229,7 +241,12 @@ async fn request_editor_context(
                 .cloned()
                 .and_then(|context| serde_json::from_value::<ContextBundle>(context).ok());
         }
-        deferred.lock().expect("deferred lock").push_back(line);
+        // A poisoned lock only means another thread panicked while holding
+        // it; the queue holds whole lines, so the inner data is still valid.
+        deferred
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push_back(line);
     }
 }
 
@@ -246,19 +263,74 @@ pub(crate) fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
 
 struct Server {
     backend: Arc<dyn BackendAdapter>,
-    engine: Engine,
+    engine: Arc<tokio::sync::Mutex<Engine>>,
     progress: ProgressReporter,
+    stdout: Arc<Mutex<io::Stdout>>,
+    pending: HashMap<String, PendingTurn>,
+    interaction_feedback: HashMap<String, Vec<String>>,
+}
+
+struct PendingTurn {
+    turn_id: String,
+    generation: u64,
+    abort: tokio::task::AbortHandle,
+}
+
+enum TurnCommand {
+    Start {
+        session_id: String,
+        generation: u64,
+    },
+    Action {
+        session_id: String,
+        generation: u64,
+        action: loopbiotic_protocol::Action,
+    },
+    Reply {
+        session_id: String,
+        generation: u64,
+        text: String,
+    },
+    Apply {
+        result: Box<PatchApplyResult>,
+        generation: u64,
+    },
+}
+
+impl TurnCommand {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Start { .. } | Self::Reply { .. } => "conversation",
+            Self::Action {
+                action:
+                    loopbiotic_protocol::Action::Fix
+                    | loopbiotic_protocol::Action::Goal
+                    | loopbiotic_protocol::Action::Retry
+                    | loopbiotic_protocol::Action::EditPrompt,
+                ..
+            } => "work",
+            Self::Action { .. } => "conversation",
+            Self::Apply { .. } => "post_accept",
+        }
+    }
 }
 
 impl Server {
-    fn new(backend: Arc<dyn BackendAdapter>, progress: ProgressReporter) -> Self {
+    fn new(
+        backend: Arc<dyn BackendAdapter>,
+        progress: ProgressReporter,
+        stdout: Arc<Mutex<io::Stdout>>,
+    ) -> Self {
         let mut engine = Engine::new(backend.clone());
         engine.set_prefetch_mode(prefetch_mode_from_env());
 
         Self {
-            engine,
+            engine: Arc::new(tokio::sync::Mutex::new(engine)),
             backend,
             progress,
+            stdout,
+            pending: HashMap::new(),
+            interaction_feedback: HashMap::new(),
         }
     }
 
@@ -280,75 +352,192 @@ impl Server {
     ) -> Result<JsonRpcResponse, (Value, String)> {
         let id = request.id.clone();
         let result = match request.method.as_str() {
-            "initialize" => json!({
-                "server": "loopbioticd",
-                "version": env!("CARGO_PKG_VERSION"),
-                "protocol_version": loopbiotic_protocol::PROTOCOL_VERSION,
-                "backend": self.backend.capabilities(),
-            }),
+            "initialize" => {
+                // Old clients omit params.client.protocol_version entirely;
+                // the check only runs when the client announces a version.
+                let client_version = request
+                    .params
+                    .get("client")
+                    .and_then(|client| client.get("protocol_version"))
+                    .and_then(Value::as_u64);
+                if let Some(client_version) = client_version
+                    && client_version != u64::from(loopbiotic_protocol::PROTOCOL_VERSION)
+                {
+                    return Ok(JsonRpcResponse::err(
+                        id,
+                        PROTOCOL_MISMATCH_CODE,
+                        format!(
+                            "protocol version mismatch: client speaks protocol version {client_version}, loopbioticd speaks {}; update the Loopbiotic plugin and loopbioticd so both are on the same version",
+                            loopbiotic_protocol::PROTOCOL_VERSION
+                        ),
+                    ));
+                }
+
+                json!({
+                    "server": "loopbioticd",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "protocol_version": loopbiotic_protocol::PROTOCOL_VERSION,
+                    "backend": self.backend.capabilities(),
+                })
+            }
             "backend/list" => json!([self.backend.capabilities()]),
             "session/start" => {
                 let params = parse::<StartSessionParams>(&id, request.params)?;
-                let result = self
-                    .engine
-                    .start_with_progress(params, Some(self.progress.clone()))
-                    .await
-                    .map_err(server_error(&id))?;
-
-                json!(result)
+                let deadline = start_deadline(&params);
+                let (session_id, generation, working) = {
+                    let mut engine = self.engine.lock().await;
+                    let (session_id, generation) = engine.reserve_start(params);
+                    let turn_id = next_turn_id();
+                    let working = engine
+                        .working_result(&session_id, &turn_id, deadline.as_millis() as u64)
+                        .map_err(server_error(&id))?;
+                    (session_id, generation, (turn_id, working))
+                };
+                self.run_turn(
+                    TurnCommand::Start {
+                        session_id: session_id.clone(),
+                        generation,
+                    },
+                    session_id,
+                    generation,
+                    working,
+                    deadline,
+                )
+                .await
+                .map_err(server_error(&id))?
             }
             "session/action" => {
                 let params = parse::<ActionParams>(&id, request.params)?;
+                self.abort_pending(&params.session_id).await;
+                self.apply_interaction_feedback(&params.session_id)
+                    .await
+                    .map_err(server_error(&id))?;
+                if params.action == loopbiotic_protocol::Action::CancelTurn {
+                    let result = self
+                        .engine
+                        .lock()
+                        .await
+                        .cancel_turn(&params.session_id)
+                        .await
+                        .map_err(server_error(&id))?;
+                    return Ok(JsonRpcResponse::ok(id, json!(result)));
+                }
                 if let Some(context) = params.context {
                     self.engine
+                        .lock()
+                        .await
                         .update_context(&params.session_id, context)
                         .map_err(server_error(&id))?;
                 }
-                let result = self
-                    .engine
-                    .action_with_progress(
-                        &params.session_id,
-                        params.action,
-                        Some(self.progress.clone()),
-                    )
-                    .await
-                    .map_err(server_error(&id))?;
-
-                json!(result)
+                let deadline = action_deadline(&params.action);
+                let (generation, working) = {
+                    let mut engine = self.engine.lock().await;
+                    let generation = engine
+                        .begin_turn(&params.session_id)
+                        .map_err(server_error(&id))?;
+                    let turn_id = next_turn_id();
+                    let working = engine
+                        .working_result(&params.session_id, &turn_id, deadline.as_millis() as u64)
+                        .map_err(server_error(&id))?;
+                    (generation, (turn_id, working))
+                };
+                self.run_turn(
+                    TurnCommand::Action {
+                        session_id: params.session_id.clone(),
+                        generation,
+                        action: params.action,
+                    },
+                    params.session_id,
+                    generation,
+                    working,
+                    deadline,
+                )
+                .await
+                .map_err(server_error(&id))?
             }
             "session/reply" => {
                 let params = parse::<ReplyParams>(&id, request.params)?;
+                self.abort_pending(&params.session_id).await;
+                self.apply_interaction_feedback(&params.session_id)
+                    .await
+                    .map_err(server_error(&id))?;
                 if let Some(context) = params.context {
                     self.engine
+                        .lock()
+                        .await
                         .update_context(&params.session_id, context)
                         .map_err(server_error(&id))?;
                 }
-                let result = self
-                    .engine
-                    .reply_with_progress(
-                        &params.session_id,
-                        params.text,
-                        Some(self.progress.clone()),
-                    )
-                    .await
-                    .map_err(server_error(&id))?;
-
-                json!(result)
+                let (generation, working) = {
+                    let mut engine = self.engine.lock().await;
+                    let generation = engine
+                        .begin_turn(&params.session_id)
+                        .map_err(server_error(&id))?;
+                    let turn_id = next_turn_id();
+                    let working = engine
+                        .working_result(
+                            &params.session_id,
+                            &turn_id,
+                            conversation_deadline().as_millis() as u64,
+                        )
+                        .map_err(server_error(&id))?;
+                    (generation, (turn_id, working))
+                };
+                self.run_turn(
+                    TurnCommand::Reply {
+                        session_id: params.session_id.clone(),
+                        generation,
+                        text: params.text,
+                    },
+                    params.session_id,
+                    generation,
+                    working,
+                    conversation_deadline(),
+                )
+                .await
+                .map_err(server_error(&id))?
             }
             "patch/apply_result" => {
                 let params = parse::<PatchApplyResult>(&id, request.params)?;
-                let result = self
-                    .engine
-                    .apply_result_with_progress(params, Some(self.progress.clone()))
+                self.abort_pending(&params.session_id).await;
+                self.apply_interaction_feedback(&params.session_id)
                     .await
                     .map_err(server_error(&id))?;
-
-                json!(result)
+                let session_id = params.session_id.clone();
+                let deadline = if params.accepted {
+                    Duration::from_millis(1)
+                } else {
+                    Duration::from_secs(2)
+                };
+                let (generation, working) = {
+                    let mut engine = self.engine.lock().await;
+                    let generation = engine.begin_turn(&session_id).map_err(server_error(&id))?;
+                    let turn_id = next_turn_id();
+                    let working = engine
+                        .working_result(&session_id, &turn_id, deadline.as_millis() as u64)
+                        .map_err(server_error(&id))?;
+                    (generation, (turn_id, working))
+                };
+                self.run_turn(
+                    TurnCommand::Apply {
+                        result: Box::new(params),
+                        generation,
+                    },
+                    session_id,
+                    generation,
+                    working,
+                    deadline,
+                )
+                .await
+                .map_err(server_error(&id))?
             }
             "session/stop" => {
                 let params = parse::<ActionParams>(&id, request.params)?;
+                self.abort_pending(&params.session_id).await;
                 let result = self
                     .engine
+                    .lock()
+                    .await
                     .action_with_progress(
                         &params.session_id,
                         loopbiotic_protocol::Action::Stop,
@@ -365,7 +554,7 @@ impl Server {
                     .await
                     .map_err(|error| (id.clone(), error.to_string()))?;
 
-                json!({"ok": true})
+                json!({"ok": true, "identity": self.backend.identity().await})
             }
             "shutdown" => json!({"ok": true}),
             method => return Err((id, format!("unknown method {method}"))),
@@ -373,12 +562,230 @@ impl Server {
 
         Ok(JsonRpcResponse::ok(id, result))
     }
+
+    async fn abort_pending(&mut self, session_id: &str) {
+        if let Some(pending) = self.pending.remove(session_id) {
+            let finished = pending.abort.is_finished();
+            if !finished {
+                pending.abort.abort();
+                if let Err(error) = self.backend.cancel_turn(session_id).await {
+                    eprintln!(
+                        "loopbioticd: failed to cancel backend turn {}: {error:#}",
+                        pending.turn_id
+                    );
+                }
+            }
+            eprintln!(
+                "loopbioticd: {} pending turn {} generation {}",
+                if finished { "reaped" } else { "cancelled" },
+                pending.turn_id,
+                pending.generation
+            );
+        }
+    }
+
+    async fn apply_interaction_feedback(&mut self, session_id: &str) -> Result<()> {
+        let feedback = self
+            .interaction_feedback
+            .remove(session_id)
+            .unwrap_or_default();
+        if feedback.is_empty() {
+            return Ok(());
+        }
+
+        let mut engine = self.engine.lock().await;
+        for item in feedback {
+            engine.record_interaction_feedback(session_id, item)?;
+        }
+
+        Ok(())
+    }
+
+    async fn run_turn(
+        &mut self,
+        command: TurnCommand,
+        session_id: String,
+        generation: u64,
+        working: (String, loopbiotic_protocol::ActionResult),
+        deadline: Duration,
+    ) -> Result<Value> {
+        let (turn_id, working_result) = working;
+        let turn_kind = command.kind();
+        let engine = self.engine.clone();
+        let progress = self.progress.clone();
+        let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let result = execute_turn(engine, command, progress)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = result_tx.send(result);
+        });
+        let abort = task.abort_handle();
+
+        tokio::select! {
+            result = &mut result_rx => {
+                match result {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(error)) => Err(anyhow::anyhow!(error)),
+                    Err(_) => Err(anyhow::anyhow!("turn task stopped before returning a result")),
+                }
+            }
+            _ = tokio::time::sleep(deadline) => {
+                let deadline_ms = deadline.as_millis() as u64;
+                self.interaction_feedback
+                    .entry(session_id.clone())
+                    .or_default()
+                    .push(format!(
+                        "The previous {turn_kind} turn exceeded Loopbiotic's {deadline_ms} ms interaction deadline and yielded control. Keep this response compact and interactive: return one useful answer or one small authorized step before optional investigation."
+                    ));
+                self.pending.insert(session_id.clone(), PendingTurn {
+                    turn_id: turn_id.clone(),
+                    generation,
+                    abort,
+                });
+                let yielded = JsonRpcNotification {
+                    jsonrpc: "2.0".into(),
+                    method: "agent/turn_yielded".into(),
+                    params: json!({
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "generation": generation,
+                        "turn_kind": turn_kind,
+                        "deadline_ms": deadline_ms,
+                    }),
+                };
+                if let Err(error) = write_json(&self.stdout, &yielded) {
+                    eprintln!("loopbioticd: failed to write turn-yielded notification: {error}");
+                }
+                let stdout = self.stdout.clone();
+                tokio::spawn(async move {
+                    let params = match result_rx.await {
+                        Ok(Ok(result)) => json!({
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "generation": generation,
+                            "result": result,
+                        }),
+                        Ok(Err(error)) => json!({
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "generation": generation,
+                            "error": error,
+                        }),
+                        Err(_) => return,
+                    };
+                    let notification = JsonRpcNotification {
+                        jsonrpc: "2.0".into(),
+                        method: "agent/turn_ready".into(),
+                        params,
+                    };
+                    if let Err(error) = write_json(&stdout, &notification) {
+                        eprintln!("loopbioticd: failed to write turn-ready notification: {error}");
+                    }
+                });
+
+                Ok(json!(working_result))
+            }
+        }
+    }
+}
+
+async fn execute_turn(
+    engine: Arc<tokio::sync::Mutex<Engine>>,
+    command: TurnCommand,
+    progress: ProgressReporter,
+) -> Result<Value> {
+    let mut engine = engine.lock().await;
+    match command {
+        TurnCommand::Start {
+            session_id,
+            generation,
+        } => engine
+            .complete_start_with_progress(&session_id, generation, Some(progress))
+            .await
+            .map(|result| json!(result)),
+        TurnCommand::Action {
+            session_id,
+            generation,
+            action,
+        } => engine
+            .action_with_progress_generation(&session_id, generation, action, Some(progress))
+            .await
+            .map(|result| json!(result)),
+        TurnCommand::Reply {
+            session_id,
+            generation,
+            text,
+        } => engine
+            .reply_with_progress_generation(&session_id, generation, text, Some(progress))
+            .await
+            .map(|result| json!(result)),
+        TurnCommand::Apply { result, generation } => engine
+            .apply_result_with_progress_generation(*result, generation, Some(progress))
+            .await
+            .map(|result| json!(result)),
+    }
+}
+
+fn next_turn_id() -> String {
+    format!("t_{}", NEXT_TURN_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+fn start_deadline(params: &StartSessionParams) -> Duration {
+    let forced_patch = matches!(
+        loopbiotic_harness::session::parse_kind_prefix(&params.prompt).0,
+        Some(loopbiotic_protocol::CardKind::Patch)
+    );
+    if forced_patch
+        || matches!(
+            params.mode,
+            loopbiotic_protocol::Mode::Fix | loopbiotic_protocol::Mode::Propose
+        )
+    {
+        work_deadline()
+    } else {
+        conversation_deadline()
+    }
+}
+
+fn action_deadline(action: &loopbiotic_protocol::Action) -> Duration {
+    if matches!(
+        action,
+        loopbiotic_protocol::Action::Fix
+            | loopbiotic_protocol::Action::Goal
+            | loopbiotic_protocol::Action::Retry
+            | loopbiotic_protocol::Action::EditPrompt
+    ) {
+        work_deadline()
+    } else {
+        conversation_deadline()
+    }
+}
+
+fn conversation_deadline() -> Duration {
+    deadline_from_env(
+        "LOOPBIOTIC_CONVERSATION_DEADLINE_MS",
+        DEFAULT_CONVERSATION_DEADLINE,
+    )
+}
+
+fn work_deadline() -> Duration {
+    deadline_from_env("LOOPBIOTIC_WORK_DEADLINE_MS", DEFAULT_WORK_DEADLINE)
+}
+
+fn deadline_from_env(name: &str, default: Duration) -> Duration {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(default)
 }
 
 fn prefetch_mode_from_env() -> PrefetchMode {
     match std::env::var("LOOPBIOTIC_PREFETCH").as_deref() {
-        Ok("fix") => PrefetchMode::Fix,
-        _ => PrefetchMode::Off,
+        Ok("off") => PrefetchMode::Off,
+        _ => PrefetchMode::ReadOnly,
     }
 }
 
@@ -555,4 +962,41 @@ fn print_help() -> Result<()> {
     eprintln!("loopbioticd dev token-report --check BASELINE CURRENT");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stale_server_response;
+
+    #[test]
+    fn stale_detects_response_to_daemon_initiated_request() {
+        assert!(is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":"loopbioticd_7","result":{"granted":false}}"#
+        ));
+    }
+
+    #[test]
+    fn stale_ignores_requests_even_with_daemon_style_id() {
+        assert!(!is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":"loopbioticd_7","method":"editor/open_location","params":{}}"#
+        ));
+    }
+
+    #[test]
+    fn stale_ignores_client_responses_and_requests() {
+        assert!(!is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":"client_1","result":{}}"#
+        ));
+        assert!(!is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#
+        ));
+    }
+
+    #[test]
+    fn stale_ignores_non_json_and_numeric_ids() {
+        assert!(!is_stale_server_response("not json"));
+        assert!(!is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":42,"result":{}}"#
+        ));
+    }
 }
