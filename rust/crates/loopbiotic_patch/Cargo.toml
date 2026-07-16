@@ -11,4 +11,3 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 loopbiotic_protocol = { path = "../loopbiotic_protocol" }
-thiserror.workspace = true

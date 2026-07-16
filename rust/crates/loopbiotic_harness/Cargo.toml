@@ -10,12 +10,13 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 loopbiotic_backends = { path = "../loopbiotic_backends" }
 loopbiotic_context = { path = "../loopbiotic_context" }
 loopbiotic_patch = { path = "../loopbiotic_patch" }
 loopbiotic_protocol = { path = "../loopbiotic_protocol" }
 serde_json.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
