@@ -13,7 +13,7 @@ require("loopbiotic").setup({
     },
   },
 })
-assert(config.values.backend.prefetch == "off")
+assert(config.values.backend.prefetch == "read_only")
 assert(config.values.backend.token_budget == 50000)
 assert(config.values.keymaps.resume ~= config.values.keymaps.draft_retry)
 assert(config.values.keymaps.resume == "<leader>pr")
@@ -198,6 +198,8 @@ local patch_card = {
 }
 require("loopbiotic.commands").setup()
 assert(vim.fn.exists(":LoopbioticAssess") == 2)
+assert(vim.fn.exists(":LoopbioticGoal") == 2)
+assert(vim.fn.exists(":LoopbioticCancel") == 2)
 state.goal = {
   statement = long_goal,
   completed_steps = { "first", "second" },

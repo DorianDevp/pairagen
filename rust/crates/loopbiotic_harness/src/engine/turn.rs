@@ -8,8 +8,7 @@ use loopbiotic_patch::{
     PatchCoherence, PatchNormalizer, PatchValidator, violation, violation_class,
 };
 use loopbiotic_protocol::{
-    Action, AgentAttempt, Card, ContextBundle, ErrorCard, MAX_GOAL_CHANGED_LINES,
-    MAX_GOAL_HUNKS_PER_PATCH, MAX_GOAL_PATCH_FILES, TokenUsage, ViolationClass,
+    Action, AgentAttempt, Card, ContextBundle, ErrorCard, TokenUsage, ViolationClass,
 };
 
 use crate::session::Session;
@@ -243,7 +242,7 @@ impl Engine {
                         });
                     }
                     let instruction = if matches!(expected, NextState::GoalLoop) {
-                        "Re-read every affected file with read-only tools and return the corrected patch with the same scope as before (the same file slice plus its plan, or the same complete batch). Context/remove lines must be exact and contiguous in each corresponding source. Use open_location only if a required source cannot be inspected."
+                        "Re-read the affected block with read-only tools and return the corrected patch with the same small one-hunk scope plus its refreshed plan. Context/remove lines must be exact and contiguous. Use open_location only if the required source cannot be inspected."
                     } else {
                         "Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card. If the change belongs in a different file than the supplied buffer, return an open_location op with that place instead of another patch."
                     };
@@ -304,12 +303,7 @@ impl Engine {
         validate_one_card(candidate)?;
         // Correct miscounted hunk headers before the count check rejects them.
         PatchNormalizer::normalize_hunk_headers(candidate)?;
-        PatchValidator::validate_card_with_limits(
-            candidate,
-            MAX_GOAL_PATCH_FILES,
-            MAX_GOAL_HUNKS_PER_PATCH,
-            MAX_GOAL_CHANGED_LINES,
-        )?;
+        PatchValidator::validate_card(candidate)?;
         let Card::Patch(card) = candidate else {
             // Guarded by the `matches!` early return above; degrade to a
             // contract failure (retry/rejected card) instead of panicking if

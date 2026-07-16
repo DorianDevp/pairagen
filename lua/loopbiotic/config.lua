@@ -5,7 +5,7 @@ local M = {}
 ---@field args string[]
 ---@field mode string default prompt mode ("auto", "fix", "explain", ...)
 ---@field agent string key into LoopbioticConfig.agents
----@field prefetch "off"|"fix" speculative patch prefetch
+---@field prefetch "off"|"read_only" read-only post-accept prefetch
 ---@field token_budget integer ask before another turn past this session total; 0 disables
 
 ---@class LoopbioticAgentConfig
@@ -16,7 +16,8 @@ local M = {}
 ---@field model_flag? string
 ---@field models? string[] extra model-picker candidates for this agent
 ---@field effort? string codex_app only
----@field discovery_model? string claude_app only
+---@field discovery_model? string codex_app/claude_app
+---@field discovery_effort? string codex_app only
 ---@field discovery_thinking? integer claude_app only
 ---@field host? string ollama only
 ---@field keep_alive? string ollama only
@@ -41,9 +42,9 @@ M.values = {
     args = {},
     mode = "auto",
     agent = "mock",
-    -- Speculative prefetch spends a patch turn before the user asks for it.
-    -- Keep it opt-in with "fix"; "off" never starts speculative model work.
-    prefetch = "off",
+    -- Ordinary speculation never drafts code: it prepares only the
+    -- conversational card shown after an accepted local patch.
+    prefetch = "read_only",
     -- Ask before starting another model turn after this session total.
     -- Set to 0 to disable the guard.
     token_budget = 50000,
@@ -65,6 +66,8 @@ M.values = {
       kind = "codex_app",
       command = "codex",
       effort = "low",
+      discovery_model = "gpt-5.4-mini",
+      discovery_effort = "low",
       models = {},
       args = {
         "app-server",
@@ -103,6 +106,8 @@ M.values = {
     follow = "<leader>pf",
     why = "<leader>pw",
     fix = "<leader>px",
+    goal = "<leader>pG",
+    cancel = "<leader>pc",
     other_lead = "<leader>pn",
     stop = "<leader>pq",
     hide = "<leader>ph",
@@ -339,7 +344,7 @@ end
 function M.backend_env()
   local _, agent = M.agent_config()
   local env = M.agent_env(agent)
-  env.LOOPBIOTIC_PREFETCH = M.values.backend.prefetch or "off"
+  env.LOOPBIOTIC_PREFETCH = M.values.backend.prefetch or "read_only"
 
   return env
 end
@@ -372,6 +377,8 @@ function M.agent_env(agent)
       LOOPBIOTIC_CODEX_ARGS_JSON = vim.json.encode(args),
       LOOPBIOTIC_CODEX_MODEL = agent.model or "",
       LOOPBIOTIC_CODEX_EFFORT = agent.effort or "low",
+      LOOPBIOTIC_CODEX_DISCOVERY_MODEL = agent.discovery_model or "",
+      LOOPBIOTIC_CODEX_DISCOVERY_EFFORT = agent.discovery_effort or "low",
     }
   end
 

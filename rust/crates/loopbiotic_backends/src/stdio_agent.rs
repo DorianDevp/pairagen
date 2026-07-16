@@ -214,6 +214,16 @@ impl BackendAdapter for StdioAgentBackend {
         })
     }
 
+    async fn cancel_turn(&self, _session_id: &str) -> Result<()> {
+        let mut process = self.process.lock().await;
+        if let Some(active) = process.as_mut() {
+            let _ = active.child.start_kill();
+        }
+        *process = None;
+
+        Ok(())
+    }
+
     fn capabilities(&self) -> BackendInfo {
         BackendInfo {
             name: "agent_stdio".into(),
@@ -239,6 +249,7 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
         "s": {
             "id": req.session.id,
             "p": req.session.prompt,
+            "interaction_feedback": req.session.interaction_feedback,
             "completed_steps": req.session.completed_steps,
             "known_observations": req.session.known_observations,
             "mode": req.session.mode,
@@ -253,7 +264,7 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
 
 fn agent_api() -> serde_json::Value {
     json!(
-        "Return one JSON Loopbiotic op only. Ops: hypothesis, finding, patch, choice, deny, open_location, summary, error. Use deny(title,reason) when you cannot or should not proceed, such as an ambiguous prompt or missing information; the reason is shown to the user. error is only for technical failures. Behave as an equal pair-programming partner. Return patch for user action fix or start mode fix unless impossible. When limits.allow_goal_completion is true, inspect every required file and return the complete multi-file patch batch in one turn within the supplied file, hunk, and changed-line limits; Loopbiotic verifies and reviews its hunks locally. Set patch.goal_complete true when accepting the batch finishes the original goal. When goal completion is true and the expected card is finding because the user asked why, explain the pending hunk without replacing it or advancing the goal. A non-goal patch is one local step: exactly one file and one hunk within the supplied changed-line limit. patch.diff must be unified diff hunks starting with @@. You may first emit newline-delimited {\"t\":\"loopbiotic_progress\",\"phase\":string,\"message\":string} records with concise user-visible activity summaries. Never emit hidden reasoning or private chain-of-thought. End with either a raw Loopbiotic op or {\"t\":\"loopbiotic_result\",\"result\":<Loopbiotic op>}."
+        "Return one JSON Loopbiotic op only. Ops: hypothesis, finding, patch, choice, deny, open_location, summary, error. When limits.conversation_only is true, never return patch or summary. Return patch for user action fix or start mode fix unless impossible. Goal execution is explicit and advances one small, compilable hunk per turn with a plan of remaining coherent steps. A patch is exactly one file and one hunk within the supplied changed-line limit. You may emit loopbiotic_progress records before the result. Never emit hidden reasoning. End with either a raw Loopbiotic op or a loopbiotic_result record."
     )
 }
 

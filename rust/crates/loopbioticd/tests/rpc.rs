@@ -6,13 +6,16 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
+use loopbiotic_patch::{PatchApply, UnifiedDiff};
 use loopbiotic_protocol::PROTOCOL_VERSION;
 use serde_json::{Value, json};
 
 /// Generous per-message deadline so slow CI cannot flake, while a hung daemon
 /// still fails the test instead of blocking forever.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
-const REAL_CODEX_RESPONSE_BUDGET: Duration = Duration::from_secs(20);
+const REAL_CODEX_CONVERSATION_BUDGET: Duration = Duration::from_secs(11);
+const REAL_CODEX_WORK_BUDGET: Duration = Duration::from_secs(21);
+const LOCAL_INTERACTION_BUDGET: Duration = Duration::from_secs(2);
 
 struct Daemon {
     child: Child,
@@ -34,7 +37,7 @@ impl Daemon {
 
     fn spawn_codex() -> Self {
         let model =
-            std::env::var("LOOPBIOTIC_REAL_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.6-sol".into());
+            std::env::var("LOOPBIOTIC_REAL_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into());
         Self::spawn_codex_model(model)
     }
 
@@ -47,7 +50,34 @@ impl Daemon {
             .env("LOOPBIOTIC_CODEX_ARGS_JSON", r#"["app-server","--stdio"]"#)
             .env("LOOPBIOTIC_CODEX_MODEL", model.as_ref())
             .env("LOOPBIOTIC_CODEX_EFFORT", "low")
+            .env("LOOPBIOTIC_CODEX_DISCOVERY_MODEL", "gpt-5.4-mini")
+            .env("LOOPBIOTIC_CODEX_DISCOVERY_EFFORT", "low")
             .env("LOOPBIOTIC_TURN_TIMEOUT_SECS", "120")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        Self::spawn_command(command)
+    }
+
+    fn spawn_codex_with_deadlines(conversation_ms: u64, work_ms: u64) -> Self {
+        let model =
+            std::env::var("LOOPBIOTIC_REAL_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_loopbioticd"));
+        command
+            .arg("--stdio")
+            .env("LOOPBIOTIC_BACKEND", "codex_app")
+            .env("LOOPBIOTIC_CODEX_COMMAND", "codex")
+            .env("LOOPBIOTIC_CODEX_ARGS_JSON", r#"["app-server","--stdio"]"#)
+            .env("LOOPBIOTIC_CODEX_MODEL", model)
+            .env("LOOPBIOTIC_CODEX_EFFORT", "low")
+            .env("LOOPBIOTIC_CODEX_DISCOVERY_MODEL", "gpt-5.4-mini")
+            .env("LOOPBIOTIC_CODEX_DISCOVERY_EFFORT", "low")
+            .env("LOOPBIOTIC_TURN_TIMEOUT_SECS", "120")
+            .env(
+                "LOOPBIOTIC_CONVERSATION_DEADLINE_MS",
+                conversation_ms.to_string(),
+            )
+            .env("LOOPBIOTIC_WORK_DEADLINE_MS", work_ms.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -174,6 +204,57 @@ impl Daemon {
                 "expected a response to {id}, got: {message}"
             );
             return message;
+        }
+    }
+
+    fn finish_turn(
+        &mut self,
+        response: Value,
+        timeout: Duration,
+        context: Option<&Value>,
+    ) -> Value {
+        assert!(
+            response.get("error").is_none(),
+            "unexpected turn error: {response}"
+        );
+        let result = response["result"].clone();
+        if result["card"]["kind"] != json!("working") {
+            return result;
+        }
+
+        let turn_id = result["card"]["turn_id"]
+            .as_str()
+            .expect("working turn id")
+            .to_owned();
+        let started = Instant::now();
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            assert!(
+                !remaining.is_zero(),
+                "timed out after {timeout:?} waiting for turn {turn_id}"
+            );
+            let message = self.next_message_with_timeout(remaining);
+            if let Some(method) = message.get("method").and_then(Value::as_str) {
+                if let Some(request_id) = message.get("id").and_then(Value::as_str)
+                    && matches!(method, "editor/read_file" | "editor/open_location")
+                {
+                    self.send(&json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": match context {
+                            Some(context) => json!({"granted": true, "context": context}),
+                            None => json!({"granted": false}),
+                        },
+                    }));
+                    continue;
+                }
+                if method == "agent/turn_ready" && message["params"]["turn_id"] == json!(turn_id) {
+                    if let Some(error) = message["params"]["error"].as_str() {
+                        panic!("background turn failed: {error}");
+                    }
+                    return message["params"]["result"].clone();
+                }
+            }
         }
     }
 
@@ -337,7 +418,7 @@ fn session_start_returns_first_mock_card() {
     // The mock backend opens investigations with its hypothesis card.
     assert_eq!(result["card"]["kind"], json!("hypothesis"));
     assert_eq!(result["card"]["title"], json!("Payload may be skipped"));
-    assert_eq!(result["goal"]["status"], json!("active"));
+    assert_eq!(result["goal"]["status"], json!("idle"));
 
     // Following the lead keeps the same session alive and yields the next card.
     let session_id = result["session_id"]
@@ -412,7 +493,7 @@ fn real_codex_auto_proposal_is_fast_and_non_mutating() {
         response.get("error").is_none(),
         "unexpected error: {response}"
     );
-    let result = &response["result"];
+    let result = daemon.finish_turn(response, Duration::from_secs(120), None);
     let kind = result["card"]["kind"].as_str().unwrap_or("<missing>");
     let title = result["card"]["title"].as_str().unwrap_or("<missing>");
     let message = result["card"]["message"].as_str().unwrap_or("");
@@ -429,12 +510,257 @@ fn real_codex_auto_proposal_is_fast_and_non_mutating() {
     );
 
     assert!(
-        elapsed <= REAL_CODEX_RESPONSE_BUDGET,
-        "proposal took {elapsed:?}; Neovim users must not wait over {REAL_CODEX_RESPONSE_BUDGET:?}"
+        elapsed <= REAL_CODEX_CONVERSATION_BUDGET,
+        "proposal took {elapsed:?}; Neovim users must regain control within {REAL_CODEX_CONVERSATION_BUDGET:?}"
     );
     assert!(
         matches!(kind, "hypothesis" | "finding" | "choice"),
         "a proposal question must return a useful answer/plan, not {kind}: {title}: {message}"
+    );
+}
+
+/// Full real-agent product gate: a question and reply stay conversational,
+/// Fix returns one small draft, and accepting it automatically yields a
+/// conversational next card without an intermediate summary.
+///
+/// cargo test -p loopbioticd --test rpc \
+///   real_codex_interactive_question_fix_accept_workflow -- --ignored --nocapture
+#[test]
+#[ignore = "requires an authenticated real Codex CLI"]
+fn real_codex_interactive_question_fix_accept_workflow() {
+    let cwd = std::env::temp_dir().join(format!(
+        "loopbiotic-real-codex-interactive-{}",
+        std::process::id()
+    ));
+    let source = cwd.join("src/work.ts");
+    let original = "export function displayName(first, last) {\n  return `${first} ${last}`;\n}\n";
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("create fixture");
+    std::fs::write(&source, original).expect("write fixture");
+
+    let mut daemon = Daemon::spawn_codex();
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+
+    let context = json!({
+        "cwd": cwd,
+        "file": "src/work.ts",
+        "cursor": {"line": 2, "column": 3},
+        "selection": null,
+        "buffer_text": original,
+        "buffer_start_line": 1,
+        "diagnostics": [],
+        "hints": [],
+        "artifacts": []
+    });
+
+    let started = Instant::now();
+    daemon.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "2",
+        "method": "session/start",
+        "params": start_session_params_with(
+            cwd.clone(),
+            "What does displayName do when last is empty, and what is the smallest sensible behavior change?",
+            "auto",
+            original,
+        ),
+    }));
+    let first_response =
+        daemon.response_for_with_editor_context("2", Duration::from_secs(120), &context);
+    let first_visible = started.elapsed();
+    assert!(
+        first_visible <= REAL_CODEX_CONVERSATION_BUDGET,
+        "question held the editor for {first_visible:?}"
+    );
+    let first = daemon.finish_turn(first_response, Duration::from_secs(120), Some(&context));
+    eprintln!(
+        "real Codex question: first_visible={first_visible:?} final_kind={}",
+        first["card"]["kind"].as_str().unwrap_or("<missing>")
+    );
+    assert_conversational(&first, "initial question");
+    let session_id = first["session_id"].as_str().expect("session id").to_owned();
+
+    let reply_started = Instant::now();
+    daemon.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "3",
+        "method": "session/reply",
+        "params": {
+            "session_id": session_id,
+            "text": "Keep it minimal: should it return only first, or preserve a trailing space?",
+            "context": context,
+        },
+    }));
+    let reply_response =
+        daemon.response_for_with_editor_context("3", Duration::from_secs(120), &context);
+    let reply_visible = reply_started.elapsed();
+    assert!(
+        reply_visible <= REAL_CODEX_CONVERSATION_BUDGET,
+        "reply held the editor for {reply_visible:?}"
+    );
+    let reply = daemon.finish_turn(reply_response, Duration::from_secs(120), Some(&context));
+    eprintln!(
+        "real Codex reply: first_visible={reply_visible:?} final_kind={}",
+        reply["card"]["kind"].as_str().unwrap_or("<missing>")
+    );
+    assert_conversational(&reply, "follow-up question");
+
+    let fix_started = Instant::now();
+    daemon.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "4",
+        "method": "session/action",
+        "params": {
+            "session_id": session_id,
+            "action": "fix",
+            "context": context,
+        },
+    }));
+    let fix_response =
+        daemon.response_for_with_editor_context("4", Duration::from_secs(120), &context);
+    let fix_visible = fix_started.elapsed();
+    assert!(
+        fix_visible <= REAL_CODEX_WORK_BUDGET,
+        "Fix held the editor for {fix_visible:?}"
+    );
+    let fix = daemon.finish_turn(fix_response, Duration::from_secs(120), Some(&context));
+    eprintln!(
+        "real Codex fix: first_visible={fix_visible:?} final_kind={}",
+        fix["card"]["kind"].as_str().unwrap_or("<missing>")
+    );
+    assert_eq!(
+        fix["card"]["kind"],
+        json!("patch"),
+        "Fix did not draft: {fix}"
+    );
+    assert_eq!(
+        fix["card"]["patches"].as_array().map(Vec::len),
+        Some(1),
+        "Fix must return one file: {fix}"
+    );
+    let patch = &fix["card"]["patches"][0];
+    let diff = patch["diff"].as_str().expect("patch diff");
+    let parsed = UnifiedDiff::parse(diff).expect("real Codex returned parseable diff");
+    assert_eq!(parsed.hunks.len(), 1, "Fix must return one hunk: {diff}");
+    let updated = PatchApply::apply_to_text(original, &parsed).expect("apply real Codex patch");
+    std::fs::write(&source, &updated).expect("write accepted fixture");
+    let updated_context = json!({
+        "cwd": cwd,
+        "file": "src/work.ts",
+        "cursor": {"line": 2, "column": 3},
+        "selection": null,
+        "buffer_text": updated,
+        "buffer_start_line": 1,
+        "diagnostics": [],
+        "hints": [],
+        "artifacts": []
+    });
+
+    let accept_started = Instant::now();
+    let accept_response = daemon.request(
+        "5",
+        "patch/apply_result",
+        json!({
+            "session_id": session_id,
+            "card_id": fix["card"]["id"],
+            "accepted": true,
+            "patch_ids": [patch["id"]],
+            "changed_files": ["src/work.ts"],
+            "error": null,
+            "context": updated_context,
+        }),
+    );
+    let accept_visible = accept_started.elapsed();
+    assert!(
+        accept_visible <= LOCAL_INTERACTION_BUDGET,
+        "accept held the editor for {accept_visible:?}"
+    );
+    let after_accept = daemon.finish_turn(
+        accept_response,
+        Duration::from_secs(120),
+        Some(&updated_context),
+    );
+    eprintln!(
+        "real Codex accept: first_visible={accept_visible:?} final_kind={}",
+        after_accept["card"]["kind"].as_str().unwrap_or("<missing>")
+    );
+    assert_conversational(&after_accept, "post-accept continuation");
+    assert_ne!(
+        after_accept["card"]["kind"],
+        json!("summary"),
+        "accept must not insert an intermediate summary"
+    );
+}
+
+/// Real cancellation gate with deliberately tiny interaction budgets so the
+/// real Codex turn yields a Working card deterministically.
+///
+/// cargo test -p loopbioticd --test rpc \
+///   real_codex_working_card_can_interrupt_thinking -- --ignored --nocapture
+#[test]
+#[ignore = "requires an authenticated real Codex CLI"]
+fn real_codex_working_card_can_interrupt_thinking() {
+    let cwd = std::env::temp_dir().join(format!(
+        "loopbiotic-real-codex-cancel-{}",
+        std::process::id()
+    ));
+    let source = cwd.join("src/work.ts");
+    let buffer = "export const answer = 42;\n";
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("create fixture");
+    std::fs::write(&source, buffer).expect("write fixture");
+
+    let mut daemon = Daemon::spawn_codex_with_deadlines(25, 25);
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+
+    let (working, elapsed) = daemon.timed_request(
+        "2",
+        "session/start",
+        start_session_params_with(
+            cwd,
+            "Inspect this function and explain one possible edge case.",
+            "auto",
+            buffer,
+        ),
+    );
+    assert!(
+        elapsed < LOCAL_INTERACTION_BUDGET,
+        "Working card took {elapsed:?}"
+    );
+    assert_eq!(working["result"]["card"]["kind"], json!("working"));
+    let session_id = working["result"]["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    let cancel_started = Instant::now();
+    let cancelled = daemon.request(
+        "3",
+        "session/action",
+        json!({"session_id": session_id, "action": "cancel_turn"}),
+    );
+    let cancel_elapsed = cancel_started.elapsed();
+    eprintln!("real Codex cancel: working_visible={elapsed:?} cancel={cancel_elapsed:?}");
+
+    assert!(
+        cancel_elapsed < LOCAL_INTERACTION_BUDGET,
+        "cancellation took {cancel_elapsed:?}"
+    );
+    assert!(
+        cancelled.get("error").is_none(),
+        "cancel failed: {cancelled}"
+    );
+    assert_eq!(
+        cancelled["result"]["card"]["title"],
+        json!("Turn cancelled")
+    );
+}
+
+fn assert_conversational(result: &Value, label: &str) {
+    let kind = result["card"]["kind"].as_str().unwrap_or("<missing>");
+    assert!(
+        matches!(kind, "hypothesis" | "finding" | "choice" | "deny" | "error"),
+        "{label} returned non-conversational {kind}: {result}"
     );
 }
 
@@ -491,7 +817,11 @@ fn real_codex_patch_reject_is_local() {
         patch_response.get("error").is_none(),
         "unexpected patch error: {patch_response}"
     );
-    let patch_result = &patch_response["result"];
+    let patch_result = daemon.finish_turn(
+        patch_response,
+        Duration::from_secs(120),
+        Some(&editor_context),
+    );
     assert_eq!(
         patch_result["card"]["kind"],
         json!("patch"),
@@ -537,7 +867,7 @@ fn real_codex_patch_reject_is_local() {
     );
 
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < LOCAL_INTERACTION_BUDGET,
         "reject took {elapsed:?}; it must not wait for Codex"
     );
     assert_eq!(result["card"]["kind"], json!("error"));

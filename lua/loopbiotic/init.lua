@@ -15,7 +15,34 @@ local util = require("loopbiotic.util")
 local M = {}
 
 rpc.on("agent/progress", function(progress)
+  if
+    state.card
+    and state.card.kind == "working"
+    and progress.session_id == state.session_id
+    and state.card.turn_id ~= state.cancelled_turn_id
+  then
+    state.card.phase = progress.phase or state.card.phase
+    state.card.message = progress.message or state.card.message
+    card.show(state.card)
+    return
+  end
   thinking.progress(progress)
+end)
+
+rpc.on("agent/turn_ready", function(params)
+  if params.session_id ~= state.session_id or params.turn_id == state.cancelled_turn_id then
+    return
+  end
+  if not (state.card and state.card.kind == "working" and state.card.turn_id == params.turn_id) then
+    return
+  end
+  if params.error then
+    ui.notify(params.error, vim.log.levels.ERROR)
+    return
+  end
+  if params.result then
+    session.apply_turn_result(params.result)
+  end
 end)
 
 rpc.on_request("editor/read_file", function(params, respond)
@@ -108,7 +135,7 @@ function M.start(text, mode, source)
     statement = text,
     completed_steps = {},
     known_observations = {},
-    status = "active",
+    status = "idle",
   }
   state.workspace_hints = context.workspace_hints(text, params.cwd, captured.buf)
   params.hints = context.merge_hints(params.hints, state.workspace_hints)
@@ -148,6 +175,10 @@ function M.action(action, opts)
   if not M.action_available(state.card, action) then
     ui.notify("Action is not available on this Loopbiotic card", vim.log.levels.WARN)
     return
+  end
+
+  if state.card and state.card.kind == "working" then
+    state.cancelled_turn_id = state.card.turn_id
   end
 
   if action == "why" then
@@ -306,6 +337,10 @@ function M.reply(text)
     return
   end
 
+  if state.card and state.card.kind == "working" then
+    state.cancelled_turn_id = state.card.turn_id
+  end
+
   status.hide()
 
   local session_id = state.session_id
@@ -348,7 +383,13 @@ function M.token_budget_exceeded()
 end
 
 function M.confirm_agent_turn(action)
-  if action == "apply" or action == "open" or action == "resume_draft" or action == "stop" then
+  if
+    action == "apply"
+    or action == "open"
+    or action == "resume_draft"
+    or action == "stop"
+    or action == "cancel_turn"
+  then
     return true
   end
 

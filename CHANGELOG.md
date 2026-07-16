@@ -24,8 +24,8 @@ The project follows [Semantic Versioning](https://semver.org/).
   and only the expected binary is extracted from the release archive.
 - Retry exhaustion and goal-batch shape mismatches in the session harness
   degrade to error cards instead of panicking the daemon.
-- Queued goal slices that no longer apply after the buffer changes now offer
-  a one-keypress retry that regenerates only the stale file slice.
+- Goal hunks that no longer apply after the buffer changes now offer a
+  one-keypress retry that regenerates only the stale local step.
 - Rejecting a draft now stops locally with explicit Retry/Edit/Stop actions
   instead of immediately spending another model turn on a replacement.
 - Resuming an already-visible action card now moves focus into its window,
@@ -39,6 +39,13 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Auto sessions are conversational-first. Their first response and normal
+  replies cannot return patches or completion summaries; persistent goal
+  execution starts only from the explicit `Goal` action. Sending a message
+  pauses an active goal and answers conversationally.
+- Goal work is limited to one file, one coherent hunk, and 32 changed lines
+  per turn. Only explicit goals may speculate on the next patch; ordinary
+  speculation is read-only post-accept conversation.
 - `initialize` validates the client protocol version when one is supplied and
   returns a structured error (`-32001`) on mismatch instead of failing later
   with cryptic errors.
@@ -52,34 +59,36 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Goal turns are now sliced: the agent returns exactly one file's patch per
-  turn plus a plan of the remaining files, and Loopbiotic speculatively
-  requests the next slice on the same conversation while the current one is
-  under review. Time-to-first-hunk drops from the full-batch generation time
-  to a single slice, accepting usually surfaces the next file instantly, and
-  rejecting cancels the pending continuation and waits for an explicit Retry
-  before generating a replacement (the cancelled speculation's token cost
-  stays visible in session totals).
-  Backends that ignore the slice contract keep the legacy complete-batch
-  behavior. New Lua-side additions: backend preflight in the prompt window
-  (failures surface before typing; composed prompts survive failed starts),
-  repeated-error escalation with actionable guidance, and a client-side
-  error boundary that preserves the session when a UI callback fails.
+- Conversation turns have a 10-second visible-response budget and work turns
+  a 20-second budget. Slow turns yield a focusable `Working` card, continue in
+  the background, and can be interrupted through the real Codex
+  `turn/interrupt` API or by terminating persistent CLI processes. Completion
+  arrives through `agent/turn_ready`; slow-turn timing is logged locally and
+  injected once as compact feedback on the next model turn.
+- Accepting a non-goal patch automatically surfaces a read-only conversational
+  next card, with no intermediate “local step applied” summary. That card is
+  prefetched during review by default; rejecting remains a local decision and
+  never regenerates code.
+- Backend preflight in the prompt window (failures surface before typing;
+  composed prompts survive failed starts), repeated-error escalation with
+  actionable guidance, and a client-side error boundary that preserves the
+  session when a UI callback fails.
 - The `backend/warmup` handshake now reports an explicit identity: the active
   backend, the concrete model the next turn will use (configured, or resolved
   from the backend — the Claude CLI announces it at process start, Ollama
   always knows it), and the models the backend can enumerate (Ollama's local
-  tags). Protocol version is now 9.
+  tags). Protocol version is now 10.
 - The prompt window title names the active agent and resolved model (never
   "default"), refreshing as soon as warmup resolves it, and `Ctrl-l`
   (`keymaps.models`) opens a model picker fed by the backend-enumerated
   models, an optional per-agent `models` list, and the last reported model.
   Selections persist per agent exactly like `:LoopbioticModel`.
 - Identity is phase-aware: the reported model is always the patch-drafting
-  one, and a differing pinned discovery model (the shipped claude agent uses
-  `discovery_model = "haiku"`) is shown separately instead of masquerading
-  as the active model. The claude picker offers the CLI aliases `sonnet`,
-  `opus`, and `haiku` since the CLI has no model-listing API.
+  one, and a differing discovery model is shown separately instead of
+  masquerading as the active model. The shipped Codex agent uses
+  `gpt-5.4-mini` at low effort for conversation; Claude uses
+  `discovery_model = "haiku"`. The claude picker offers the CLI aliases
+  `sonnet`, `opus`, and `haiku` since the CLI has no model-listing API.
 - Lua tooling (`stylua`, `selene`, LuaLS config) enforced in CI, headless Lua
   unit tests for the patch engine and session state, `loopbioticd` JSON-RPC
   integration tests, session state-machine transition tests, and a real

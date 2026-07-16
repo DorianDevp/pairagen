@@ -16,7 +16,6 @@ use loopbiotic_protocol::{
     BackendInfo, Cursor, FilePatch, FindingCard, HypothesisCard, Mode, PatchCard,
 };
 
-use super::prefetch::request_fingerprint;
 use super::*;
 
 pub(super) fn params() -> StartSessionParams {
@@ -50,6 +49,27 @@ fn editor_context(buffer_text: &str) -> ContextBundle {
     }
 }
 
+fn discovery_response(backend: &str) -> BackendResponse {
+    BackendResponse {
+        card: Card::Hypothesis(HypothesisCard {
+            id: "c_discovery".into(),
+            title: "Ready to collaborate".into(),
+            claim: "The request is understood; goal execution remains opt-in.".into(),
+            evidence: None,
+            next_move: None,
+            actions: vec![Action::Follow, Action::Fix, Action::Goal, Action::Stop],
+        }),
+        raw_output: None,
+        metadata: BackendMetadata {
+            backend: backend.into(),
+            model: None,
+            token_usage: Some(TokenUsage::estimated(10, 10)),
+            activities: vec![],
+            attempts: vec![],
+        },
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn starts_with_hypothesis() {
     let backend = Arc::new(MockBackend);
@@ -75,70 +95,29 @@ async fn rejects_apply_before_patch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn continuous_goal_reviews_a_complete_batch_without_more_model_turns() {
+async fn explicit_goal_rejects_a_multi_hunk_batch() {
     let backend = Arc::new(BatchGoalBackend::default());
     let mut engine = Engine::new(backend.clone());
     let mut goal = params();
     goal.mode = Mode::Auto;
     goal.buffer_text = "first\nmiddle\nlast".into();
-    let first = engine.start(goal).await.unwrap();
+    let start = engine.start(goal).await.unwrap();
+    assert!(matches!(start.card, Card::Hypothesis(_)));
 
-    let Card::Patch(first_patch) = &first.card else {
-        panic!("expected first review hunk");
-    };
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    let result = engine
+        .action(&start.session_id, Action::Goal)
+        .await
+        .unwrap();
 
-    let result = PatchApplyResult {
-        session_id: first.session_id,
-        card_id: first.card.id().into(),
-        accepted: true,
-        patch_ids: vec![first_patch.patches[0].id.clone()],
-        changed_files: vec![PathBuf::from("src/work.ts")],
-        error: None,
-        context: editor_context("FIRST\nmiddle\nlast"),
-    };
-
-    let second = engine.apply_result(result).await.unwrap();
-
-    assert!(matches!(second.card, Card::Patch(_)));
-    assert_eq!(second.turn_token_usage.total_tokens, 0);
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(second.goal.status, loopbiotic_protocol::GoalStatus::Active);
-    assert_eq!(
-        engine
-            .get(&second.session_id)
-            .unwrap()
-            .completed_steps
-            .len(),
-        1
-    );
-
-    let Card::Patch(second_patch) = &second.card else {
-        panic!("expected second review hunk");
-    };
-    let result = PatchApplyResult {
-        session_id: second.session_id,
-        card_id: second.card.id().into(),
-        accepted: true,
-        patch_ids: vec![second_patch.patches[0].id.clone()],
-        changed_files: vec![PathBuf::from("src/work.ts")],
-        error: None,
-        context: editor_context("FIRST\nmiddle\nLAST"),
-    };
-    let complete = engine.apply_result(result).await.unwrap();
-
-    assert!(matches!(complete.card, Card::Summary(_)));
-    assert_eq!(complete.turn_token_usage.total_tokens, 0);
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        complete.goal.status,
-        loopbiotic_protocol::GoalStatus::Complete
-    );
-    assert_eq!(complete.goal.completed_steps.len(), 2);
+    assert!(matches!(result.card, Card::Error(_)));
+    assert!(result.attempts.iter().all(|attempt| {
+        attempt.violation_class == Some(loopbiotic_protocol::ViolationClass::MultiHunk)
+    }));
+    assert!(engine.continuations.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn continuous_goal_reviews_a_multi_file_batch_without_more_model_turns() {
+async fn explicit_goal_rejects_a_multi_file_batch() {
     let backend = Arc::new(MultiFileGoalBackend::default());
     let reads = Arc::new(AtomicUsize::new(0));
     let mut engine = Engine::new(backend.clone());
@@ -161,73 +140,33 @@ async fn continuous_goal_reviews_a_multi_file_batch_without_more_model_turns() {
     goal.mode = Mode::Auto;
     goal.buffer_text = "first".into();
 
-    let first = engine.start(goal).await.unwrap();
-    let Card::Patch(first_patch) = &first.card else {
-        panic!(
-            "expected first file hunk, got {:?}; attempts {:?}",
-            first.card, first.attempts
-        );
-    };
-    assert_eq!(first_patch.patches[0].file, PathBuf::from("src/work.ts"));
-    assert!(!first_patch.goal_complete);
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(reads.load(Ordering::SeqCst), 2);
-    assert!(
-        engine.continuations.is_empty(),
-        "a legacy full batch must not trigger slice speculation"
-    );
+    let start = engine.start(goal).await.unwrap();
+    assert!(matches!(start.card, Card::Hypothesis(_)));
 
-    let second = engine
-        .apply_result(PatchApplyResult {
-            session_id: first.session_id,
-            card_id: first.card.id().into(),
-            accepted: true,
-            patch_ids: vec![first_patch.patches[0].id.clone()],
-            changed_files: vec![PathBuf::from("src/work.ts")],
-            error: None,
-            context: editor_context("FIRST"),
-        })
-        .await
-        .unwrap();
-    let Card::Patch(second_patch) = &second.card else {
-        panic!("expected second file hunk");
-    };
-    assert_eq!(second_patch.patches[0].file, PathBuf::from("src/other.ts"));
-    assert!(second_patch.goal_complete);
-    assert_eq!(second.turn_token_usage.total_tokens, 0);
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
-
-    let mut other_context = editor_context("OTHER");
-    other_context.file = PathBuf::from("src/other.ts");
-    let complete = engine
-        .apply_result(PatchApplyResult {
-            session_id: second.session_id,
-            card_id: second.card.id().into(),
-            accepted: true,
-            patch_ids: vec![second_patch.patches[0].id.clone()],
-            changed_files: vec![PathBuf::from("src/other.ts")],
-            error: None,
-            context: other_context,
-        })
+    let result = engine
+        .action(&start.session_id, Action::Goal)
         .await
         .unwrap();
 
-    assert!(matches!(complete.card, Card::Summary(_)));
-    assert_eq!(
-        complete.goal.status,
-        loopbiotic_protocol::GoalStatus::Complete
-    );
-    assert_eq!(complete.turn_token_usage.total_tokens, 0);
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(result.card, Card::Error(_)));
+    assert!(result.attempts.iter().all(|attempt| {
+        attempt.violation_class == Some(loopbiotic_protocol::ViolationClass::MultiHunk)
+    }));
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert!(engine.continuations.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn continuous_goal_reject_stops_without_another_model_turn() {
+async fn explicit_goal_reject_stops_without_another_model_turn() {
     let backend = Arc::new(MockBackend);
     let mut engine = Engine::new(backend);
     let mut goal = params();
     goal.mode = Mode::Auto;
-    let first = engine.start(goal).await.unwrap();
+    let start = engine.start(goal).await.unwrap();
+    let first = engine
+        .action(&start.session_id, Action::Goal)
+        .await
+        .unwrap();
     let Card::Patch(first_patch) = &first.card else {
         panic!("expected patch card");
     };
@@ -266,7 +205,11 @@ async fn why_explains_and_restores_the_same_pending_hunk() {
     let mut engine = Engine::new(backend);
     let mut goal = params();
     goal.mode = Mode::Auto;
-    let first = engine.start(goal).await.unwrap();
+    let start = engine.start(goal).await.unwrap();
+    let first = engine
+        .action(&start.session_id, Action::Goal)
+        .await
+        .unwrap();
     let patch_id = first.card.id().to_string();
 
     let explained = engine.action(&first.session_id, Action::Why).await.unwrap();
@@ -354,6 +297,70 @@ async fn rejected_apply_waits_for_explicit_retry() {
         .unwrap();
     assert!(matches!(retried.card, Card::Patch(_)));
     assert!(retried.turn_token_usage.total_tokens > 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accepted_non_goal_patch_auto_continues_with_conversation() {
+    let backend = Arc::new(CountingBackend::default());
+    let mut engine = Engine::new(backend.clone());
+    let start = engine.start(params()).await.unwrap();
+    let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+    let result = engine
+        .apply_result(accept(
+            &patch.session_id,
+            &patch.card,
+            "payload = payload or {}",
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(result.card, Card::Finding(_)));
+    assert_eq!(result.goal.status, loopbiotic_protocol::GoalStatus::Idle);
+    assert_eq!(
+        engine.get(&result.session_id).unwrap().state,
+        SessionState::CardShown
+    );
+    let calls = backend.calls.lock().unwrap().clone();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("progress:PostAccept")),
+        "accept did not trigger conversational follow-up: {calls:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_post_accept_work_keeps_the_patch_accepted() {
+    let backend = Arc::new(HangingPostAcceptBackend);
+    let mut engine = Engine::new(backend);
+    let start = engine.start(params()).await.unwrap();
+    let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
+    let session_id = patch.session_id.clone();
+    let mut turn = Box::pin(engine.apply_result(accept(
+        &patch.session_id,
+        &patch.card,
+        "payload = payload or {}",
+    )));
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut turn)
+            .await
+            .is_err(),
+        "post-accept backend unexpectedly completed"
+    );
+    drop(turn);
+
+    let committed = engine.get(&session_id).unwrap();
+    assert_eq!(committed.state, SessionState::CardShown);
+    assert_eq!(committed.accepted_patches, vec!["p_1"]);
+
+    let cancelled = engine.cancel_turn(&session_id).await.unwrap();
+    let Card::Finding(card) = cancelled.card else {
+        panic!("accepted patch was restored as pending");
+    };
+    assert_eq!(card.title, "Local step accepted");
+    assert_eq!(cancelled.goal.status, loopbiotic_protocol::GoalStatus::Idle);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -501,10 +508,10 @@ async fn start_in_fix_mode_requires_a_patch_card() {
         panic!("expected error card");
     };
 
-    assert!(card.message.contains("expected the next goal patch"));
+    assert!(card.message.contains("expected patch card"));
     assert_eq!(
         engine.get(&result.session_id).unwrap().state,
-        SessionState::GoalLoopFailed
+        SessionState::PatchFailed
     );
     let apply_error = engine
         .action(&result.session_id, Action::Apply)
@@ -661,7 +668,11 @@ async fn sliced_goal_speculates_and_consumes_each_next_slice_on_accept() {
     let mut goal = params();
     goal.mode = Mode::Auto;
 
-    let first = engine.start(goal).await.unwrap();
+    let start = engine.start(goal).await.unwrap();
+    let first = engine
+        .action(&start.session_id, Action::Goal)
+        .await
+        .unwrap();
     let Card::Patch(first_patch) = &first.card else {
         panic!(
             "expected the first slice, got {:?}; attempts {:?}",
@@ -730,13 +741,14 @@ async fn sliced_goal_speculates_and_consumes_each_next_slice_on_accept() {
     assert_eq!(complete.goal.completed_steps.len(), 3);
     assert_eq!(complete.turn_token_usage.total_tokens, 0);
 
-    // One real turn plus two consumed speculations; no user action waited for
-    // a fresh model turn after the first card.
+    // One conversational start, one explicitly authorized goal turn, and two
+    // consumed speculations; no accept action waited for a fresh model turn.
     let calls = backend.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 3, "unexpected backend calls: {calls:?}");
+    assert_eq!(calls.len(), 4, "unexpected backend calls: {calls:?}");
     assert!(calls[0].starts_with("progress:Start"));
-    assert!(calls[1].starts_with("plain:User(Next)"));
-    assert!(calls[2].starts_with("plain:User(Next)"));
+    assert!(calls[1].starts_with("progress:User(Goal)"));
+    assert!(calls[2].starts_with("plain:User(Goal)"));
+    assert!(calls[3].starts_with("plain:User(Goal)"));
 }
 
 /// Waits until the session's scheduled continuation turn has finished on the
@@ -760,7 +772,11 @@ async fn rejected_slice_cancels_speculation_and_waits_for_explicit_retry() {
     engine.set_source_context_provider(sliced_goal_provider());
     let mut goal = params();
     goal.mode = Mode::Auto;
-    let start = engine.start(goal).await.unwrap();
+    let discovery = engine.start(goal).await.unwrap();
+    let start = engine
+        .action(&discovery.session_id, Action::Goal)
+        .await
+        .unwrap();
     let Card::Patch(first_patch) = &start.card else {
         panic!("expected the first slice, got {:?}", start.card);
     };
@@ -789,7 +805,7 @@ async fn rejected_slice_cancels_speculation_and_waits_for_explicit_retry() {
     assert_eq!(rejected.turn_token_usage, TokenUsage::default());
     assert!(
         rejected.token_usage.total_tokens > usage_after_start,
-        "the cancelled speculation's usage must fold into the session totals"
+        "already-finished speculation must fold into the session totals"
     );
     assert!(
         !engine.continuations.contains_key(&start.session_id),
@@ -797,9 +813,10 @@ async fn rejected_slice_cancels_speculation_and_waits_for_explicit_retry() {
     );
 
     let calls = backend.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2, "reject triggered a backend turn: {calls:?}");
+    assert_eq!(calls.len(), 3, "reject triggered a backend turn: {calls:?}");
     assert!(calls[0].starts_with("progress:Start"));
-    assert!(calls[1].starts_with("plain:User(Next)"));
+    assert!(calls[1].starts_with("progress:User(Goal)"));
+    assert!(calls[2].starts_with("plain:User(Goal)"));
 
     let redrafted = engine
         .action(&start.session_id, Action::Retry)
@@ -828,7 +845,11 @@ async fn user_retry_on_a_slice_cancels_speculation_and_stops_speculating() {
     engine.set_source_context_provider(sliced_goal_provider());
     let mut goal = params();
     goal.mode = Mode::Auto;
-    let first = engine.start(goal).await.unwrap();
+    let discovery = engine.start(goal).await.unwrap();
+    let first = engine
+        .action(&discovery.session_id, Action::Goal)
+        .await
+        .unwrap();
     assert!(engine.continuations.contains_key(&first.session_id));
 
     let redrafted = engine
@@ -844,6 +865,29 @@ async fn user_retry_on_a_slice_cancels_speculation_and_stops_speculating() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn retry_interrupts_an_inflight_goal_continuation() {
+    let backend = Arc::new(HangingGoalContinuationBackend::default());
+    let mut engine = Engine::new(backend.clone());
+    engine.set_source_context_provider(sliced_goal_provider());
+    let start = engine.start(params()).await.unwrap();
+    let first = engine
+        .action(&start.session_id, Action::Goal)
+        .await
+        .unwrap();
+    assert!(matches!(first.card, Card::Patch(_)));
+    assert!(engine.continuations.contains_key(&first.session_id));
+
+    let redrafted = engine
+        .action(&first.session_id, Action::Retry)
+        .await
+        .unwrap();
+
+    assert!(matches!(redrafted.card, Card::Patch(_)));
+    assert!(backend.cancelled.load(Ordering::SeqCst));
+    assert!(!engine.continuations.contains_key(&first.session_id));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn single_file_goal_without_plan_completes_as_a_batch_of_one() {
     let backend = Arc::new(SingleFileNoPlanBackend::default());
     let mut engine = Engine::new(backend.clone());
@@ -851,7 +895,11 @@ async fn single_file_goal_without_plan_completes_as_a_batch_of_one() {
     goal.mode = Mode::Auto;
     goal.buffer_text = "first".into();
 
-    let first = engine.start(goal).await.unwrap();
+    let discovery = engine.start(goal).await.unwrap();
+    let first = engine
+        .action(&discovery.session_id, Action::Goal)
+        .await
+        .unwrap();
     let Card::Patch(card) = &first.card else {
         panic!("expected the whole batch as one card, got {:?}", first.card);
     };
@@ -875,7 +923,7 @@ async fn single_file_goal_without_plan_completes_as_a_batch_of_one() {
         complete.goal.status,
         loopbiotic_protocol::GoalStatus::Complete
     );
-    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
 }
 
 #[derive(Default)]
@@ -887,6 +935,9 @@ struct SingleFileNoPlanBackend {
 impl BackendAdapter for SingleFileNoPlanBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if !req.card_contract.allow_goal_completion {
+            return Ok(discovery_response("single_file_no_plan"));
+        }
         assert!(req.card_contract.allow_goal_completion);
 
         Ok(BackendResponse {
@@ -935,13 +986,22 @@ struct BatchGoalBackend {
 impl BackendAdapter for BatchGoalBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if !req.card_contract.allow_goal_completion {
+            return Ok(discovery_response("batch_goal"));
+        }
         assert!(req.card_contract.allow_goal_completion);
-        assert_eq!(req.card_contract.max_patch_files, MAX_GOAL_PATCH_FILES);
+        assert_eq!(
+            req.card_contract.max_patch_files,
+            loopbiotic_protocol::MAX_PATCH_FILES
+        );
         assert_eq!(
             req.card_contract.max_hunks_per_patch,
-            MAX_GOAL_HUNKS_PER_PATCH
+            loopbiotic_protocol::MAX_HUNKS_PER_PATCH
         );
-        assert_eq!(req.card_contract.max_changed_lines, MAX_GOAL_CHANGED_LINES);
+        assert_eq!(
+            req.card_contract.max_changed_lines,
+            loopbiotic_protocol::MAX_CHANGED_LINES
+        );
 
         Ok(BackendResponse {
             card: Card::Patch(PatchCard {
@@ -984,7 +1044,13 @@ struct MultiFileGoalBackend {
 impl BackendAdapter for MultiFileGoalBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(req.card_contract.max_patch_files, MAX_GOAL_PATCH_FILES);
+        if !req.card_contract.allow_goal_completion {
+            return Ok(discovery_response("multi_file_goal"));
+        }
+        assert_eq!(
+            req.card_contract.max_patch_files,
+            loopbiotic_protocol::MAX_PATCH_FILES
+        );
 
         Ok(BackendResponse {
             card: Card::Patch(PatchCard {
@@ -1036,6 +1102,49 @@ struct RepairingPatchBackend {
 struct WrongTypeBackend;
 
 struct AlwaysFailBackend;
+
+struct HangingPostAcceptBackend;
+
+#[async_trait]
+impl BackendAdapter for HangingPostAcceptBackend {
+    async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+        if matches!(req.action, BackendAction::PostAccept) {
+            return std::future::pending().await;
+        }
+        MockBackend.next_card(req).await
+    }
+
+    fn capabilities(&self) -> BackendInfo {
+        MockBackend::info()
+    }
+}
+
+#[derive(Default)]
+struct HangingGoalContinuationBackend {
+    inner: MockBackend,
+    cancelled: AtomicBool,
+}
+
+#[async_trait]
+impl BackendAdapter for HangingGoalContinuationBackend {
+    async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+        if matches!(req.action, BackendAction::User(Action::Goal))
+            && matches!(req.session.last_card, Some(Card::Patch(_)))
+        {
+            return std::future::pending().await;
+        }
+        self.inner.next_card(req).await
+    }
+
+    async fn cancel_turn(&self, _session_id: &str) -> Result<()> {
+        self.cancelled.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn capabilities(&self) -> BackendInfo {
+        MockBackend::info()
+    }
+}
 
 #[derive(Default)]
 struct RepeatingObservationBackend {
@@ -1386,108 +1495,121 @@ impl BackendAdapter for CountingBackend {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn prefetched_fix_is_consumed_without_a_second_backend_call() {
+async fn read_only_post_accept_prefetch_is_consumed_without_another_turn() {
     let backend = Arc::new(CountingBackend::default());
     let mut engine = Engine::new(backend.clone());
-    engine.set_prefetch_mode(PrefetchMode::Fix);
+    engine.set_prefetch_mode(PrefetchMode::ReadOnly);
 
     let start = engine.start(params()).await.unwrap();
-    assert!(matches!(start.card, Card::Hypothesis(_)));
+    let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
+    assert!(matches!(patch.card, Card::Patch(_)));
+    assert!(engine.prefetches.contains_key(&start.session_id));
 
-    let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
-    assert!(matches!(result.card, Card::Patch(_)));
+    let result = engine
+        .apply_result(accept(
+            &patch.session_id,
+            &patch.card,
+            "payload = payload or {}",
+        ))
+        .await
+        .unwrap();
 
+    assert!(matches!(result.card, Card::Finding(_)));
+    assert!(result.turn_token_usage.total_tokens > 0);
     let calls = backend.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2, "unexpected backend calls: {calls:?}");
+    assert_eq!(calls.len(), 3, "unexpected backend calls: {calls:?}");
     assert!(calls[0].starts_with("progress:Start"));
-    assert!(calls[1].starts_with("plain:User(Fix)"));
+    assert!(calls[1].starts_with("progress:User(Fix)"));
+    assert!(calls[2].starts_with("plain:PostAccept"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stale_prefetch_is_discarded_after_context_change() {
+async fn rejecting_a_patch_cancels_read_only_speculation_without_redrafting() {
     let backend = Arc::new(CountingBackend::default());
     let mut engine = Engine::new(backend.clone());
-    engine.set_prefetch_mode(PrefetchMode::Fix);
+    engine.set_prefetch_mode(PrefetchMode::ReadOnly);
 
     let start = engine.start(params()).await.unwrap();
-    let context = ContextBundle {
-        cwd: PathBuf::from("/tmp/project"),
-        file: PathBuf::from("src/work.ts"),
-        cursor: Cursor { line: 1, column: 1 },
-        selection: None,
-        buffer_text: "const edited = true".into(),
-        buffer_start_line: 1,
-        diagnostics: vec![],
-        hints: vec![],
-        artifacts: vec![],
-        report: None,
-    };
-    engine.update_context(&start.session_id, context).unwrap();
-
-    let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
-    let Card::Patch(card) = result.card else {
+    let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
+    let Card::Patch(card) = &patch.card else {
         panic!("expected patch card");
     };
+    let rejected = engine
+        .apply_result(PatchApplyResult {
+            session_id: patch.session_id.clone(),
+            card_id: patch.card.id().into(),
+            accepted: false,
+            patch_ids: vec![card.patches[0].id.clone()],
+            changed_files: vec![],
+            error: None,
+            context: editor_context("placeholder"),
+        })
+        .await
+        .unwrap();
 
-    // The mock builds the diff from the buffer's first line, so a patch
-    // produced from the fresh request must reference the edited buffer.
-    assert!(
-        card.patches[0].diff.contains("const edited = true"),
-        "patch was built from stale context: {}",
-        card.patches[0].diff
-    );
+    assert!(matches!(rejected.card, Card::Error(_)));
+    assert!(engine.prefetches.is_empty());
     let calls = backend.calls.lock().unwrap().clone();
+    assert!(calls.len() <= 3, "reject regenerated work: {calls:?}");
     assert!(
-        calls
+        !calls
             .iter()
-            .any(|call| call.starts_with("progress:User(Fix)")),
-        "real fix call missing: {calls:?}"
+            .any(|call| call.starts_with("progress:PostAccept")),
+        "reject started a replacement turn: {calls:?}"
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn fingerprint_ignores_optimizer_telemetry() {
-    let backend = Arc::new(CountingBackend::default());
-    let mut engine = Engine::new(backend);
-    engine.set_prefetch_mode(PrefetchMode::Fix);
-    let start = engine.start(params()).await.unwrap();
-    let session = engine.get(&start.session_id).unwrap();
-
-    let request = engine.request(
-        session,
-        BackendAction::User(Action::Fix),
-        session.context.clone(),
-        &NextState::Patch,
-    );
-    let mut noisy = request.clone();
-    noisy.context.report = Some(loopbiotic_protocol::ContextReport {
-        enabled: true,
-        cache_hits: 42,
-        ..Default::default()
-    });
-
-    assert_eq!(request_fingerprint(&request), request_fingerprint(&noisy));
-}
+type RecordedExpectation = (Option<CardKind>, String, Vec<String>);
 
 #[derive(Default)]
 struct ExpectationRecorder {
     inner: MockBackend,
-    requests: std::sync::Mutex<Vec<(Option<CardKind>, String)>>,
+    requests: std::sync::Mutex<Vec<RecordedExpectation>>,
 }
 
 #[async_trait]
 impl BackendAdapter for ExpectationRecorder {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
-        self.requests
-            .lock()
-            .unwrap()
-            .push((req.card_contract.expected_kind, req.session.prompt.clone()));
+        self.requests.lock().unwrap().push((
+            req.card_contract.expected_kind,
+            req.session.prompt.clone(),
+            req.session.interaction_feedback.clone(),
+        ));
         self.inner.next_card(req).await
     }
 
     fn capabilities(&self) -> BackendInfo {
         self.inner.capabilities()
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interaction_feedback_is_injected_once_on_the_next_turn() {
+    let backend = Arc::new(ExpectationRecorder::default());
+    let mut engine = Engine::new(backend.clone());
+    let start = engine.start(params()).await.unwrap();
+    engine
+        .record_interaction_feedback(
+            &start.session_id,
+            "Previous conversation exceeded the interaction deadline.",
+        )
+        .unwrap();
+
+    engine
+        .action(&start.session_id, Action::Follow)
+        .await
+        .unwrap();
+    engine
+        .action(&start.session_id, Action::OtherLead)
+        .await
+        .unwrap();
+
+    let requests = backend.requests.lock().unwrap().clone();
+    assert_eq!(
+        requests[1].2,
+        vec!["Previous conversation exceeded the interaction deadline."]
+    );
+    assert!(requests[2].2.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

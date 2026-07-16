@@ -36,6 +36,7 @@ impl BackendAdapter for MockBackend {
                 BackendAction::User(Action::Stop) => stop_card(),
                 BackendAction::User(action) => unsupported_card(action),
                 BackendAction::Reply(text) => reply_card(text),
+                BackendAction::PostAccept => post_accept_card(),
                 BackendAction::ContractRetry(_) => finding_card(),
                 BackendAction::LocationGranted => patch_card(&req),
             }
@@ -71,6 +72,17 @@ impl BackendAdapter for MockBackend {
     fn capabilities(&self) -> BackendInfo {
         Self::info()
     }
+}
+
+fn post_accept_card() -> Card {
+    Card::Finding(FindingCard {
+        id: "c_post_accept".into(),
+        title: "Local step accepted".into(),
+        finding: "The accepted hunk is in place. Exercise the changed behavior before authorizing more code.".into(),
+        location: None,
+        annotation: None,
+        actions: vec![Action::Follow, Action::Goal, Action::RunCheck, Action::Stop],
+    })
 }
 
 /// Later slices of the mock's three-slice goal. The first slice always
@@ -391,7 +403,7 @@ fn check_card() -> Card {
         finding: "Run the project check command from the editor or shell.".into(),
         location: None,
         annotation: None,
-        actions: vec![Action::Next, Action::Stop],
+        actions: vec![Action::Goal, Action::Stop],
     })
 }
 

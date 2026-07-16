@@ -84,6 +84,9 @@ function M.apply_turn_result(result, opts)
   else
     track_backend_errors(result.card)
   end
+  if result.card and result.card.kind ~= "working" then
+    state.cancelled_turn_id = nil
+  end
   require("loopbiotic.card").show(result.card)
 end
 

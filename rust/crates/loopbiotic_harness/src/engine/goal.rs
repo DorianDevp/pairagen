@@ -1,5 +1,5 @@
-//! Continuous-goal bookkeeping: splitting goal batches into reviewable hunk
-//! cards, tracking goal progress/state, and assembling completion summaries.
+//! Explicit-goal bookkeeping: tracking one reviewable hunk at a time, goal
+//! progress/state, and final completion summaries.
 
 use std::collections::VecDeque;
 
@@ -113,17 +113,15 @@ pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Resul
         return Ok(card);
     };
 
-    // A sliced goal response: exactly one file plus a plan of what remains.
-    // Multi-file responses (or responses without a plan) keep the legacy
-    // full-batch semantics, where `goal_complete` alone decides completion.
-    let slice_plan = (card.patches.len() == 1)
-        .then(|| card.plan.clone())
-        .flatten();
-    let completes = slice_plan
+    // Validation already guarantees one file and one hunk. A plan describes
+    // the remaining coherent steps; a planless card may only complete via
+    // its explicit goal_complete flag.
+    let plan = card.plan.clone();
+    let completes = plan
         .as_ref()
         .map(|plan| plan.complete)
         .unwrap_or(card.goal_complete);
-    session.goal_slice_continues = slice_plan.as_ref().is_some_and(|plan| !plan.complete);
+    session.goal_slice_continues = plan.as_ref().is_some_and(|plan| !plan.complete);
 
     let mut cards = Vec::new();
     for patch in card.patches {
@@ -146,7 +144,7 @@ pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Resul
                 explanation: explanation.clone(),
                 warnings: card.warnings.clone(),
                 goal_complete: false,
-                plan: slice_plan.clone(),
+                plan: plan.clone(),
                 patches: vec![loopbiotic_protocol::FilePatch {
                     id: format!("{}_h{}", patch.id, index + 1),
                     file: patch.file.clone(),

@@ -19,9 +19,9 @@ use loopbiotic_backends::{
 use loopbiotic_context::ContextOptimizer;
 use loopbiotic_patch::PatchCoherence;
 use loopbiotic_protocol::{
-    Action, ActionResult, Card, CardKind, ContextBundle, ContextPolicy, ErrorCard,
-    MAX_GOAL_CHANGED_LINES, MAX_GOAL_HUNKS_PER_PATCH, MAX_GOAL_PATCH_FILES, Mode, PatchApplyResult,
-    StartSessionParams, StartSessionResult, SummaryCard, TokenUsage,
+    Action, ActionResult, Card, CardKind, ContextBundle, ContextPolicy, ErrorCard, FindingCard,
+    Mode, PatchApplyResult, StartSessionParams, StartSessionResult, SummaryCard, TokenUsage,
+    WorkingCard,
 };
 
 use crate::session::Session;
@@ -43,12 +43,6 @@ pub struct Engine {
     prefetches: HashMap<String, Prefetch>,
     /// In-flight speculative goal-continuation turns, keyed by session.
     continuations: HashMap<String, Continuation>,
-    /// Cancelled continuations still running on the backend; their usage is
-    /// folded into the session totals once they finish.
-    cancelled_continuations: Vec<(
-        String,
-        tokio::task::JoinHandle<Result<loopbiotic_backends::BackendResponse>>,
-    )>,
     location_granter: Option<LocationGranter>,
     source_context_provider: Option<SourceContextProvider>,
 }
@@ -90,7 +84,6 @@ impl Engine {
             prefetch_mode: PrefetchMode::Off,
             prefetches: HashMap::new(),
             continuations: HashMap::new(),
-            cancelled_continuations: vec![],
             location_granter: None,
             source_context_provider: None,
         }
@@ -108,8 +101,37 @@ impl Engine {
         self.source_context_provider = Some(provider);
     }
 
+    pub fn record_interaction_feedback(
+        &mut self,
+        session_id: &str,
+        feedback: impl Into<String>,
+    ) -> Result<()> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        let feedback = feedback.into();
+        if !session.interaction_feedback.contains(&feedback) {
+            session.interaction_feedback.push(feedback);
+            if session.interaction_feedback.len() > 3 {
+                session.interaction_feedback.remove(0);
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn start(&mut self, params: StartSessionParams) -> Result<StartSessionResult> {
         self.start_with_progress(params, None).await
+    }
+
+    pub fn reserve_start(&mut self, params: StartSessionParams) -> (String, u64) {
+        let mut session = Session::new(params);
+        session.turn_generation = 1;
+        let session_id = session.id.clone();
+        self.sessions.insert(session_id.clone(), session);
+
+        (session_id, 1)
     }
 
     pub async fn start_with_progress(
@@ -117,9 +139,20 @@ impl Engine {
         params: StartSessionParams,
         progress: Option<ProgressReporter>,
     ) -> Result<StartSessionResult> {
-        let mut session = Session::new(params.clone());
+        let (session_id, generation) = self.reserve_start(params);
+        self.complete_start_with_progress(&session_id, generation, progress)
+            .await
+    }
+
+    pub async fn complete_start_with_progress(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+        progress: Option<ProgressReporter>,
+    ) -> Result<StartSessionResult> {
+        let mut session = self.session_for_turn(session_id, generation)?;
         let context = self.optimize_context(
-            ContextBundle::from_start(params),
+            session.context.clone(),
             &session.original_prompt,
             &session.context_policy,
         );
@@ -135,6 +168,7 @@ impl Engine {
                 None,
             )
             .await;
+        session.interaction_feedback.clear();
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
         let model = response.metadata.model.clone();
@@ -146,7 +180,7 @@ impl Engine {
         let token_usage = session.token_usage.clone();
         let context_report = session.context.report.clone();
 
-        self.sessions.insert(session_id.clone(), session);
+        self.commit_session(session, generation)?;
         self.schedule_prefetch(&session_id).await;
         self.schedule_goal_continuation(&session_id).await;
 
@@ -172,18 +206,30 @@ impl Engine {
         action: Action,
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
-        let mut session = self.take_session(session_id)?;
+        let generation = self.begin_turn(session_id)?;
+        self.action_with_progress_generation(session_id, generation, action, progress)
+            .await
+    }
+
+    pub async fn action_with_progress_generation(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+        action: Action,
+        progress: Option<ProgressReporter>,
+    ) -> Result<ActionResult> {
+        let mut session = self.session_for_turn(session_id, generation)?;
         if matches!(action, Action::Retry | Action::EditPrompt | Action::Stop) {
             // These actions abandon the pending slice, so a speculated
             // continuation built on top of it can only be wasted work.
             self.cancel_goal_continuation(&mut session).await;
+            self.cancel_post_accept_prefetch(&mut session).await;
         }
-        let prefetched = self.take_prefetch(&mut session, &action).await;
         let result = self
-            .action_taken(session_id, &mut session, action, progress, prefetched)
+            .action_taken(session_id, &mut session, action, progress, None)
             .await;
 
-        self.sessions.insert(session_id.into(), session);
+        self.commit_session(session, generation)?;
         if result.is_ok() {
             self.schedule_prefetch(session_id).await;
             self.schedule_goal_continuation(session_id).await;
@@ -202,15 +248,28 @@ impl Engine {
         text: String,
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
-        let mut session = self.take_session(session_id)?;
+        let generation = self.begin_turn(session_id)?;
+        self.reply_with_progress_generation(session_id, generation, text, progress)
+            .await
+    }
+
+    pub async fn reply_with_progress_generation(
+        &mut self,
+        session_id: &str,
+        generation: u64,
+        text: String,
+        progress: Option<ProgressReporter>,
+    ) -> Result<ActionResult> {
+        let mut session = self.session_for_turn(session_id, generation)?;
         // A reply reworks or replaces whatever is pending, so a speculated
         // continuation of the current slice is stale.
         self.cancel_goal_continuation(&mut session).await;
+        self.cancel_post_accept_prefetch(&mut session).await;
         let result = self
             .reply_taken(session_id, &mut session, text, progress)
             .await;
 
-        self.sessions.insert(session_id.into(), session);
+        self.commit_session(session, generation)?;
         if result.is_ok() {
             self.schedule_prefetch(session_id).await;
             self.schedule_goal_continuation(session_id).await;
@@ -251,6 +310,12 @@ impl Engine {
                 model: None,
                 attempts: vec![],
             });
+        }
+
+        if action == Action::Goal {
+            session.goal_active = true;
+            session.goal_paused = false;
+            session.goal_status = loopbiotic_protocol::GoalStatus::Active;
         }
 
         if session.state == SessionState::PatchShown
@@ -298,6 +363,7 @@ impl Engine {
                 prefetched,
             )
             .await;
+        session.interaction_feedback.clear();
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
@@ -331,13 +397,12 @@ impl Engine {
         }
 
         let context = session.context.clone();
-        let expected = if session.state == SessionState::PatchExplained {
-            NextState::GoalWhy
-        } else if session.continuous_goal {
-            NextState::GoalLoop
-        } else {
-            NextState::Any
-        };
+        if session.goal_active || session.goal_paused {
+            session.goal_active = false;
+            session.goal_paused = true;
+            session.goal_status = loopbiotic_protocol::GoalStatus::Paused;
+        }
+        let expected = NextState::Conversation;
 
         session.state = SessionState::Thinking;
 
@@ -351,6 +416,7 @@ impl Engine {
                 None,
             )
             .await;
+        session.interaction_feedback.clear();
 
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
@@ -381,13 +447,26 @@ impl Engine {
         result: PatchApplyResult,
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
-        let mut session = self.take_session(&result.session_id)?;
         let session_id = result.session_id.clone();
+        let generation = self.begin_turn(&session_id)?;
+        self.apply_result_with_progress_generation(result, generation, progress)
+            .await
+    }
+
+    pub async fn apply_result_with_progress_generation(
+        &mut self,
+        result: PatchApplyResult,
+        generation: u64,
+        progress: Option<ProgressReporter>,
+    ) -> Result<ActionResult> {
+        let session_id = result.session_id.clone();
+        let mut effective_generation = generation;
+        let mut session = self.session_for_turn(&session_id, generation)?;
         let output = self
-            .apply_result_taken(&mut session, result, progress)
+            .apply_result_taken(&mut session, result, &mut effective_generation, progress)
             .await;
 
-        self.sessions.insert(session_id.clone(), session);
+        self.commit_session(session, effective_generation)?;
         if output.is_ok() {
             // Once an accepted result surfaces the next slice, speculate on
             // its continuation. Rejections clear goal_slice_continues, so
@@ -402,6 +481,7 @@ impl Engine {
         &mut self,
         session: &mut Session,
         result: PatchApplyResult,
+        generation: &mut u64,
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         session.state.require_patch()?;
@@ -428,9 +508,13 @@ impl Engine {
                 .extend(completed_step_signatures);
             session.accepted_patches.extend(result.patch_ids.clone());
             session.state = SessionState::Summary;
-            session.goal_status = loopbiotic_protocol::GoalStatus::NeedsReview;
+            session.goal_status = if session.goal_active {
+                loopbiotic_protocol::GoalStatus::NeedsReview
+            } else {
+                loopbiotic_protocol::GoalStatus::Idle
+            };
             session.next_step = None;
-            if session.continuous_goal {
+            if session.goal_active {
                 if let Some(next) = session.pending_patch_cards.pop_front() {
                     session.state = SessionState::PatchShown;
                     session.goal_status = loopbiotic_protocol::GoalStatus::Active;
@@ -460,48 +544,54 @@ impl Engine {
                     .goal_turn_taken(
                         &session_id,
                         session,
-                        BackendAction::User(Action::Next),
+                        BackendAction::User(Action::Goal),
                         progress,
                         speculated,
                     )
                     .await;
             }
-            let changed_files = result.changed_files;
-            let summary = if changed_files.is_empty() {
-                "The local patch was applied. Continue only if the goal needs another change."
-                    .into()
-            } else {
-                format!(
-                    "Applied the local patch to {}. Continue only if the goal needs another change.",
-                    changed_files
-                        .iter()
-                        .map(|file| file.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+            let expected = NextState::Conversation;
+            // Applying the local patch is already complete and must survive a
+            // cancelled/overridden post-accept model turn. Commit that fact
+            // before awaiting the read-only continuation, then reserve a new
+            // generation for the background conversation.
+            session.state = SessionState::CardShown;
+            self.commit_session(session.clone(), *generation)?;
+            *generation = self.begin_turn(&session_id)?;
+            session.turn_generation = *generation;
+            session.state = SessionState::Thinking;
+            let prefetched = self.take_post_accept_prefetch(session).await;
+            let response = self
+                .next_distinct_response(
+                    session,
+                    BackendAction::PostAccept,
+                    session.context.clone(),
+                    &expected,
+                    progress,
+                    prefetched,
                 )
-            };
-            let card = Card::Summary(SummaryCard {
-                id: session.next_card_id("applied"),
-                title: "Local step applied".into(),
-                summary,
-                changed_files,
-                next_actions: vec![Action::Next, Action::RunCheck, Action::Stop],
-            });
-            session.cards.push(card.clone());
+                .await;
+            session.interaction_feedback.clear();
+            let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
+            let attempts = response.metadata.attempts.clone();
+            let model = response.metadata.model.clone();
+            self.add_usage(session, &response.metadata.token_usage);
+            let card = self.accept_response(session, response, expected)?;
 
             return Ok(ActionResult {
                 session_id,
                 card,
                 goal: goal_progress(session),
                 token_usage: session.token_usage.clone(),
-                turn_token_usage: TokenUsage::default(),
+                turn_token_usage,
                 context_report: session.context.report.clone(),
-                model: None,
-                attempts: vec![],
+                model,
+                attempts,
             });
         }
 
         session.rejected_patches.extend(result.patch_ids.clone());
+        self.cancel_post_accept_prefetch(session).await;
         session.pending_patch_cards.clear();
         session.goal_slice_continues = false;
         session.next_step = None;
@@ -510,7 +600,7 @@ impl Engine {
         // explicit Retry action if the user wants a replacement draft.
         self.cancel_goal_continuation(session).await;
 
-        session.state = if session.continuous_goal {
+        session.state = if session.goal_active {
             SessionState::GoalLoopFailed
         } else {
             SessionState::PatchFailed
@@ -556,6 +646,7 @@ impl Engine {
         let response = self
             .next_distinct_response(session, action, context, &expected, progress, speculated)
             .await;
+        session.interaction_feedback.clear();
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();
         let model = response.metadata.model.clone();
@@ -576,6 +667,41 @@ impl Engine {
 
     pub fn get(&self, session_id: &str) -> Option<&Session> {
         self.sessions.get(session_id)
+    }
+
+    pub fn working_result(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        deadline_ms: u64,
+    ) -> Result<ActionResult> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        let card = Card::Working(WorkingCard {
+            id: format!("c_working_{}", session.cards.len() + 1),
+            turn_id: turn_id.into(),
+            title: "Agent still working".into(),
+            phase: "working".into(),
+            message:
+                "The response exceeded its interaction budget and is continuing in the background."
+                    .into(),
+            elapsed_ms: deadline_ms,
+            deadline_ms,
+            actions: vec![Action::CancelTurn, Action::Stop],
+        });
+
+        Ok(ActionResult {
+            session_id: session_id.into(),
+            card,
+            goal: goal_progress(session),
+            token_usage: session.token_usage.clone(),
+            turn_token_usage: TokenUsage::default(),
+            context_report: session.context.report.clone(),
+            model: None,
+            attempts: vec![],
+        })
     }
 
     pub fn update_context(&mut self, session_id: &str, context: ContextBundle) -> Result<()> {
@@ -625,21 +751,18 @@ impl Engine {
         let expected_kind = expected_card_kind(session, &action, expected);
 
         let allow_goal_completion = matches!(expected, NextState::GoalLoop | NextState::GoalWhy);
-        let mut card_contract = CardContract {
+        let card_contract = CardContract {
             expected_kind,
             allow_goal_completion,
+            conversation_only: matches!(expected, NextState::Conversation),
             ..CardContract::default()
         };
-        if allow_goal_completion && !matches!(expected, NextState::GoalWhy) {
-            card_contract.max_patch_files = MAX_GOAL_PATCH_FILES;
-            card_contract.max_hunks_per_patch = MAX_GOAL_HUNKS_PER_PATCH;
-            card_contract.max_changed_lines = MAX_GOAL_CHANGED_LINES;
-        }
 
         BackendRequest {
             session: SessionSnapshot {
                 id: session.id.clone(),
                 prompt: session.original_prompt.clone(),
+                interaction_feedback: session.interaction_feedback.clone(),
                 completed_steps: session.completed_steps.clone(),
                 known_observations: session
                     .known_observations
@@ -664,6 +787,25 @@ impl Engine {
         next_state: NextState,
     ) -> Result<Card> {
         let mut received = response.card;
+        match &mut received {
+            Card::Hypothesis(card) if !card.actions.contains(&Action::Goal) => {
+                let index = card
+                    .actions
+                    .iter()
+                    .position(|action| *action == Action::Stop)
+                    .unwrap_or(card.actions.len());
+                card.actions.insert(index, Action::Goal);
+            }
+            Card::Finding(card) if !card.actions.contains(&Action::Goal) => {
+                let index = card
+                    .actions
+                    .iter()
+                    .position(|action| *action == Action::Stop)
+                    .unwrap_or(card.actions.len());
+                card.actions.insert(index, Action::Goal);
+            }
+            _ => {}
+        }
         if let Card::Patch(patch) = &mut received
             && !patch.actions.contains(&Action::Why)
         {
@@ -707,10 +849,114 @@ impl Engine {
         Ok(card)
     }
 
-    fn take_session(&mut self, session_id: &str) -> Result<Session> {
-        self.sessions
-            .remove(session_id)
-            .ok_or_else(|| anyhow!("unknown session {session_id}"))
+    pub fn begin_turn(&mut self, session_id: &str) -> Result<u64> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        session.turn_generation += 1;
+
+        Ok(session.turn_generation)
+    }
+
+    fn session_for_turn(&self, session_id: &str, generation: u64) -> Result<Session> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        if session.turn_generation != generation {
+            return Err(anyhow!("turn {generation} for {session_id} was superseded"));
+        }
+
+        Ok(session.clone())
+    }
+
+    fn commit_session(&mut self, session: Session, generation: u64) -> Result<()> {
+        let current = self
+            .sessions
+            .get(&session.id)
+            .ok_or_else(|| anyhow!("unknown session {}", session.id))?;
+        if current.turn_generation != generation {
+            return Err(anyhow!(
+                "turn {generation} for {} was superseded",
+                session.id
+            ));
+        }
+        self.sessions.insert(session.id.clone(), session);
+
+        Ok(())
+    }
+
+    pub async fn cancel_turn(&mut self, session_id: &str) -> Result<ActionResult> {
+        let mut session = self
+            .sessions
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        session.turn_generation += 1;
+        self.cancel_goal_continuation(&mut session).await;
+        self.cancel_post_accept_prefetch(&mut session).await;
+        if session.goal_active {
+            session.goal_active = false;
+            session.goal_paused = true;
+            session.goal_status = loopbiotic_protocol::GoalStatus::Paused;
+        }
+        session.state = session
+            .cards
+            .last()
+            .map(SessionState::from_card)
+            .unwrap_or(SessionState::CardShown);
+        let accepted_patch_waiting_for_conversation = session.state == SessionState::PatchShown
+            && session.cards.last().is_some_and(|card| {
+                let Card::Patch(card) = card else {
+                    return false;
+                };
+                card.patches
+                    .iter()
+                    .all(|patch| session.accepted_patches.contains(&patch.id))
+            });
+        let card = if accepted_patch_waiting_for_conversation {
+            session.state = SessionState::CardShown;
+            let card = Card::Finding(FindingCard {
+                id: session.next_card_id("accepted_cancelled"),
+                title: "Local step accepted".into(),
+                finding: "The patch remains applied. The automatic follow-up was cancelled; send a message or explicitly choose the next step.".into(),
+                location: None,
+                annotation: None,
+                actions: vec![
+                    Action::Follow,
+                    Action::Fix,
+                    Action::Goal,
+                    Action::RunCheck,
+                    Action::Stop,
+                ],
+            });
+            session.cards.push(card.clone());
+            card
+        } else {
+            session.cards.last().cloned().unwrap_or_else(|| {
+                Card::Error(ErrorCard {
+                    id: session.next_card_id("cancelled"),
+                    title: "Turn cancelled".into(),
+                    message: "Agent thinking was cancelled. Send a message or retry when ready."
+                        .into(),
+                    actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+                })
+            })
+        };
+        let result = ActionResult {
+            session_id: session_id.into(),
+            card,
+            goal: goal_progress(&session),
+            token_usage: session.token_usage.clone(),
+            turn_token_usage: TokenUsage::default(),
+            context_report: session.context.report.clone(),
+            model: None,
+            attempts: vec![],
+        };
+        self.sessions.insert(session_id.into(), session);
+
+        Ok(result)
     }
 
     fn add_usage(&self, session: &mut Session, usage: &Option<loopbiotic_protocol::TokenUsage>) {
@@ -721,9 +967,9 @@ impl Engine {
 }
 
 fn expected_start_state(session: &Session) -> NextState {
-    if session.continuous_goal {
-        NextState::GoalLoop
-    } else if session.mode == Mode::Fix {
+    if session.forced_kind.is_none() && session.mode == Mode::Auto {
+        NextState::Conversation
+    } else if matches!(session.mode, Mode::Fix | Mode::Propose) {
         NextState::Patch
     } else {
         NextState::Any
@@ -741,6 +987,7 @@ fn expected_card_kind(
 ) -> Option<CardKind> {
     match next_state {
         NextState::Patch => return Some(CardKind::Patch),
+        NextState::Conversation => return None,
         NextState::GoalLoop => return None,
         NextState::GoalWhy => return Some(CardKind::Finding),
         NextState::Summary | NextState::Finished => return Some(CardKind::Summary),
@@ -755,10 +1002,12 @@ fn expected_card_kind(
             Mode::Auto => None,
         }),
         BackendAction::Reply(_) => None,
+        BackendAction::PostAccept => None,
         BackendAction::ContractRetry(_) => None,
         BackendAction::LocationGranted => None,
         BackendAction::User(action) => match action {
             Action::Fix => Some(CardKind::Patch),
+            Action::Goal | Action::CancelTurn => None,
             Action::OtherLead => Some(CardKind::Hypothesis),
             Action::Follow | Action::Why | Action::Open | Action::RunCheck | Action::Next => {
                 Some(CardKind::Finding)
@@ -800,6 +1049,7 @@ fn card_summary(card: &Card) -> String {
         Card::Hypothesis(card) => format!("hypothesis: {}", card.claim),
         Card::Finding(card) => format!("finding: {}", card.finding),
         Card::Patch(card) => format!("patch: {}", card.explanation),
+        Card::Working(card) => format!("working: {}", card.message),
         Card::Choice(card) => format!("choice: {}", card.question),
         Card::Deny(card) => format!("deny: {}", card.reason),
         Card::OpenLocation(card) => format!("open_location: {}", card.reason),

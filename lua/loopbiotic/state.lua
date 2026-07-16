@@ -2,7 +2,7 @@
 ---@field statement string
 ---@field completed_steps string[]
 ---@field known_observations table[]
----@field status string "active" | "needs_review" | "complete"
+---@field status string "idle" | "active" | "paused" | "needs_review" | "complete"
 ---@field next_step? string
 
 ---@class LoopbioticTokenUsage
@@ -57,6 +57,7 @@
 ---@field details_card LoopbioticCard|nil
 ---@field details_expanded boolean
 ---@field navigated_card LoopbioticCard|nil
+---@field cancelled_turn_id string|nil
 ---@field reset fun()
 
 -- Every mutable field with its initial value. Fields that start as nil list
@@ -106,6 +107,7 @@ local defaults = {
   details_card = vim.NIL,
   details_expanded = false,
   navigated_card = vim.NIL,
+  cancelled_turn_id = vim.NIL,
 }
 
 ---@type LoopbioticState

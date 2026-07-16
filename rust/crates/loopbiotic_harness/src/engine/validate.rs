@@ -3,10 +3,7 @@
 
 use anyhow::Result;
 use loopbiotic_patch::{PatchValidator, violation};
-use loopbiotic_protocol::{
-    Card, ContextBundle, MAX_GOAL_CHANGED_LINES, MAX_GOAL_HUNKS_PER_PATCH, MAX_GOAL_PATCH_FILES,
-    PatchApplyResult, ViolationClass,
-};
+use loopbiotic_protocol::{Card, ContextBundle, PatchApplyResult, ViolationClass};
 
 use crate::session::Session;
 use crate::state::NextState;
@@ -29,16 +26,7 @@ pub(super) fn validate_backend_card(
     }
 
     validate_one_card(card)?;
-    if matches!(next_state, NextState::GoalLoop) {
-        PatchValidator::validate_card_with_limits(
-            card,
-            MAX_GOAL_PATCH_FILES,
-            MAX_GOAL_HUNKS_PER_PATCH,
-            MAX_GOAL_CHANGED_LINES,
-        )?;
-    } else {
-        PatchValidator::validate_card(card)?;
-    }
+    PatchValidator::validate_card(card)?;
     validate_patch_target(card, context)?;
     PatchValidator::validate_card_against_context(card, context)?;
     next_state
@@ -134,6 +122,12 @@ pub(super) fn validate_one_card(card: &Card) -> Result<()> {
             for patch in &card.patches {
                 require_text("file patch explanation", &patch.explanation)?;
             }
+        }
+        Card::Working(card) => {
+            require_text("card title", &card.title)?;
+            require_text("working turn id", &card.turn_id)?;
+            require_text("working phase", &card.phase)?;
+            require_text("working message", &card.message)?;
         }
         Card::Choice(card) => {
             require_text("card title", &card.title)?;

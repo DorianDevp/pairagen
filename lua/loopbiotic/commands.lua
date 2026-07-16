@@ -22,6 +22,14 @@ function M.setup()
     M.action_or_prompt("fix", "fix")
   end)
 
+  command("LoopbioticGoal", function()
+    require("loopbiotic").action("goal")
+  end)
+
+  command("LoopbioticCancel", function()
+    require("loopbiotic").action("cancel_turn")
+  end)
+
   command("LoopbioticWhy", function()
     M.action_or_prompt("why", "explain")
   end)
@@ -35,11 +43,11 @@ function M.setup()
   end)
 
   command("LoopbioticAssess", function()
-    require("loopbiotic").action("next")
+    require("loopbiotic").action("goal")
   end)
 
   command("LoopbioticNext", function()
-    require("loopbiotic").action("next")
+    require("loopbiotic").action("goal")
   end)
 
   command("LoopbioticStop", function()

@@ -203,7 +203,9 @@ pub struct GoalProgress {
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
     #[default]
+    Idle,
     Active,
+    Paused,
     NeedsReview,
     Complete,
     Stopped,

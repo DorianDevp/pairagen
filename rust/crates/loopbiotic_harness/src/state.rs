@@ -6,6 +6,7 @@ pub enum SessionState {
     Idle,
     Thinking,
     CardShown,
+    Working,
     PatchShown,
     PatchExplained,
     PatchFailed,
@@ -20,6 +21,7 @@ pub enum SessionState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NextState {
     Any,
+    Conversation,
     Card,
     Patch,
     GoalLoop,
@@ -32,11 +34,14 @@ impl SessionState {
     pub fn next(&self, action: &Action) -> Result<NextState> {
         match (self, action) {
             (Self::CardShown, Action::Follow | Action::Why | Action::OtherLead | Action::Open) => {
-                Ok(NextState::Card)
+                Ok(NextState::Conversation)
             }
+            (Self::CardShown, Action::Goal) => Ok(NextState::GoalLoop),
             (Self::CardShown, Action::Retry | Action::EditPrompt) => Ok(NextState::Any),
             (Self::CardShown, Action::Fix) => Ok(NextState::Patch),
             (Self::CardShown, Action::Stop) => Ok(NextState::Finished),
+            (Self::Working, Action::CancelTurn) => Ok(NextState::Conversation),
+            (Self::Working, Action::Stop) => Ok(NextState::Finished),
             (Self::PatchShown, Action::Apply | Action::ApplyPatch { .. }) => Ok(NextState::Summary),
             (Self::PatchShown, Action::Why) => Ok(NextState::GoalWhy),
             (Self::PatchShown, Action::Retry | Action::EditPrompt) => Ok(NextState::Patch),
@@ -50,7 +55,6 @@ impl SessionState {
             (Self::PatchExplained, Action::Stop) => Ok(NextState::Finished),
             (Self::GoalLoopFailed, Action::Retry | Action::EditPrompt) => Ok(NextState::GoalLoop),
             (Self::GoalLoopFailed, Action::Stop) => Ok(NextState::Finished),
-            (Self::Summary, Action::Next) => Ok(NextState::GoalLoop),
             (Self::Summary, Action::RunCheck) => Ok(NextState::Card),
             (Self::Summary, Action::Stop) => Ok(NextState::Finished),
             (Self::Finished, _) => Err(anyhow!("session is finished")),
@@ -61,6 +65,7 @@ impl SessionState {
     pub fn from_card(card: &Card) -> Self {
         match card {
             Card::Patch(_) => Self::PatchShown,
+            Card::Working(_) => Self::Working,
             Card::Summary(_) => Self::Summary,
             Card::Error(_) => Self::CardShown,
             _ => Self::CardShown,
@@ -80,12 +85,31 @@ impl NextState {
     pub fn validate(&self, card: &Card) -> Result<()> {
         match (self, card) {
             (Self::Any, _) => Ok(()),
+            (
+                Self::Conversation,
+                Card::Hypothesis(_)
+                | Card::Finding(_)
+                | Card::Choice(_)
+                | Card::Deny(_)
+                | Card::OpenLocation(_)
+                | Card::Error(_),
+            ) => Ok(()),
+            (Self::Conversation, _) => {
+                Err(anyhow!("conversation turn cannot return code or a summary"))
+            }
             (Self::Card, Card::Patch(_)) => Err(anyhow!("patch card is not allowed here")),
             (Self::Card, Card::Summary(_)) => Err(anyhow!("summary card is not allowed here")),
             (Self::Card, _) => Ok(()),
             (Self::Patch, Card::Patch(_)) => Ok(()),
             (Self::Patch, _) => Err(anyhow!("expected patch card")),
-            (Self::GoalLoop, Card::Patch(_) | Card::Summary(_) | Card::Choice(_)) => Ok(()),
+            (
+                Self::GoalLoop,
+                Card::Patch(_)
+                | Card::Summary(_)
+                | Card::Choice(_)
+                | Card::Finding(_)
+                | Card::Hypothesis(_),
+            ) => Ok(()),
             (Self::GoalLoop, _) => Err(anyhow!(
                 "expected the next goal patch, a blocking choice, or a completed goal summary"
             )),
@@ -120,6 +144,8 @@ mod tests {
             Action::Why,
             Action::ResumeDraft,
             Action::Fix,
+            Action::Goal,
+            Action::CancelTurn,
             Action::OtherLead,
             Action::Apply,
             apply_patch(),
@@ -139,10 +165,11 @@ mod tests {
         use SessionState as S;
 
         let table: Vec<(S, A, N)> = vec![
-            (S::CardShown, A::Follow, N::Card),
-            (S::CardShown, A::Why, N::Card),
-            (S::CardShown, A::OtherLead, N::Card),
-            (S::CardShown, A::Open, N::Card),
+            (S::CardShown, A::Follow, N::Conversation),
+            (S::CardShown, A::Why, N::Conversation),
+            (S::CardShown, A::OtherLead, N::Conversation),
+            (S::CardShown, A::Open, N::Conversation),
+            (S::CardShown, A::Goal, N::GoalLoop),
             (S::CardShown, A::Retry, N::Any),
             (S::CardShown, A::EditPrompt, N::Any),
             (S::CardShown, A::Fix, N::Patch),
@@ -164,7 +191,8 @@ mod tests {
             (S::GoalLoopFailed, A::Retry, N::GoalLoop),
             (S::GoalLoopFailed, A::EditPrompt, N::GoalLoop),
             (S::GoalLoopFailed, A::Stop, N::Finished),
-            (S::Summary, A::Next, N::GoalLoop),
+            (S::Working, A::CancelTurn, N::Conversation),
+            (S::Working, A::Stop, N::Finished),
             (S::Summary, A::RunCheck, N::Card),
             (S::Summary, A::Stop, N::Finished),
         ];
@@ -191,6 +219,7 @@ mod tests {
             (S::CardShown, apply_patch()),
             (S::CardShown, A::ResumeDraft),
             (S::CardShown, A::Next),
+            (S::CardShown, A::CancelTurn),
             (S::CardShown, A::RunCheck),
             (S::PatchShown, A::Follow),
             (S::PatchShown, A::Fix),
@@ -207,6 +236,7 @@ mod tests {
             (S::Summary, A::Apply),
             (S::Summary, A::Fix),
             (S::Summary, A::Retry),
+            (S::Summary, A::Next),
             (S::Applying, A::Stop),
             (S::Applied, A::Stop),
             (S::Checking, A::Stop),
@@ -325,6 +355,19 @@ mod tests {
             (N::Any, patch_card(), Ok(())),
             (N::Any, summary_card(), Ok(())),
             (N::Any, error_card(), Ok(())),
+            (N::Conversation, hypothesis_card(), Ok(())),
+            (N::Conversation, finding_card(), Ok(())),
+            (N::Conversation, choice_card(), Ok(())),
+            (
+                N::Conversation,
+                patch_card(),
+                Err("conversation turn cannot return code or a summary"),
+            ),
+            (
+                N::Conversation,
+                summary_card(),
+                Err("conversation turn cannot return code or a summary"),
+            ),
             (N::Card, hypothesis_card(), Ok(())),
             (N::Card, finding_card(), Ok(())),
             (N::Card, choice_card(), Ok(())),
@@ -343,16 +386,8 @@ mod tests {
             (N::GoalLoop, patch_card(), Ok(())),
             (N::GoalLoop, summary_card(), Ok(())),
             (N::GoalLoop, choice_card(), Ok(())),
-            (
-                N::GoalLoop,
-                finding_card(),
-                Err("expected the next goal patch"),
-            ),
-            (
-                N::GoalLoop,
-                hypothesis_card(),
-                Err("expected the next goal patch"),
-            ),
+            (N::GoalLoop, finding_card(), Ok(())),
+            (N::GoalLoop, hypothesis_card(), Ok(())),
             (N::GoalWhy, finding_card(), Ok(())),
             (
                 N::GoalWhy,

@@ -14,6 +14,9 @@ pub(super) fn output_schema(req: &BackendRequest) -> Value {
     if req.card_contract.allow_goal_completion {
         return goal_loop_schema(&req.card_contract);
     }
+    if req.card_contract.conversation_only {
+        return conversation_schema();
+    }
 
     match req.card_contract.expected_kind {
         Some(loopbiotic_protocol::CardKind::Patch) => patch_schema(&req.card_contract),
@@ -23,8 +26,22 @@ pub(super) fn output_schema(req: &BackendRequest) -> Value {
         Some(loopbiotic_protocol::CardKind::Deny) => deny_schema(),
         Some(loopbiotic_protocol::CardKind::Summary) => summary_schema(),
         Some(loopbiotic_protocol::CardKind::Error) => error_schema(),
+        Some(loopbiotic_protocol::CardKind::Working) => error_schema(),
         Some(loopbiotic_protocol::CardKind::OpenLocation) | None => any_op_schema(),
     }
+}
+
+fn conversation_schema() -> Value {
+    let mut schema = any_op_schema();
+    schema["properties"]["op"]["enum"] = json!([
+        "hypothesis",
+        "finding",
+        "choice",
+        "deny",
+        "open_location",
+        "error"
+    ]);
+    schema
 }
 
 /// Schema for turns without a demanded kind: the agent picks whichever op
@@ -84,7 +101,7 @@ fn any_op_schema() -> Value {
                         "label": {"type": "string"},
                         "action": {
                             "type": "string",
-                            "enum": ["follow", "why", "fix", "other_lead", "retry", "edit_prompt", "open", "run_check", "next", "stop"]
+                            "enum": ["follow", "why", "fix", "goal", "other_lead", "retry", "edit_prompt", "open", "run_check", "stop"]
                         }
                     })
                 )
@@ -101,6 +118,8 @@ fn goal_loop_schema(contract: &crate::CardContract) -> Value {
     let mut schema = any_op_schema();
     schema["properties"]["op"]["enum"] = json!([
         "patch",
+        "hypothesis",
+        "finding",
         "choice",
         "deny",
         "open_location",
@@ -110,8 +129,8 @@ fn goal_loop_schema(contract: &crate::CardContract) -> Value {
     let mut patches = patch_schema(contract)["properties"]["patches"].clone();
     patches["type"] = json!(["array", "null"]);
     schema["properties"]["patches"] = patches;
-    // Sliced goal turns return one file's patch plus the plan of remaining
-    // slices; null keeps legacy full-batch responses and non-patch ops legal.
+    // Goal patch turns return one hunk plus the remaining coherent steps.
+    // Null stays legal for attention cards and a planless final hunk.
     schema["properties"]["plan"] = json!({
         "anyOf": [plan_schema(), {"type": "null"}]
     });
@@ -269,7 +288,7 @@ fn choice_schema() -> Value {
                         "label": {"type": "string"},
                         "action": {
                             "type": "string",
-                            "enum": ["follow", "why", "fix", "other_lead", "retry", "edit_prompt", "open", "run_check", "next", "stop"]
+                            "enum": ["follow", "why", "fix", "goal", "other_lead", "retry", "edit_prompt", "open", "run_check", "stop"]
                         }
                     })
                 )
@@ -329,11 +348,24 @@ mod tests {
     }
 
     #[test]
+    fn conversation_schema_cannot_return_patch_or_summary() {
+        let mut req = crate::test_request();
+        req.card_contract.conversation_only = true;
+        let schema = output_schema(&req);
+        let ops = schema["properties"]["op"]["enum"].as_array().unwrap();
+
+        assert!(ops.contains(&json!("finding")));
+        assert!(ops.contains(&json!("choice")));
+        assert!(!ops.contains(&json!("patch")));
+        assert!(!ops.contains(&json!("summary")));
+    }
+
+    #[test]
     fn goal_loop_schema_allows_structured_patch_or_summary() {
         let contract = crate::CardContract {
-            max_patch_files: loopbiotic_protocol::MAX_GOAL_PATCH_FILES,
-            max_hunks_per_patch: loopbiotic_protocol::MAX_GOAL_HUNKS_PER_PATCH,
-            max_changed_lines: loopbiotic_protocol::MAX_GOAL_CHANGED_LINES,
+            max_patch_files: loopbiotic_protocol::MAX_PATCH_FILES,
+            max_hunks_per_patch: loopbiotic_protocol::MAX_HUNKS_PER_PATCH,
+            max_changed_lines: loopbiotic_protocol::MAX_CHANGED_LINES,
             ..Default::default()
         };
         let schema = goal_loop_schema(&contract);
@@ -341,15 +373,15 @@ mod tests {
 
         assert!(ops.contains(&json!("patch")));
         assert!(ops.contains(&json!("summary")));
-        assert!(!ops.contains(&json!("finding")));
+        assert!(ops.contains(&json!("finding")));
         assert_eq!(
             schema["properties"]["patches"]["maxItems"],
-            loopbiotic_protocol::MAX_GOAL_PATCH_FILES
+            loopbiotic_protocol::MAX_PATCH_FILES
         );
         assert!(schema["properties"]["patches"]["items"]["properties"]["hunks"].is_object());
         assert_eq!(
             schema["properties"]["patches"]["items"]["properties"]["hunks"]["maxItems"],
-            loopbiotic_protocol::MAX_GOAL_HUNKS_PER_PATCH
+            loopbiotic_protocol::MAX_HUNKS_PER_PATCH
         );
         assert!(schema["properties"]["goal_complete"].is_object());
     }

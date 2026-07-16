@@ -16,6 +16,7 @@ pub enum CardKind {
     Hypothesis,
     Finding,
     Patch,
+    Working,
     Choice,
     Deny,
     OpenLocation,
@@ -30,6 +31,8 @@ pub enum Action {
     Why,
     ResumeDraft,
     Fix,
+    Goal,
+    CancelTurn,
     OtherLead,
     Apply,
     ApplyPatch { patch_id: PatchId },
@@ -47,6 +50,7 @@ pub enum Card {
     Hypothesis(HypothesisCard),
     Finding(FindingCard),
     Patch(PatchCard),
+    Working(WorkingCard),
     Choice(ChoiceCard),
     Deny(DenyCard),
     OpenLocation(OpenLocationCard),
@@ -60,6 +64,7 @@ impl Card {
             Card::Hypothesis(_) => CardKind::Hypothesis,
             Card::Finding(_) => CardKind::Finding,
             Card::Patch(_) => CardKind::Patch,
+            Card::Working(_) => CardKind::Working,
             Card::Choice(_) => CardKind::Choice,
             Card::Deny(_) => CardKind::Deny,
             Card::OpenLocation(_) => CardKind::OpenLocation,
@@ -73,6 +78,7 @@ impl Card {
             Card::Hypothesis(card) => &card.id,
             Card::Finding(card) => &card.id,
             Card::Patch(card) => &card.id,
+            Card::Working(card) => &card.id,
             Card::Choice(card) => &card.id,
             Card::Deny(card) => &card.id,
             Card::OpenLocation(card) => &card.id,
@@ -86,6 +92,7 @@ impl Card {
             Card::Hypothesis(card) => &card.actions,
             Card::Finding(card) => &card.actions,
             Card::Patch(card) => &card.actions,
+            Card::Working(card) => &card.actions,
             Card::Choice(_) => &[],
             Card::Deny(card) => &card.actions,
             Card::OpenLocation(_) => &[],
@@ -129,21 +136,34 @@ pub struct PatchCard {
     pub explanation: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// The backend prepared every edit required to finish the current goal.
-    /// The harness may split `patches` into local review cards; only the last
-    /// queued card retains this flag.
+    /// This one reviewed hunk finishes the current explicit goal.
     #[serde(default, skip_serializing_if = "is_false")]
     pub goal_complete: bool,
-    /// Sliced goal turns return exactly one file's patch plus this plan of
-    /// what remains. Absent on legacy full-batch responses.
+    /// Explicit goal turns return one hunk plus a plan of coherent steps that
+    /// remain. A later step may target the same file again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<GoalPlan>,
     pub patches: Vec<FilePatch>,
     pub actions: Vec<Action>,
 }
 
-/// The remainder of a sliced goal: which files still need their own slice and
-/// whether the current slice is the final one.
+/// A backend turn exceeded its interaction deadline but is still running.
+/// The card keeps the editor interactive while the final result is produced
+/// in the background.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkingCard {
+    pub id: CardId,
+    pub turn_id: String,
+    pub title: String,
+    pub phase: String,
+    pub message: String,
+    pub elapsed_ms: u64,
+    pub deadline_ms: u64,
+    pub actions: Vec<Action>,
+}
+
+/// The remainder of an explicit goal: coherent steps still to review and
+/// whether the current hunk is the final one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GoalPlan {
     #[serde(default)]

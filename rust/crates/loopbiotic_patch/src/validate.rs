@@ -687,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_batch_accepts_a_formatting_hunk_over_the_review_limit() {
+    fn work_turns_do_not_bypass_the_review_limit() {
         let mut diff = "@@ -1,20 +1,20 @@\n".to_string();
         for index in 0..20 {
             diff.push_str(&format!("-line {index}\n"));
@@ -712,13 +712,6 @@ mod tests {
         });
 
         assert!(PatchValidator::validate_card(&card).is_err());
-        PatchValidator::validate_card_with_limits(
-            &card,
-            1,
-            loopbiotic_protocol::MAX_GOAL_HUNKS_PER_PATCH,
-            loopbiotic_protocol::MAX_GOAL_CHANGED_LINES,
-        )
-        .unwrap();
     }
 
     #[test]

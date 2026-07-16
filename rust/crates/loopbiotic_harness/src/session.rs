@@ -31,13 +31,19 @@ pub struct Session {
     pub completed_steps: Vec<String>,
     pub completed_step_signatures: Vec<(PathBuf, String)>,
     pub pending_patch_cards: VecDeque<PatchCard>,
-    /// True while the slice under review came from a sliced goal response
-    /// whose plan says more file slices follow; the engine speculatively
-    /// requests the next slice and consumes it once the queue drains.
+    /// True while the explicit goal plan says another small hunk follows; the
+    /// engine speculatively requests it during local review.
     pub goal_slice_continues: bool,
     pub goal_status: GoalStatus,
     pub next_step: Option<String>,
-    pub continuous_goal: bool,
+    /// True only after the user explicitly selected the Goal action.
+    pub goal_active: bool,
+    /// A human message pauses goal execution without discarding progress.
+    pub goal_paused: bool,
+    /// Monotonic generation used to discard cancelled or superseded turns.
+    pub turn_generation: u64,
+    /// Content-free interaction feedback delivered to the next backend turn.
+    pub interaction_feedback: Vec<String>,
     pub known_observations: Vec<ObservationProgress>,
     pub observation_index: HashMap<String, usize>,
     pub state: SessionState,
@@ -50,9 +56,6 @@ impl Session {
     pub fn new(params: StartSessionParams) -> Self {
         let context = ContextBundle::from_start(params.clone());
         let (forced_kind, prompt) = parse_kind_prefix(&params.prompt);
-
-        let continuous_goal =
-            forced_kind.is_none() && matches!(params.mode, Mode::Auto | Mode::Fix);
 
         Self {
             id: format!("s_{}", Uuid::new_v4().simple()),
@@ -72,9 +75,12 @@ impl Session {
             completed_step_signatures: vec![],
             pending_patch_cards: VecDeque::new(),
             goal_slice_continues: false,
-            goal_status: GoalStatus::Active,
+            goal_status: GoalStatus::Idle,
             next_step: None,
-            continuous_goal,
+            goal_active: false,
+            goal_paused: false,
+            turn_generation: 0,
+            interaction_feedback: vec![],
             known_observations: vec![],
             observation_index: HashMap::new(),
             state: SessionState::Thinking,

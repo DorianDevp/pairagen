@@ -7,7 +7,7 @@ local util = require("loopbiotic.util")
 
 ---@class LoopbioticCard a card proposed by the backend
 ---@field id string
----@field kind string "hypothesis" | "finding" | "patch" | "summary" | "error" | "deny" | "choice"
+---@field kind string "hypothesis" | "finding" | "patch" | "working" | "summary" | "error" | "deny" | "choice"
 ---@field title? string
 ---@field actions? (string|table)[] available actions; tables carry apply_patch payloads
 ---@field next_actions? (string|table)[] legacy name for actions
@@ -35,6 +35,8 @@ local labels = {
   why = { "w", "Why", "why" },
   resume_draft = { "b", "Back to draft", nil },
   fix = { "x", "Draft", "fix" },
+  goal = { "G", "Goal", "goal" },
+  cancel_turn = { "c", "Cancel", "cancel" },
   other_lead = { "n", "Other", "other_lead" },
   apply = { "a", "Review", "draft_accept" },
   apply_patch = { "a", "Review", "draft_accept" },
@@ -131,6 +133,18 @@ function M.lines(card)
     end
     table.insert(lines, "")
     table.insert(lines, tostring(#(card.patches or {})) .. " file patch pending")
+  elseif card.kind == "working" then
+    table.insert(lines, card.message or card.title or "Agent is still working")
+    table.insert(lines, "")
+    table.insert(lines, string.format("Phase  %s", card.phase or "working"))
+    table.insert(
+      lines,
+      string.format(
+        "Budget %sms · elapsed %sms",
+        tonumber(card.deadline_ms) or 0,
+        tonumber(card.elapsed_ms) or tonumber(card.deadline_ms) or 0
+      )
+    )
   elseif card.kind == "summary" then
     if M.has_action(card, "next") then
       table.insert(lines, "Status  Local step applied")
@@ -197,6 +211,8 @@ function M.goal(lines)
     table.insert(lines, "State Needs goal assessment")
   elseif goal.status == "complete" then
     table.insert(lines, "State Goal complete")
+  elseif goal.status == "paused" then
+    table.insert(lines, "State Goal paused")
   elseif goal.next_step and goal.next_step ~= "" then
     table.insert(lines, "Now   " .. M.short(goal.next_step, 54))
   end

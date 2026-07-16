@@ -20,6 +20,14 @@ pub(super) struct CodexAppState {
     next_id: u64,
     pub(super) threads: HashMap<String, String>,
     pub(super) context_fingerprints: HashMap<String, u64>,
+    pub(super) active_turn: Option<ActiveTurn>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ActiveTurn {
+    pub(super) session_id: String,
+    pub(super) thread_id: String,
+    pub(super) turn_id: String,
 }
 
 pub(super) struct CodexAppProcess {
@@ -48,6 +56,7 @@ impl Default for CodexAppState {
             next_id: 1,
             threads: HashMap::new(),
             context_fingerprints: HashMap::new(),
+            active_turn: None,
         }
     }
 }
@@ -56,6 +65,7 @@ impl CodexAppState {
     pub(super) fn clear_conversation(&mut self) {
         self.threads.clear();
         self.context_fingerprints.clear();
+        self.active_turn = None;
     }
 
     pub(super) fn invalidate_process(&mut self) {
@@ -70,6 +80,28 @@ impl CodexAppState {
             let _ = process.child.start_kill();
         }
         self.invalidate_process();
+    }
+
+    pub(super) async fn interrupt_turn(&mut self, session_id: &str) -> Result<bool> {
+        let Some(active) = self
+            .active_turn
+            .clone()
+            .filter(|active| active.session_id == session_id)
+        else {
+            return Ok(false);
+        };
+
+        let result = self
+            .request(json!({
+                "method": "turn/interrupt",
+                "params": {
+                    "threadId": active.thread_id,
+                    "turnId": active.turn_id,
+                }
+            }))
+            .await;
+        self.active_turn = None;
+        result.map(|_| true)
     }
 
     fn next_request_id(&mut self) -> u64 {

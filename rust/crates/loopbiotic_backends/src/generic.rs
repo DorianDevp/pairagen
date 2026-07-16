@@ -65,7 +65,7 @@ impl GenericCliBackend {
 
 /// The op contract sent on every turn. A `const` so it can never interpolate
 /// volatile data: it opens the prompt and anchors the provider prompt cache.
-const GENERIC_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. Outside goal completion, return open_location when the change belongs in a different file than the supplied buffer. Goal slices may patch any file inspected with read-only tools. error is only for technical failures. limits.expected, when set, is the required op (deny always allowed; choice also allowed for hypothesis/finding); when null, choose the best fitting op and ask via choice when ambiguous. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.";
+const GENERIC_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|open|run_check|stop. Use deny when you cannot or should not proceed. When limits.conversation_only is true, never return patch or summary. Goal turns are explicitly user-authorized. error is only for technical failures. limits.expected, when set, is the required op. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.";
 
 pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     let mut rules = vec![
@@ -89,10 +89,10 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     // the rules array survives across goal and non-goal turns.
     if req.card_contract.allow_goal_completion {
         rules.push(json!(
-            "Goal turn: return exactly one file's complete patch per response — the most foundational unresolved file first — plus plan {remaining:[{file,summary}],complete}. Set plan.complete true only on the final slice; remaining is then empty. Use up to limits.hunks_per_patch hunks and limits.changed_lines per hunk for that one file; Loopbiotic verifies and reviews the slice locally, then asks for the next planned slice."
+            "Goal turn: return one small, compilable hunk within limits.changed_lines plus plan {remaining:[{file,summary}],complete}. Remaining entries are coherent steps and may repeat a file. A finding or choice is allowed when programmer attention is needed."
         ));
         rules.push(json!(
-            "On a goal continuation (a.action is next), continue with the next planned file slice."
+            "On a goal continuation (a.action is goal), continue with the next planned coherent step."
         ));
         rules.push(json!(
             "If limits.goal_completion is true and limits.expected is finding, explain why the pending hunk is the right next step without replacing it or advancing the goal."
@@ -140,6 +140,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
                 "hunks_per_patch": req.card_contract.max_hunks_per_patch,
                 "changed_lines": req.card_contract.max_changed_lines,
                 "goal_completion": req.card_contract.allow_goal_completion,
+                "conversation_only": req.card_contract.conversation_only,
                 "expected": req.card_contract.expected_kind,
             }),
         ),
@@ -147,6 +148,10 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
         ("completed_steps", json!(req.session.completed_steps)),
         ("known_observations", json!(req.session.known_observations)),
         // Volatile: changes every turn.
+        (
+            "interaction_feedback",
+            json!(req.session.interaction_feedback),
+        ),
         ("a", action_value(&req.action)),
         ("last", json!(req.session.last_summary)),
         ("n", json!(req.session.card_count)),
@@ -394,13 +399,13 @@ mod tests {
     #[test]
     fn generic_prompt_adds_the_slice_rule_only_on_goal_turns() {
         let mut req = crate::test_request();
-        assert!(!generic_prompt(&req).contains("exactly one file's complete patch"));
+        assert!(!generic_prompt(&req).contains("one small, compilable hunk"));
 
         req.card_contract.allow_goal_completion = true;
         let goal = generic_prompt(&req);
-        assert!(goal.contains("exactly one file's complete patch"));
+        assert!(goal.contains("one small, compilable hunk"));
         assert!(goal.contains("plan {remaining:[{file,summary}],complete}"));
-        assert!(goal.contains("next planned file slice"));
+        assert!(goal.contains("next planned coherent step"));
     }
 
     #[test]

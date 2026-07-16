@@ -145,6 +145,7 @@ pub(crate) fn action_value(action: &BackendAction) -> Value {
             json!({"kind": "user", "action": action})
         }
         BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
+        BackendAction::PostAccept => json!({"kind": "post_accept"}),
         BackendAction::ContractRetry(reason) => {
             json!({"kind": "contract_retry", "reason": reason})
         }

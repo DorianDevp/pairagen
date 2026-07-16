@@ -1,10 +1,9 @@
-//! Speculative work while the user is still reading the current card: the
-//! Fix prefetch of the likely next card and the goal-continuation prefetch of
-//! the next sliced goal turn. Both are session-keyed background turns whose
-//! usage folds into the session totals even when the speculation is wasted.
+//! Speculative work while the user is still reading the current card:
+//! read-only post-accept conversation for ordinary drafts, and the next small
+//! patch only inside an explicitly authorized goal.
 
 use anyhow::Result;
-use loopbiotic_backends::{BackendAction, BackendRequest, BackendResponse};
+use loopbiotic_backends::{BackendAction, BackendResponse};
 use loopbiotic_protocol::Action;
 
 use crate::session::Session;
@@ -12,26 +11,20 @@ use crate::state::{NextState, SessionState};
 
 use super::Engine;
 
-/// Speculative prefetch of the likely next card. `Fix` requests the patch
-/// card in the background while the user is still reading a discovery card,
-/// so pressing Fix returns (near-)instantly on a hit.
+/// Ordinary speculation is read-only. While a non-goal patch is reviewed,
+/// prepare the conversational follow-up that should appear if it is accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrefetchMode {
     Off,
-    Fix,
+    ReadOnly,
 }
 
 pub(super) struct Prefetch {
-    action: Action,
-    fingerprint: u64,
     handle: tokio::task::JoinHandle<Result<BackendResponse>>,
 }
 
-/// A speculative goal-continuation turn: while the user reviews the hunks of
-/// one goal slice, the next slice is already being generated on the same
-/// backend session. Unlike the Fix prefetch it is not fingerprint-matched —
-/// accepting hunks necessarily changes the context, and the consumed response
-/// still passes every validation gate against the live buffers.
+/// A speculative goal-continuation turn: while the user reviews one explicit
+/// goal hunk, the next small hunk is generated on the same backend session.
 pub(super) struct Continuation {
     handle: tokio::task::JoinHandle<Result<BackendResponse>>,
 }
@@ -44,12 +37,10 @@ impl Continuation {
 }
 
 impl Engine {
-    /// Requests the likely next card in the background while the user reads
-    /// the one just shown. Only Fix is predicted: it is the most common and
-    /// slowest follow-up, and on backends with a separate patch process a
-    /// misprediction never blocks the user's real next request.
+    /// Prepares the read-only card that follows acceptance of an ordinary
+    /// draft. Patch speculation is reserved for explicit goals below.
     pub(super) async fn schedule_prefetch(&mut self, session_id: &str) {
-        if self.prefetch_mode != PrefetchMode::Fix {
+        if self.prefetch_mode != PrefetchMode::ReadOnly {
             return;
         }
 
@@ -72,83 +63,54 @@ impl Engine {
         let Some(session) = self.sessions.get(session_id) else {
             return;
         };
-        if session.state != SessionState::CardShown {
+        if session.state != SessionState::PatchShown || session.goal_active {
             return;
         }
-        let Some(card) = session.cards.last() else {
-            return;
-        };
-        if !card.actions().contains(&Action::Fix) {
+        if !matches!(
+            session.cards.last(),
+            Some(loopbiotic_protocol::Card::Patch(_))
+        ) {
             return;
         }
-        let Ok(expected) = session.state.next(&Action::Fix) else {
-            return;
-        };
 
         let request = self.request(
             session,
-            BackendAction::User(Action::Fix),
+            BackendAction::PostAccept,
             session.context.clone(),
-            &expected,
+            &NextState::Conversation,
         );
-        let fingerprint = request_fingerprint(&request);
         let backend = self.backend.clone();
         let handle = tokio::spawn(async move { backend.next_card(request).await });
 
-        self.prefetches.insert(
-            session_id.to_string(),
-            Prefetch {
-                action: Action::Fix,
-                fingerprint,
-                handle,
-            },
-        );
+        self.prefetches
+            .insert(session_id.to_string(), Prefetch { handle });
     }
 
-    /// Consumes a pending speculation if it was computed for exactly the
-    /// request this action would produce; otherwise leaves the real path
-    /// untouched and keeps the wasted tokens accounted for.
-    pub(super) async fn take_prefetch(
+    pub(super) async fn take_post_accept_prefetch(
         &mut self,
         session: &mut Session,
-        action: &Action,
     ) -> Option<BackendResponse> {
         let entry = self.prefetches.remove(&session.id)?;
 
-        if entry.action == *action
-            && let Ok(expected) = session.state.next(action)
-        {
-            let request = self.request(
-                session,
-                BackendAction::User(action.clone()),
-                session.context.clone(),
-                &expected,
-            );
-            if request_fingerprint(&request) == entry.fingerprint {
-                return match entry.handle.await {
-                    Ok(Ok(response)) => Some(response),
-                    _ => None,
-                };
-            }
-            if entry.handle.is_finished() {
-                if let Ok(Ok(response)) = entry.handle.await {
-                    fold_usage(session, &response.metadata.token_usage);
-                }
-                return None;
-            }
-            self.prefetches.insert(session.id.clone(), entry);
-            return None;
+        match entry.handle.await {
+            Ok(Ok(response)) => Some(response),
+            _ => None,
         }
+    }
 
+    pub(super) async fn cancel_post_accept_prefetch(&mut self, session: &mut Session) {
+        let Some(entry) = self.prefetches.remove(&session.id) else {
+            return;
+        };
         if entry.handle.is_finished() {
             if let Ok(Ok(response)) = entry.handle.await {
                 fold_usage(session, &response.metadata.token_usage);
             }
-        } else {
-            self.prefetches.insert(session.id.clone(), entry);
+            return;
         }
 
-        None
+        entry.handle.abort();
+        let _ = self.backend.cancel_turn(&session.id).await;
     }
 
     /// Speculatively requests the next goal slice in the background while the
@@ -156,12 +118,10 @@ impl Engine {
     /// pending slice's plan says more slices follow; consumed by
     /// `take_goal_continuation` once the review queue drains.
     pub(super) async fn schedule_goal_continuation(&mut self, session_id: &str) {
-        self.reap_cancelled_continuations().await;
-
         let Some(session) = self.sessions.get(session_id) else {
             return;
         };
-        if !session.continuous_goal
+        if !session.goal_active
             || !session.goal_slice_continues
             || session.state != SessionState::PatchShown
         {
@@ -179,7 +139,7 @@ impl Engine {
         // conversation the slice came from.
         let request = self.request(
             session,
-            BackendAction::User(Action::Next),
+            BackendAction::User(Action::Goal),
             session.context.clone(),
             &NextState::GoalLoop,
         );
@@ -206,11 +166,9 @@ impl Engine {
         }
     }
 
-    /// Aborts the speculation after a reject/retry/reply invalidated the slice
-    /// it continued from. A finished speculation folds its usage into the
-    /// session totals right away; an unfinished one keeps running detached and
-    /// is folded once it completes — wasted turns stay visible either way,
-    /// the same policy as the Fix prefetch.
+    /// Aborts speculation after reject/retry/reply invalidated the hunk it
+    /// continued from. Finished work stays accounted; in-flight work is
+    /// interrupted at the real backend and cannot surface a replacement.
     pub(super) async fn cancel_goal_continuation(&mut self, session: &mut Session) {
         let Some(entry) = self.continuations.remove(&session.id) else {
             return;
@@ -223,27 +181,8 @@ impl Engine {
             return;
         }
 
-        self.cancelled_continuations
-            .push((session.id.clone(), entry.handle));
-    }
-
-    /// Folds cancelled speculations that have since finished into their
-    /// sessions' token totals; still-running ones stay queued for a later
-    /// sweep.
-    async fn reap_cancelled_continuations(&mut self) {
-        let pending = std::mem::take(&mut self.cancelled_continuations);
-
-        for (session_id, handle) in pending {
-            if !handle.is_finished() {
-                self.cancelled_continuations.push((session_id, handle));
-                continue;
-            }
-            if let Ok(Ok(response)) = handle.await
-                && let Some(session) = self.sessions.get_mut(&session_id)
-            {
-                fold_usage(session, &response.metadata.token_usage);
-            }
-        }
+        entry.handle.abort();
+        let _ = self.backend.cancel_turn(&session.id).await;
     }
 }
 
@@ -251,22 +190,4 @@ fn fold_usage(session: &mut Session, usage: &Option<loopbiotic_protocol::TokenUs
     if let Some(usage) = usage {
         session.token_usage.add(usage);
     }
-}
-
-pub(super) fn request_fingerprint(request: &BackendRequest) -> u64 {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-
-    // Only model-visible data may decide whether a speculative response
-    // matches: the optimizer report (cache counters vary run to run) and raw
-    // LSP hints are telemetry that backend_context strips before the model
-    // ever sees them.
-    let mut request = request.clone();
-    request.context.report = None;
-    request.context.hints = vec![];
-
-    let mut hasher = DefaultHasher::new();
-    serde_json::to_string(&request)
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    hasher.finish()
 }
