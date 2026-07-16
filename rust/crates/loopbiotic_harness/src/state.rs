@@ -98,3 +98,289 @@ impl NextState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use loopbiotic_protocol::{
+        ChoiceCard, DenyCard, ErrorCard, FindingCard, HypothesisCard, Location, OpenLocationCard,
+        PatchCard, SummaryCard,
+    };
+
+    use super::*;
+
+    fn apply_patch() -> Action {
+        Action::ApplyPatch {
+            patch_id: "p_1".into(),
+        }
+    }
+
+    fn all_actions() -> Vec<Action> {
+        vec![
+            Action::Follow,
+            Action::Why,
+            Action::ResumeDraft,
+            Action::Fix,
+            Action::OtherLead,
+            Action::Apply,
+            apply_patch(),
+            Action::Retry,
+            Action::EditPrompt,
+            Action::Open,
+            Action::RunCheck,
+            Action::Next,
+            Action::Stop,
+        ]
+    }
+
+    #[test]
+    fn every_legal_transition_yields_its_next_state() {
+        use Action as A;
+        use NextState as N;
+        use SessionState as S;
+
+        let table: Vec<(S, A, N)> = vec![
+            (S::CardShown, A::Follow, N::Card),
+            (S::CardShown, A::Why, N::Card),
+            (S::CardShown, A::OtherLead, N::Card),
+            (S::CardShown, A::Open, N::Card),
+            (S::CardShown, A::Retry, N::Any),
+            (S::CardShown, A::EditPrompt, N::Any),
+            (S::CardShown, A::Fix, N::Patch),
+            (S::CardShown, A::Stop, N::Finished),
+            (S::PatchShown, A::Apply, N::Summary),
+            (S::PatchShown, apply_patch(), N::Summary),
+            (S::PatchShown, A::Why, N::GoalWhy),
+            (S::PatchShown, A::Retry, N::Patch),
+            (S::PatchShown, A::EditPrompt, N::Patch),
+            (S::PatchShown, A::Stop, N::Finished),
+            (S::PatchFailed, A::Retry, N::Patch),
+            (S::PatchFailed, A::EditPrompt, N::Patch),
+            (S::PatchFailed, A::Stop, N::Finished),
+            (S::PatchExplained, A::ResumeDraft, N::Patch),
+            (S::PatchExplained, A::Why, N::GoalWhy),
+            (S::PatchExplained, A::Retry, N::GoalWhy),
+            (S::PatchExplained, A::EditPrompt, N::GoalWhy),
+            (S::PatchExplained, A::Stop, N::Finished),
+            (S::GoalLoopFailed, A::Retry, N::GoalLoop),
+            (S::GoalLoopFailed, A::EditPrompt, N::GoalLoop),
+            (S::GoalLoopFailed, A::Stop, N::Finished),
+            (S::Summary, A::Next, N::GoalLoop),
+            (S::Summary, A::RunCheck, N::Card),
+            (S::Summary, A::Stop, N::Finished),
+        ];
+
+        for (state, action, expected) in table {
+            let next = state
+                .next(&action)
+                .unwrap_or_else(|error| panic!("{state:?} + {action:?} should be legal: {error}"));
+            assert_eq!(next, expected, "{state:?} + {action:?}");
+        }
+    }
+
+    #[test]
+    fn illegal_transitions_are_rejected() {
+        use Action as A;
+        use SessionState as S;
+
+        let table: Vec<(S, A)> = vec![
+            (S::Idle, A::Follow),
+            (S::Idle, A::Stop),
+            (S::Thinking, A::Fix),
+            (S::Thinking, A::Stop),
+            (S::CardShown, A::Apply),
+            (S::CardShown, apply_patch()),
+            (S::CardShown, A::ResumeDraft),
+            (S::CardShown, A::Next),
+            (S::CardShown, A::RunCheck),
+            (S::PatchShown, A::Follow),
+            (S::PatchShown, A::Fix),
+            (S::PatchShown, A::OtherLead),
+            (S::PatchShown, A::Next),
+            (S::PatchFailed, A::Apply),
+            (S::PatchFailed, A::Fix),
+            (S::PatchFailed, A::Why),
+            (S::PatchExplained, A::Apply),
+            (S::PatchExplained, A::Fix),
+            (S::GoalLoopFailed, A::Apply),
+            (S::GoalLoopFailed, A::Fix),
+            (S::GoalLoopFailed, A::Next),
+            (S::Summary, A::Apply),
+            (S::Summary, A::Fix),
+            (S::Summary, A::Retry),
+            (S::Applying, A::Stop),
+            (S::Applied, A::Stop),
+            (S::Checking, A::Stop),
+        ];
+
+        for (state, action) in table {
+            let error = state.next(&action).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid action"),
+                "{state:?} + {action:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn finished_rejects_every_action() {
+        for action in all_actions() {
+            let error = SessionState::Finished.next(&action).unwrap_err();
+            assert!(
+                error.to_string().contains("session is finished"),
+                "{action:?}: {error}"
+            );
+        }
+    }
+
+    fn hypothesis_card() -> Card {
+        Card::Hypothesis(HypothesisCard {
+            id: "c_h".into(),
+            title: "t".into(),
+            claim: "c".into(),
+            evidence: None,
+            next_move: None,
+            actions: vec![Action::Stop],
+        })
+    }
+
+    fn finding_card() -> Card {
+        Card::Finding(FindingCard {
+            id: "c_f".into(),
+            title: "t".into(),
+            finding: "f".into(),
+            location: None,
+            annotation: None,
+            actions: vec![Action::Stop],
+        })
+    }
+
+    fn patch_card() -> Card {
+        Card::Patch(PatchCard {
+            id: "c_p".into(),
+            title: "t".into(),
+            explanation: "e".into(),
+            warnings: vec![],
+            goal_complete: false,
+            patches: vec![],
+            actions: vec![Action::Apply],
+        })
+    }
+
+    fn choice_card() -> Card {
+        Card::Choice(ChoiceCard {
+            id: "c_c".into(),
+            title: "t".into(),
+            question: "q".into(),
+            options: vec![],
+        })
+    }
+
+    fn deny_card() -> Card {
+        Card::Deny(DenyCard {
+            id: "c_d".into(),
+            title: "t".into(),
+            reason: "r".into(),
+            location: None,
+            actions: vec![Action::Stop],
+        })
+    }
+
+    fn open_location_card() -> Card {
+        Card::OpenLocation(OpenLocationCard {
+            id: "c_o".into(),
+            reason: "r".into(),
+            location: Location {
+                file: "src/work.ts".into(),
+                line: 1,
+                column: 1,
+            },
+        })
+    }
+
+    fn summary_card() -> Card {
+        Card::Summary(SummaryCard {
+            id: "c_s".into(),
+            title: "t".into(),
+            summary: "s".into(),
+            changed_files: vec![],
+            next_actions: vec![],
+        })
+    }
+
+    fn error_card() -> Card {
+        Card::Error(ErrorCard {
+            id: "c_e".into(),
+            title: "t".into(),
+            message: "m".into(),
+            actions: vec![Action::Stop],
+        })
+    }
+
+    #[test]
+    fn next_state_validates_expected_card_kinds() {
+        use NextState as N;
+
+        let table: Vec<(N, Card, std::result::Result<(), &str>)> = vec![
+            (N::Any, patch_card(), Ok(())),
+            (N::Any, summary_card(), Ok(())),
+            (N::Any, error_card(), Ok(())),
+            (N::Card, hypothesis_card(), Ok(())),
+            (N::Card, finding_card(), Ok(())),
+            (N::Card, choice_card(), Ok(())),
+            (N::Card, deny_card(), Ok(())),
+            (N::Card, open_location_card(), Ok(())),
+            (N::Card, error_card(), Ok(())),
+            (N::Card, patch_card(), Err("patch card is not allowed here")),
+            (
+                N::Card,
+                summary_card(),
+                Err("summary card is not allowed here"),
+            ),
+            (N::Patch, patch_card(), Ok(())),
+            (N::Patch, finding_card(), Err("expected patch card")),
+            (N::Patch, summary_card(), Err("expected patch card")),
+            (N::GoalLoop, patch_card(), Ok(())),
+            (N::GoalLoop, summary_card(), Ok(())),
+            (N::GoalLoop, choice_card(), Ok(())),
+            (
+                N::GoalLoop,
+                finding_card(),
+                Err("expected the next goal patch"),
+            ),
+            (
+                N::GoalLoop,
+                hypothesis_card(),
+                Err("expected the next goal patch"),
+            ),
+            (N::GoalWhy, finding_card(), Ok(())),
+            (
+                N::GoalWhy,
+                patch_card(),
+                Err("expected an explanation of the pending patch"),
+            ),
+            (N::Summary, summary_card(), Ok(())),
+            (N::Summary, patch_card(), Err("expected summary card")),
+            (N::Finished, summary_card(), Ok(())),
+            (N::Finished, finding_card(), Err("expected final summary")),
+        ];
+
+        for (next_state, card, expected) in table {
+            let result = next_state.validate(&card);
+            match expected {
+                Ok(()) => assert!(
+                    result.is_ok(),
+                    "{next_state:?} should accept {:?}: {result:?}",
+                    card.kind()
+                ),
+                Err(message) => match result {
+                    Ok(()) => panic!("{next_state:?} should reject {:?}", card.kind()),
+                    Err(error) => assert!(
+                        error.to_string().contains(message),
+                        "{next_state:?} + {:?}: {error}",
+                        card.kind()
+                    ),
+                },
+            }
+        }
+    }
+}
