@@ -38,6 +38,16 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The `backend/warmup` handshake now reports an explicit identity: the active
+  backend, the concrete model the next turn will use (configured, or resolved
+  from the backend — the Claude CLI announces it at process start, Ollama
+  always knows it), and the models the backend can enumerate (Ollama's local
+  tags). Protocol version is now 9.
+- The prompt window title names the active agent and resolved model (never
+  "default"), refreshing as soon as warmup resolves it, and `Ctrl-l`
+  (`keymaps.models`) opens a model picker fed by the backend-enumerated
+  models, an optional per-agent `models` list, and the last reported model.
+  Selections persist per agent exactly like `:LoopbioticModel`.
 - Lua tooling (`stylua`, `selene`, LuaLS config) enforced in CI, headless Lua
   unit tests for the patch engine and session state, `loopbioticd` JSON-RPC
   integration tests, session state-machine transition tests, and a real
