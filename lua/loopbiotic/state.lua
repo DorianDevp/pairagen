@@ -46,6 +46,7 @@
 ---@field token_usage LoopbioticTokenUsage|nil
 ---@field turn_token_usage LoopbioticTokenUsage|nil
 ---@field backend_model string|nil model the backend reported using
+---@field agent_identity table|nil backend/warmup identity: { backend, model, models }
 ---@field context_report table|nil
 ---@field workspace_hints table[]|nil
 ---@field completion_notified_card string|nil
@@ -91,6 +92,7 @@ local defaults = {
   token_usage = vim.NIL,
   turn_token_usage = vim.NIL,
   backend_model = vim.NIL,
+  agent_identity = vim.NIL,
   context_report = vim.NIL,
   workspace_hints = vim.NIL,
   completion_notified_card = vim.NIL,

@@ -14,7 +14,7 @@ local M = {}
 ---@field args? string[]
 ---@field model? string
 ---@field model_flag? string
----@field models? string[]
+---@field models? string[] extra model-picker candidates for this agent
 ---@field effort? string codex_app only
 ---@field discovery_model? string claude_app only
 ---@field discovery_thinking? integer claude_app only
@@ -113,6 +113,8 @@ M.values = {
     draft_accept = "<leader>pa",
     draft_reject = "<leader>pd",
     draft_retry = "<leader>pt",
+    -- Model picker inside the prompt window (buffer-local, insert and normal).
+    models = "<C-l>",
   },
   prompt = {
     border = "rounded",

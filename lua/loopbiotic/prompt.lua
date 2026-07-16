@@ -4,16 +4,22 @@ local ui = require("loopbiotic.ui")
 
 local M = {}
 
+-- Which window kind ("Prompt"/"Reply") is currently open, so the async
+-- warmup response can re-render the matching frame title.
+local open_kind = "Prompt"
+
 function M.open(mode)
   local source = require("loopbiotic.context").capture()
 
   -- Let the backend pay its startup cost (CLI boot, process spawn) while the
-  -- user is still typing the prompt.
-  require("loopbiotic.rpc").request("backend/warmup", {}, function() end)
+  -- user is still typing the prompt. The response also carries the backend
+  -- identity (concrete model, known models) used for the title and picker.
+  require("loopbiotic.rpc").request("backend/warmup", {}, M.on_warmup)
 
+  open_kind = "Prompt"
   M.open_for({
     title = M.title("Prompt"),
-    footer = " /kind forces card type  Ctrl-s submit  Esc normal  q close ",
+    footer = " Ctrl-l model  /kind forces card type  Ctrl-s submit  Esc normal  q close ",
     submit = function(text)
       require("loopbiotic").start(text, mode, source)
     end,
@@ -21,26 +27,144 @@ function M.open(mode)
 end
 
 function M.reply()
+  open_kind = "Reply"
   M.open_for({
     title = M.title("Reply"),
-    footer = " Ctrl-s send  Esc normal  q close ",
+    footer = " Ctrl-l model  Ctrl-s send  Esc normal  q close ",
     submit = function(text)
       require("loopbiotic").reply(text)
     end,
   })
 end
 
+-- Store the identity reported by backend/warmup and refresh the open prompt
+-- title with it. Old daemons answer {ok = true} without an identity field;
+-- tolerate that (and error responses) by keeping the previous state.
+---@param message table RPC response ({ result = ... } or { error = ... })
+function M.on_warmup(message)
+  if message.error or type(message.result) ~= "table" then
+    return
+  end
+
+  local identity = message.result.identity
+  if type(identity) ~= "table" then
+    return
+  end
+
+  state.agent_identity = identity
+  M.refresh_title()
+end
+
+-- Re-render the frame title of the currently open prompt window, if any.
+-- Callers may run outside the main loop (RPC callbacks), hence the schedule.
+function M.refresh_title()
+  vim.schedule(function()
+    local frame_win = state.prompt_frame_win
+    if not (frame_win and vim.api.nvim_win_is_valid(frame_win)) then
+      return
+    end
+
+    pcall(vim.api.nvim_win_set_config, frame_win, { title = M.title(open_kind), title_pos = "left" })
+  end)
+end
+
+-- Pick the concrete model out of the fixed resolution order: configured
+-- model, then the model the warmup identity announced for the next turn,
+-- then the model the backend reported after a turn. Returns nil when none
+-- is known. vim.NIL (JSON null) and empty strings count as unknown.
+---@param configured string|nil
+---@param identity_model string|nil
+---@param backend_model string|nil
+---@return string|nil
+function M.resolved_model(configured, identity_model, backend_model)
+  local candidates = { configured, identity_model, backend_model }
+
+  for index = 1, 3 do
+    local value = candidates[index]
+    if type(value) == "string" and value ~= "" then
+      return value
+    end
+  end
+
+  return nil
+end
+
+-- Title-ready model name; "model?" until any concrete model is known. The
+-- word "default" is never rendered.
+---@param configured string|nil
+---@param identity_model string|nil
+---@param backend_model string|nil
+---@return string
+function M.model_label(configured, identity_model, backend_model)
+  return M.resolved_model(configured, identity_model, backend_model) or "model?"
+end
+
+-- Deduped model-picker candidates, in resolution-priority order: configured
+-- model, identity model, backend-enumerated models, the agent's `models`
+-- config list, the model reported after the last turn.
+---@param configured string|nil
+---@param identity table|nil backend/warmup identity ({ model, models })
+---@param agent_models string[]|nil the agent's `models` config list
+---@param backend_model string|nil
+---@return string[]
+function M.model_candidates(configured, identity, agent_models, backend_model)
+  local seen = {}
+  local candidates = {}
+  local function add(value)
+    if type(value) == "string" and value ~= "" and not seen[value] then
+      seen[value] = true
+      table.insert(candidates, value)
+    end
+  end
+
+  add(configured)
+  if type(identity) == "table" then
+    add(identity.model)
+    if type(identity.models) == "table" then
+      for _, name in ipairs(identity.models) do
+        add(name)
+      end
+    end
+  end
+  for _, name in ipairs(agent_models or {}) do
+    add(name)
+  end
+  add(backend_model)
+
+  return candidates
+end
+
 function M.title(kind)
   local agent = config.agent()
-  local model = config.model()
-  if not model or model == "" then
-    -- No model configured: show what the backend reported it is actually
-    -- using, once a turn has completed.
-    model = state.backend_model
-  end
-  local active = model and model ~= "" and (agent .. " / " .. model) or (agent .. " / default")
+  local identity = state.agent_identity
+  local identity_model = type(identity) == "table" and identity.model or nil
+  local model = M.model_label(config.model(), identity_model, state.backend_model)
 
-  return string.format(" Loopbiotic %s · %s ", kind, active)
+  return string.format(" Loopbiotic %s · %s / %s ", kind, agent, model)
+end
+
+-- Open a picker over every model known for the active agent. The choice
+-- goes through the regular model-switch entry point (persisting the
+-- per-agent preference); only the frame title changes, the typed prompt
+-- text and window stay as they are.
+function M.pick_model()
+  local agent = config.agent()
+  local identity = state.agent_identity
+  local candidates = M.model_candidates(config.model(), identity, config.model_names(), state.backend_model)
+
+  if #candidates == 0 then
+    ui.notify("No known models for " .. agent .. " — use :LoopbioticModel <name>", vim.log.levels.WARN)
+    return
+  end
+
+  vim.ui.select(candidates, { prompt = "Loopbiotic model (" .. agent .. ")" }, function(choice)
+    if not choice or choice == "" then
+      return
+    end
+
+    require("loopbiotic").model(choice)
+    M.refresh_title()
+  end)
 end
 
 function M.open_for(opts)
@@ -111,6 +235,13 @@ function M.bind(buf, submit)
   vim.keymap.set({ "i", "n" }, "<C-s>", function()
     M.submit(buf, submit)
   end, { buffer = buf, nowait = true, silent = true })
+
+  local models_key = config.values.keymaps.models
+  if models_key and models_key ~= "" then
+    vim.keymap.set({ "i", "n" }, models_key, function()
+      M.pick_model()
+    end, { buffer = buf, nowait = true, silent = true })
+  end
 
   vim.keymap.set("n", "<CR>", function()
     M.submit(buf, submit)

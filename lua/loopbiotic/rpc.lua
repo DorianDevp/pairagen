@@ -1,6 +1,7 @@
 local config = require("loopbiotic.config")
 local installer = require("loopbiotic.installer")
 local log = require("loopbiotic.log")
+local state = require("loopbiotic.state")
 local ui = require("loopbiotic.ui")
 
 local M = {
@@ -96,6 +97,9 @@ function M.start(backend_command)
       end
       M.job = nil
       M.ready = false
+      -- The warmup identity described this process; the next one may report
+      -- a different backend or model.
+      state.agent_identity = nil
       M.fail_all("Loopbiotic backend exited with code " .. code)
     end,
   })
@@ -159,6 +163,9 @@ function M.stop()
   M.incompatible = false
   M.starting = false
   M.buffer = ""
+  -- Agent and model switches restart the backend through this path, so the
+  -- previously reported identity no longer applies.
+  state.agent_identity = nil
   M.fail_all("Loopbiotic backend was stopped")
 end
 

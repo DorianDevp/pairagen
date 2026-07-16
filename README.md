@@ -159,6 +159,32 @@ restores it on the next Neovim start. A model explicitly configured in
 `setup()` always takes precedence. `:LoopbioticModel default` clears the stored model
 and returns that agent to its own default.
 
+The prompt window title always names the active agent and the concrete model
+the next turn will use, e.g. `codex / gpt-5.4-mini`. Without a configured
+model it shows the model the backend announces during warmup (or reported
+after the last turn), and `model?` until one is known — it never shows
+`default`. Press `<C-l>` (`keymaps.models`) inside the prompt to pick a model
+from every known candidate: the configured model, the models the backend
+enumerates (for example Ollama's local tags), an optional `models` list on the
+agent definition, and the model reported by the last turn. The picked model
+persists per agent exactly like `:LoopbioticModel`; the prompt window and its
+typed text stay open.
+
+```lua
+require("loopbiotic").setup({
+  agents = {
+    ["local"] = {
+      kind = "ollama",
+      host = "http://127.0.0.1:11434",
+      models = { "qwen2.5-coder:7b", "llama3.1:8b" }, -- extra picker candidates
+    },
+  },
+  keymaps = {
+    models = "<C-l>", -- model picker inside the prompt window
+  },
+})
+```
+
 ## Flow
 
 ```text

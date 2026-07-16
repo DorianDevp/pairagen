@@ -519,22 +519,36 @@ function M.agents()
   return config.agent_names()
 end
 
+-- Concrete model to display for the active agent: configured model, then
+-- the backend/warmup identity, then the model reported after the last turn.
+-- The word "default" is never displayed.
+function M.model_display()
+  local identity = state.agent_identity
+  local identity_model = type(identity) == "table" and identity.model or nil
+  local resolved = prompt.resolved_model(config.model(), identity_model, state.backend_model)
+
+  return resolved or "agent default (not yet resolved)"
+end
+
 function M.model(name)
   if not name or name == "" then
     local model = config.model()
 
-    ui.notify("Loopbiotic model: " .. (model or "default"))
+    ui.notify("Loopbiotic model: " .. M.model_display())
 
     return model
   end
 
+  -- "default" and "none" stay accepted as inputs: they clear the stored
+  -- per-agent preference. Only the displayed name changes.
   if name == "default" or name == "none" then
     local _, saved, save_error = config.model("")
     rpc.stop()
+    local display = M.model_display()
     if save_error then
-      ui.notify("Loopbiotic model: default (could not save: " .. save_error .. ")", vim.log.levels.WARN)
+      ui.notify("Loopbiotic model: " .. display .. " (could not save: " .. save_error .. ")", vim.log.levels.WARN)
     else
-      ui.notify("Loopbiotic model: default" .. (saved and " · saved" or ""))
+      ui.notify("Loopbiotic model: " .. display .. (saved and " · saved" or ""))
     end
 
     return nil
