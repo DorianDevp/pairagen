@@ -3,9 +3,11 @@ local context = require("loopbiotic.context")
 local log = require("loopbiotic.log")
 local navigation = require("loopbiotic.navigation")
 local rpc = require("loopbiotic.rpc")
+local session = require("loopbiotic.session")
 local state = require("loopbiotic.state")
 local thinking = require("loopbiotic.thinking")
 local ui = require("loopbiotic.ui")
+local util = require("loopbiotic.util")
 
 local M = {}
 local namespace = vim.api.nvim_create_namespace("loopbiotic-patch")
@@ -55,11 +57,13 @@ function M.show(card, opts)
 
   local annotations = M.annotations(hunk, source_start)
   local change_cursor = M.change_cursor(draft_lines, annotations)
-  if not navigation.open_location({
-    file = patch.file,
-    line = change_cursor[1],
-    column = change_cursor[2] + 1,
-  }) then
+  if
+    not navigation.open_location({
+      file = patch.file,
+      line = change_cursor[1],
+      column = change_cursor[2] + 1,
+    })
+  then
     ui.notify("Source location is not visible", vim.log.levels.WARN)
     return false
   end
@@ -226,8 +230,7 @@ function M.control_lines(card, keys)
   keys = keys or require("loopbiotic.config").values.keymaps
   local lines = {}
   if state.goal and state.goal.statement then
-    local goal = state.details_expanded and M.one_line(state.goal.statement)
-      or M.truncate(state.goal.statement, 52)
+    local goal = state.details_expanded and M.one_line(state.goal.statement) or M.truncate(state.goal.statement, 52)
     table.insert(lines, "Goal  " .. goal)
     local completed = #(state.goal.completed_steps or {})
     if completed > 0 then
@@ -263,8 +266,7 @@ end
 function M.details_available(card)
   local goal = state.goal and state.goal.statement
   local explanation = card.explanation or card.title or "Local change"
-  return goal and vim.fn.strdisplaywidth(M.one_line(goal)) > 52
-    or vim.fn.strdisplaywidth(M.one_line(explanation)) > 58
+  return goal and vim.fn.strdisplaywidth(M.one_line(goal)) > 52 or vim.fn.strdisplaywidth(M.one_line(explanation)) > 58
 end
 
 function M.toggle_details(card)
@@ -292,10 +294,7 @@ end
 function M.observation_network(observations)
   local nodes = {}
   for index, observation in ipairs(observations) do
-    local kind = observation.kind == "hypothesis" and "H" or observation.kind == "signal" and "S" or "F"
-    local active = observation.active and "*" or "."
-    local repeats = (observation.occurrences or 1) > 1 and "x" .. observation.occurrences or ""
-    table.insert(nodes, string.format("[%s%d%s%s]", kind, index, active, repeats))
+    table.insert(nodes, util.observation_node(observation, index))
   end
 
   return table.concat(nodes, "--")
@@ -429,13 +428,8 @@ function M.send(accepted, patch_ids, changed_files, error)
       return
     end
 
-    state.token_usage = message.result.token_usage
-    state.turn_token_usage = message.result.turn_token_usage
-    state.context_report = message.result.context_report
-    log.event("context_optimization", message.result.context_report or {})
-    log.event("agent_attempts", message.result.attempts or {})
-    state.goal = message.result.goal or state.goal
-    require("loopbiotic.card").show(message.result.card)
+    -- Patch results historically never updated state.backend_model.
+    session.apply_turn_result(message.result, { update_model = false })
   end)
 end
 

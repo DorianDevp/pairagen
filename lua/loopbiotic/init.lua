@@ -5,10 +5,12 @@ local log = require("loopbiotic.log")
 local navigation = require("loopbiotic.navigation")
 local prompt = require("loopbiotic.prompt")
 local rpc = require("loopbiotic.rpc")
+local session = require("loopbiotic.session")
 local state = require("loopbiotic.state")
 local status = require("loopbiotic.status")
 local thinking = require("loopbiotic.thinking")
 local ui = require("loopbiotic.ui")
+local util = require("loopbiotic.util")
 
 local M = {}
 
@@ -46,15 +48,7 @@ rpc.on_request("editor/open_location", function(params, respond)
 end)
 
 function M.workspace_location(file)
-  if type(file) ~= "string" or file == "" then
-    return false
-  end
-
-  local root = vim.uv.fs_realpath(vim.fn.getcwd()) or vim.fs.normalize(vim.fn.getcwd())
-  local target = vim.fn.fnamemodify(file, ":p")
-  target = vim.uv.fs_realpath(target) or vim.fs.normalize(target)
-
-  return target == root or vim.startswith(target, root .. "/")
+  return util.in_workspace(file)
 end
 
 function M.setup(opts)
@@ -134,14 +128,7 @@ function M.start(text, mode, source)
     end
 
     state.session_id = message.result.session_id
-    state.goal = message.result.goal or state.goal
-    state.token_usage = message.result.token_usage
-    state.turn_token_usage = message.result.turn_token_usage
-    state.backend_model = message.result.model or state.backend_model
-    state.context_report = message.result.context_report
-    log.event("context_optimization", message.result.context_report or {})
-    log.event("agent_attempts", message.result.attempts or {})
-    card.show(message.result.card)
+    session.apply_turn_result(message.result)
   end)
 end
 
@@ -227,14 +214,7 @@ function M.action(action, opts)
       return
     end
 
-    state.token_usage = message.result.token_usage
-    state.turn_token_usage = message.result.turn_token_usage
-    state.backend_model = message.result.model or state.backend_model
-    state.context_report = message.result.context_report
-    log.event("context_optimization", message.result.context_report or {})
-    log.event("agent_attempts", message.result.attempts or {})
-    state.goal = message.result.goal or state.goal
-    card.show(message.result.card)
+    session.apply_turn_result(message.result)
   end)
 end
 
@@ -268,20 +248,25 @@ function M.run_check()
 
   if #report.errors > 0 then
     local first = report.errors[1]
-    ui.notify(string.format(
-      "Loopbiotic check found %s error%s. First: %s:%s %s",
-      #report.errors,
-      #report.errors == 1 and "" or "s",
-      first.file,
-      first.line,
-      first.message
-    ), vim.log.levels.ERROR)
+    ui.notify(
+      string.format(
+        "Loopbiotic check found %s error%s. First: %s:%s %s",
+        #report.errors,
+        #report.errors == 1 and "" or "s",
+        first.file,
+        first.line,
+        first.message
+      ),
+      vim.log.levels.ERROR
+    )
   elseif report.checked_files > 0 then
-    ui.notify(string.format(
-      "Loopbiotic check passed: no editor errors in %s changed buffer%s",
-      report.checked_files,
-      report.checked_files == 1 and "" or "s"
-    ))
+    ui.notify(
+      string.format(
+        "Loopbiotic check passed: no editor errors in %s changed buffer%s",
+        report.checked_files,
+        report.checked_files == 1 and "" or "s"
+      )
+    )
   else
     ui.notify("Loopbiotic check unavailable: no changed buffers are loaded", vim.log.levels.WARN)
   end
@@ -347,14 +332,7 @@ function M.reply(text)
       return
     end
 
-    state.token_usage = message.result.token_usage
-    state.turn_token_usage = message.result.turn_token_usage
-    state.backend_model = message.result.model or state.backend_model
-    state.context_report = message.result.context_report
-    log.event("context_optimization", message.result.context_report or {})
-    log.event("agent_attempts", message.result.attempts or {})
-    state.goal = message.result.goal or state.goal
-    card.show(message.result.card)
+    session.apply_turn_result(message.result)
   end)
 end
 
@@ -375,11 +353,8 @@ function M.confirm_agent_turn(action)
     return true
   end
 
-  local question = string.format(
-    "Loopbiotic session used %s tokens (budget %s).\nStart another agent turn?",
-    used,
-    budget
-  )
+  local question =
+    string.format("Loopbiotic session used %s tokens (budget %s).\nStart another agent turn?", used, budget)
 
   return vim.fn.confirm(question, "&Continue\n&Cancel", 2, "Warning") == 1
 end
@@ -506,40 +481,7 @@ function M.reset()
   ui.close(state.thinking_win)
   status.hide()
   rpc.stop()
-
-  state.session_id = nil
-  state.source_buf = nil
-  state.source_cursor = nil
-  state.card = nil
-  state.goal = nil
-  state.last_card = nil
-  state.prompt_win = nil
-  state.prompt_buf = nil
-  state.prompt_frame_win = nil
-  state.prompt_frame_buf = nil
-  state.card_win = nil
-  state.card_buf = nil
-  state.status_win = nil
-  state.status_buf = nil
-  state.diff_tab = nil
-  state.diff_buf = nil
-  state.diff_win = nil
-  state.diff_source_buf = nil
-  state.diff_source_tick = nil
-  state.diff_first_row = nil
-  state.diff_cursor = nil
-  state.token_usage = nil
-  state.turn_token_usage = nil
-  state.backend_model = nil
-  state.context_report = nil
-  state.workspace_hints = nil
-  state.completion_notified_card = nil
-  state.completion_checked_card = nil
-  state.details_card = nil
-  state.details_expanded = false
-  state.navigated_card = nil
-  state.thinking_request_id = nil
-  state.thinking_session_id = nil
+  state.reset()
 
   ui.notify("Loopbiotic reset")
 end

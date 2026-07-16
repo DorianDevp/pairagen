@@ -1,6 +1,7 @@
 local config = require("loopbiotic.config")
 local extmarks = require("loopbiotic.extmarks")
 local state = require("loopbiotic.state")
+local util = require("loopbiotic.util")
 
 local M = {}
 
@@ -101,15 +102,7 @@ function M.from_card(card)
 end
 
 function M.card_location(card)
-  if type(card.next_move) == "table" and card.next_move.kind == "open_location" then
-    return card.next_move
-  elseif type(card.evidence) == "table" then
-    return card.evidence
-  elseif type(card.location) == "table" then
-    return card.location
-  end
-
-  return nil
+  return util.card_location(card)
 end
 
 return M

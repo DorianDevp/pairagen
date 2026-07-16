@@ -3,6 +3,29 @@ local navigation = require("loopbiotic.navigation")
 local state = require("loopbiotic.state")
 local status = require("loopbiotic.status")
 local ui = require("loopbiotic.ui")
+local util = require("loopbiotic.util")
+
+---@class LoopbioticCard a card proposed by the backend
+---@field id string
+---@field kind string "hypothesis" | "finding" | "patch" | "summary" | "error" | "deny" | "choice"
+---@field title? string
+---@field actions? (string|table)[] available actions; tables carry apply_patch payloads
+---@field next_actions? (string|table)[] legacy name for actions
+---@field location? table { file, line, column, annotation? }
+---@field evidence? table location-shaped evidence (hypothesis cards)
+---@field next_move? table { kind = "open_location", file, line, column }
+---@field claim? string hypothesis cards
+---@field finding? string finding cards
+---@field annotation? string finding cards
+---@field explanation? string patch cards
+---@field patches? { id: string, file: string, diff: string }[] patch cards
+---@field warnings? string[] patch cards
+---@field changed_files? string[]
+---@field summary? string summary cards
+---@field message? string error cards
+---@field reason? string deny cards
+---@field question? string choice cards
+---@field options? { id?: string, label?: string }[] choice cards
 
 local M = {}
 
@@ -77,10 +100,7 @@ function M.show(card, opts)
     state.completion_notified_card = card.id
     ui.notify("Local step applied. Assess the goal, run checks, or stop.")
   end
-  if card.kind == "summary"
-    and card.title == "Goal complete"
-    and state.completion_checked_card ~= card.id
-  then
+  if card.kind == "summary" and card.title == "Goal complete" and state.completion_checked_card ~= card.id then
     state.completion_checked_card = card.id
     vim.defer_fn(function()
       if state.card == card then
@@ -202,11 +222,7 @@ function M.observation_network(lines, observations)
 end
 
 function M.observation_node(observation, index)
-  local kind = observation.kind == "hypothesis" and "H" or observation.kind == "signal" and "S" or "F"
-  local active = observation.active and "*" or "."
-  local repeats = (observation.occurrences or 1) > 1 and "x" .. observation.occurrences or ""
-
-  return string.format("[%s%d%s%s]", kind, index, active, repeats)
+  return util.observation_node(observation, index)
 end
 
 function M.short(text, limit)
@@ -252,17 +268,7 @@ function M.toggle_details(card)
 end
 
 function M.location(card)
-  if type(card.next_move) == "table" and card.next_move.kind == "open_location" then
-    return card.next_move
-  end
-  if type(card.evidence) == "table" then
-    return card.evidence
-  end
-  if type(card.location) == "table" then
-    return card.location
-  end
-
-  return nil
+  return util.card_location(card)
 end
 
 function M.add(lines, text)
@@ -321,12 +327,15 @@ function M.tokens(lines)
 
   local report = state.context_report
   if report and report.enabled then
-    table.insert(lines, string.format(
-      "Context %s/%s · %s fragments",
-      report.used_tokens or 0,
-      report.budget_tokens or 0,
-      report.selected_count or 0
-    ))
+    table.insert(
+      lines,
+      string.format(
+        "Context %s/%s · %s fragments",
+        report.used_tokens or 0,
+        report.budget_tokens or 0,
+        report.selected_count or 0
+      )
+    )
   end
 end
 
