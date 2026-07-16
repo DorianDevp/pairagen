@@ -1,90 +1,97 @@
+local util = require("loopbiotic.util")
+
 local M = {}
 
+-- Register a user command with its callback behind the error boundary, so a
+-- bug in a command path is logged and reported instead of killing a session.
+local function command(name, callback, opts)
+  opts = vim.tbl_extend("force", opts or {}, { force = true })
+  vim.api.nvim_create_user_command(name, util.guard("command :" .. name, callback), opts)
+end
+
 function M.setup()
-  vim.api.nvim_create_user_command("Loopbiotic", function()
+  command("Loopbiotic", function()
     require("loopbiotic").prompt()
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticReply", function()
+  command("LoopbioticReply", function()
     require("loopbiotic").reply_prompt()
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticFix", function()
+  command("LoopbioticFix", function()
     M.action_or_prompt("fix", "fix")
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticWhy", function()
+  command("LoopbioticWhy", function()
     M.action_or_prompt("why", "explain")
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticFollow", function()
+  command("LoopbioticFollow", function()
     require("loopbiotic").action("follow")
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticOther", function()
+  command("LoopbioticOther", function()
     require("loopbiotic").action("other_lead")
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticAssess", function()
+  command("LoopbioticAssess", function()
     require("loopbiotic").action("next")
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticNext", function()
+  command("LoopbioticNext", function()
     require("loopbiotic").action("next")
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticStop", function()
+  command("LoopbioticStop", function()
     require("loopbiotic").stop()
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticHide", function()
+  command("LoopbioticHide", function()
     require("loopbiotic").hide()
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticResume", function()
+  command("LoopbioticResume", function()
     require("loopbiotic").resume()
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticReset", function()
+  command("LoopbioticReset", function()
     require("loopbiotic").reset()
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticLog", function()
+  command("LoopbioticLog", function()
     local log = require("loopbiotic.log")
     if require("loopbiotic.config").values.logging.enabled == false then
       print("Loopbiotic logging is disabled")
     else
       print(log.path())
     end
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticLogClear", function()
+  command("LoopbioticLogClear", function()
     require("loopbiotic.log").clear()
     print("Loopbiotic session logs cleared")
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticBackend", function()
+  command("LoopbioticBackend", function()
     require("loopbiotic").backend()
-  end, { force = true })
+  end)
 
-  vim.api.nvim_create_user_command("LoopbioticAgent", function(opts)
+  command("LoopbioticAgent", function(opts)
     require("loopbiotic").agent(opts.args)
   end, {
     nargs = "?",
     complete = function()
       return require("loopbiotic").agents()
     end,
-    force = true,
   })
 
-  vim.api.nvim_create_user_command("LoopbioticModel", function(opts)
+  command("LoopbioticModel", function(opts)
     require("loopbiotic").model(opts.args)
   end, {
     nargs = "?",
     complete = function()
       return require("loopbiotic").models()
     end,
-    force = true,
   })
 end
 

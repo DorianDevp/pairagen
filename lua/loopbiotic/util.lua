@@ -1,5 +1,48 @@
--- Small shared helpers with no dependencies on other loopbiotic modules.
+-- Small shared helpers with no load-time dependencies on other loopbiotic
+-- modules (guard requires the log module lazily, when an error is reported).
 local M = {}
+
+-- Labels whose internal error has already been reported to the user this
+-- session. Every error keeps being logged; the notification fires once.
+local guard_notified = {}
+
+local function pack(...)
+  return { n = select("#", ...), ... }
+end
+
+-- Error boundary for UI entry points (RPC dispatch, card/diff rendering,
+-- command and keymap callbacks). Returns a wrapped function that xpcalls fn:
+-- on success it passes fn's results through; on an uncaught error it logs a
+-- "client_error" event with the traceback, notifies once per label per
+-- session, and returns nil — so a client-side bug cannot unwind into Neovim
+-- and kill the surrounding daemon session.
+---@param label string
+---@param fn function
+---@return function
+function M.guard(label, fn)
+  return function(...)
+    local results = pack(xpcall(fn, debug.traceback, ...))
+    if results[1] then
+      return unpack(results, 2, results.n)
+    end
+
+    require("loopbiotic.log").event("client_error", {
+      label = label,
+      traceback = tostring(results[2]),
+    })
+
+    if not guard_notified[label] then
+      guard_notified[label] = true
+      vim.notify(
+        string.format("Loopbiotic internal error in %s (see :LoopbioticLog); session preserved", label),
+        vim.log.levels.ERROR,
+        { title = "Loopbiotic" }
+      )
+    end
+
+    return nil
+  end
+end
 
 -- The location a card points at, in priority order: an explicit next move,
 -- then evidence, then a plain location.

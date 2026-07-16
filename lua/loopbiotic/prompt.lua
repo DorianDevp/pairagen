@@ -5,8 +5,10 @@ local ui = require("loopbiotic.ui")
 local M = {}
 
 -- Which window kind ("Prompt"/"Reply") is currently open, so the async
--- warmup response can re-render the matching frame title.
+-- warmup response can re-render the matching frame title. open_footer keeps
+-- the default footer so a cleared preflight error can restore it.
 local open_kind = "Prompt"
+local open_footer = nil
 
 function M.open(mode)
   local source = require("loopbiotic.context").capture()
@@ -24,6 +26,9 @@ function M.open(mode)
       require("loopbiotic").start(text, mode, source)
     end,
   })
+
+  M.prefill()
+  M.refresh_footer()
 end
 
 function M.reply()
@@ -39,11 +44,33 @@ end
 
 -- Store the identity reported by backend/warmup and refresh the open prompt
 -- title with it. Old daemons answer {ok = true} without an identity field;
--- tolerate that (and error responses) by keeping the previous state.
+-- tolerate that by keeping the previous state. A warmup error is surfaced
+-- immediately in the open prompt window's footer (and one WARN notification)
+-- so the user learns the backend is broken before composing a full prompt.
 ---@param message table RPC response ({ result = ... } or { error = ... })
 function M.on_warmup(message)
-  if message.error or type(message.result) ~= "table" then
+  if message.error then
+    local error_message = tostring(type(message.error) == "table" and message.error.message or message.error)
+
+    if state.backend_preflight_error ~= error_message then
+      state.backend_preflight_error = error_message
+      ui.notify(
+        "Loopbiotic backend not ready: " .. error_message .. " — see :checkhealth loopbiotic",
+        vim.log.levels.WARN
+      )
+    end
+    M.refresh_footer()
+
     return
+  end
+
+  if type(message.result) ~= "table" then
+    return
+  end
+
+  if state.backend_preflight_error then
+    state.backend_preflight_error = nil
+    M.refresh_footer()
   end
 
   local identity = message.result.identity
@@ -66,6 +93,85 @@ function M.refresh_title()
 
     pcall(vim.api.nvim_win_set_config, frame_win, { title = M.title(open_kind), title_pos = "left" })
   end)
+end
+
+-- Re-render the frame footer of the currently open prompt window, if any:
+-- the preflight-error footer while a warmup failure is stored, otherwise the
+-- default keymap hints. Mirrors refresh_title (schedule + validity check).
+function M.refresh_footer()
+  vim.schedule(function()
+    local frame_win = state.prompt_frame_win
+    if not (frame_win and vim.api.nvim_win_is_valid(frame_win)) then
+      return
+    end
+
+    local footer = open_footer
+    if type(state.backend_preflight_error) == "string" and state.backend_preflight_error ~= "" then
+      footer = M.preflight_footer(state.backend_preflight_error)
+    end
+
+    pcall(vim.api.nvim_win_set_config, frame_win, { footer = footer, footer_pos = "right" })
+  end)
+end
+
+-- Footer line shown while the backend fails its warmup preflight.
+---@param error_message string
+---@return string
+function M.preflight_footer(error_message)
+  return " backend not ready: " .. M.short_error(error_message) .. " — :checkhealth loopbiotic "
+end
+
+-- One-line, footer-sized rendering of a backend error message.
+---@param error_message string
+---@return string
+function M.short_error(error_message)
+  local text = tostring(error_message or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  if #text > 60 then
+    text = text:sub(1, 57) .. "..."
+  end
+
+  return text
+end
+
+-- Pre-fill the freshly opened prompt buffer with text stashed by a failed
+-- session start, cursor at the end, so the composed prompt is not lost.
+function M.prefill()
+  local stash = state.prompt_stash
+  local buf = state.prompt_buf
+  if type(stash) ~= "string" or stash == "" or not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    return
+  end
+
+  local lines = vim.split(stash, "\n", { plain = true })
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+  local win = state.prompt_win
+  if win and vim.api.nvim_win_is_valid(win) then
+    pcall(vim.api.nvim_win_set_cursor, win, { #lines, #lines[#lines] })
+    if vim.api.nvim_get_current_win() == win then
+      -- Append after the restored text instead of before its last character.
+      vim.cmd("startinsert!")
+    end
+  end
+end
+
+-- Pure state transition for the prompt stash: submitting stashes the
+-- composed text (the window is closed before the backend answers), a
+-- successful start clears it, and a failed start keeps it for the next
+-- prompt.open to pre-fill.
+---@param stash string|nil current stash
+---@param event "submit"|"start_ok"|"start_error"
+---@param text string|nil submitted text (only used for "submit")
+---@return string|nil next stash
+function M.next_stash(stash, event, text)
+  if event == "submit" then
+    return text
+  end
+  if event == "start_ok" then
+    return nil
+  end
+
+  return stash
 end
 
 -- Pick the concrete model out of the fixed resolution order: configured
@@ -183,6 +289,7 @@ end
 function M.open_for(opts)
   M.close()
 
+  open_footer = opts.footer
   local size = M.size()
   local position = M.position(size)
   local row = position.row
@@ -276,6 +383,9 @@ function M.submit(buf, submit)
     vim.cmd("stopinsert")
   end
 
+  -- The window closes before the backend answers, so stash the composed text
+  -- now; a successful start clears it, a failed one leaves it for prefill.
+  state.prompt_stash = M.next_stash(state.prompt_stash, "submit", text)
   M.close()
   submit(text)
 end

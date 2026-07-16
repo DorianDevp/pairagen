@@ -144,6 +144,9 @@ function M.lines(card)
     M.add(lines, card.summary or card.title)
   elseif card.kind == "error" then
     M.add(lines, card.message or card.title)
+    for _, warning in ipairs(card.warnings or {}) do
+      M.signal(lines, warning)
+    end
   elseif card.kind == "deny" then
     table.insert(lines, "Agent could not proceed")
     table.insert(lines, "")
@@ -496,5 +499,9 @@ function M.height(lines, width, expanded)
 
   return math.min(height, config.values.card.max_height)
 end
+
+-- Error boundary: card rendering is reached from RPC callbacks and keymaps;
+-- a rendering bug must log and notify, not kill the surrounding session.
+M.show = util.guard("card.show", M.show)
 
 return M

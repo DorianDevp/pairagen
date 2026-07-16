@@ -121,12 +121,15 @@ function M.start(text, mode, source)
     thinking.stop()
 
     if message.error then
+      -- state.prompt_stash still holds the composed text; the next
+      -- prompt.open pre-fills it so nothing is lost to a broken backend.
       log.write("session start error", message.error)
       ui.notify(message.error.message, vim.log.levels.ERROR)
 
       return
     end
 
+    state.prompt_stash = prompt.next_stash(state.prompt_stash, "start_ok")
     state.session_id = message.result.session_id
     session.apply_turn_result(message.result)
   end)
@@ -332,6 +335,7 @@ function M.reply(text)
       return
     end
 
+    state.prompt_stash = prompt.next_stash(state.prompt_stash, "start_ok")
     session.apply_turn_result(message.result)
   end)
 end

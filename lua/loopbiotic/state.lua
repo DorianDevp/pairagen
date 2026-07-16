@@ -47,6 +47,9 @@
 ---@field turn_token_usage LoopbioticTokenUsage|nil
 ---@field backend_model string|nil model the backend reported using
 ---@field agent_identity table|nil backend/warmup identity: { backend, model, models }
+---@field backend_preflight_error string|nil last backend/warmup error; nil once a warmup or turn succeeds
+---@field prompt_stash string|nil composed prompt text preserved across a failed session start
+---@field last_backend_error string|nil message of the last backend error card, for repeat escalation
 ---@field context_report table|nil
 ---@field workspace_hints table[]|nil
 ---@field completion_notified_card string|nil
@@ -93,6 +96,9 @@ local defaults = {
   turn_token_usage = vim.NIL,
   backend_model = vim.NIL,
   agent_identity = vim.NIL,
+  backend_preflight_error = vim.NIL,
+  prompt_stash = vim.NIL,
+  last_backend_error = vim.NIL,
   context_report = vim.NIL,
   workspace_hints = vim.NIL,
   completion_notified_card = vim.NIL,

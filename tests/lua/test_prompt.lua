@@ -84,8 +84,14 @@ return function(t)
   t.test("on_warmup stores the identity and tolerates old daemons", function()
     state.agent_identity = nil
 
+    -- The preflight path now warns on error responses; keep this test about
+    -- identity handling (test_safety.lua covers the preflight behaviour).
+    local original_notify = vim.notify
+    vim.notify = function() end
     prompt.on_warmup({ error = { code = -32098, message = "stopped" } })
+    vim.notify = original_notify
     t.eq(state.agent_identity, nil, "error response")
+    state.backend_preflight_error = nil
 
     prompt.on_warmup({ result = { ok = true } })
     t.eq(state.agent_identity, nil, "legacy daemon without identity")

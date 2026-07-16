@@ -433,4 +433,9 @@ function M.send(accepted, patch_ids, changed_files, error)
   end)
 end
 
+-- Error boundary: the draft preview is reached from RPC callbacks and
+-- keymaps; a preview bug must log and notify, not kill the session. The
+-- guarded wrapper returns nil on error, which callers treat as "not shown".
+M.show = util.guard("diff.show", M.show)
+
 return M

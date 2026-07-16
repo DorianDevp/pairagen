@@ -3,6 +3,7 @@ local installer = require("loopbiotic.installer")
 local log = require("loopbiotic.log")
 local state = require("loopbiotic.state")
 local ui = require("loopbiotic.ui")
+local util = require("loopbiotic.util")
 
 local M = {
   job = nil,
@@ -338,11 +339,13 @@ function M.handle(line)
       return
     end
 
-    vim.schedule(function()
+    -- Error boundary: a bug in an editor-request handler must not unwind
+    -- into the event loop and take the whole session down with it.
+    vim.schedule(util.guard("editor request " .. message.method, function()
       handler(message.params or {}, function(result)
         M.respond(id, result)
       end)
-    end)
+    end))
 
     return
   end
