@@ -26,6 +26,11 @@ The project follows [Semantic Versioning](https://semver.org/).
   degrade to error cards instead of panicking the daemon.
 - Queued goal slices that no longer apply after the buffer changes now offer
   a one-keypress retry that regenerates only the stale file slice.
+- Rejecting a draft now stops locally with explicit Retry/Edit/Stop actions
+  instead of immediately spending another model turn on a replacement.
+- Resuming an already-visible action card now moves focus into its window,
+  and patch action cards register every configured shortcut they display
+  (accept, reject, retry, why, and go-to) in addition to their single-key aliases.
 - Mechanical model diff wrappers are normalized before validation: CRLF line
   endings, markdown fences, matching git headers, and unambiguous `./`, `a/`,
   or `b/` path prefixes. Prose, rename/copy metadata, unmatched fences, and
@@ -52,8 +57,9 @@ The project follows [Semantic Versioning](https://semver.org/).
   requests the next slice on the same conversation while the current one is
   under review. Time-to-first-hunk drops from the full-batch generation time
   to a single slice, accepting usually surfaces the next file instantly, and
-  a rejected slice reworks one file instead of regenerating the whole batch
-  (the cancelled speculation's token cost stays visible in session totals).
+  rejecting cancels the pending continuation and waits for an explicit Retry
+  before generating a replacement (the cancelled speculation's token cost
+  stays visible in session totals).
   Backends that ignore the slice contract keep the legacy complete-batch
   behavior. New Lua-side additions: backend preflight in the prompt window
   (failures surface before typing; composed prompts survive failed starts),

@@ -64,7 +64,8 @@ end
 -- Call-site-specific handling (thinking guards, stale-session checks,
 -- session_id adoption) stays at the call sites.
 ---@param result table backend turn result
----@param opts? { update_model?: boolean } update_model=false keeps state.backend_model untouched
+---@param opts? { update_model?: boolean, track_backend_error?: boolean }
+--- update_model=false keeps state.backend_model untouched; track_backend_error=false marks a local result
 function M.apply_turn_result(result, opts)
   opts = opts or {}
 
@@ -77,7 +78,12 @@ function M.apply_turn_result(result, opts)
   log.event("context_optimization", result.context_report or {})
   log.event("agent_attempts", result.attempts or {})
   state.goal = result.goal or state.goal
-  track_backend_errors(result.card)
+  if opts.track_backend_error == false then
+    state.last_backend_error = nil
+    state.backend_preflight_error = nil
+  else
+    track_backend_errors(result.card)
+  end
   require("loopbiotic.card").show(result.card)
 end
 

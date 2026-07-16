@@ -202,7 +202,7 @@ Edit the inline draft
 Accept, Reject, edit, message, or ask Why
 Why → explanation → Back to the same pending draft
 Accept → advance to the next queued hunk without calling the agent
-Reject → agent automatically reworks the hunk
+Reject → stop locally; Retry explicitly if you want a replacement
 Next file opens automatically inside the workspace without calling the agent
 Next editable hunk
 Repeat until completed-goal summary and local diagnostics check
@@ -247,9 +247,10 @@ conversation — accepting the last hunk of a slice usually surfaces the next
 file instantly. `Accept` advances locally without another model call;
 accepting the final hunk of the last planned slice closes the goal locally.
 `Reject` cancels the speculative next slice (its token cost stays visible),
-reworks only the rejected file, and resumes the pipeline. Backends that
-ignore the slice contract still return one complete batch, which is presented
-exactly as before. `Retry`, a file the agent could not inspect, or an
+then waits without another model call. An explicit `Retry` reworks the
+rejected file and resumes the pipeline. Backends that ignore the slice
+contract still return one complete batch, which is presented exactly as
+before. `Retry`, a file the agent could not inspect, or an
 explicit question can return control to the agent. User control is the hunk gate, not a
 repeated discovery/assess/draft ceremony. Asking `Why`
 opens a side conversation about the pending hunk and then returns to that exact

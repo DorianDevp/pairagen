@@ -35,13 +35,17 @@ impl Daemon {
     fn spawn_codex() -> Self {
         let model =
             std::env::var("LOOPBIOTIC_REAL_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.6-sol".into());
+        Self::spawn_codex_model(model)
+    }
+
+    fn spawn_codex_model(model: impl AsRef<str>) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_loopbioticd"));
         command
             .arg("--stdio")
             .env("LOOPBIOTIC_BACKEND", "codex_app")
             .env("LOOPBIOTIC_CODEX_COMMAND", "codex")
             .env("LOOPBIOTIC_CODEX_ARGS_JSON", r#"["app-server","--stdio"]"#)
-            .env("LOOPBIOTIC_CODEX_MODEL", model)
+            .env("LOOPBIOTIC_CODEX_MODEL", model.as_ref())
             .env("LOOPBIOTIC_CODEX_EFFORT", "low")
             .env("LOOPBIOTIC_TURN_TIMEOUT_SECS", "120")
             .stdin(Stdio::piped())
@@ -124,6 +128,44 @@ impl Daemon {
             );
             let message = self.next_message_with_timeout(remaining);
             if message.get("method").is_some() {
+                continue;
+            }
+            assert_eq!(
+                message.get("id").and_then(Value::as_str),
+                Some(id),
+                "expected a response to {id}, got: {message}"
+            );
+            return message;
+        }
+    }
+
+    fn response_for_with_editor_context(
+        &mut self,
+        id: &str,
+        timeout: Duration,
+        context: &Value,
+    ) -> Value {
+        let started = Instant::now();
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            assert!(
+                !remaining.is_zero(),
+                "timed out after {timeout:?} waiting for response {id}"
+            );
+            let message = self.next_message_with_timeout(remaining);
+            if let Some(method) = message.get("method").and_then(Value::as_str) {
+                if let Some(request_id) = message.get("id").and_then(Value::as_str)
+                    && matches!(method, "editor/read_file" | "editor/open_location")
+                {
+                    self.send(&json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "granted": true,
+                            "context": context,
+                        },
+                    }));
+                }
                 continue;
             }
             assert_eq!(
@@ -394,6 +436,114 @@ fn real_codex_auto_proposal_is_fast_and_non_mutating() {
         matches!(kind, "hypothesis" | "finding" | "choice"),
         "a proposal question must return a useful answer/plan, not {kind}: {title}: {message}"
     );
+}
+
+/// Manual real-backend gate for the review contract. Codex generates the
+/// pending patch, but rejecting it must be a local daemon transition:
+/// no replacement turn, no turn tokens, and no user-visible wait.
+///
+/// cargo test -p loopbioticd --test rpc \
+///   real_codex_patch_reject_is_local -- --ignored --nocapture
+#[test]
+#[ignore = "requires an authenticated real Codex CLI"]
+fn real_codex_patch_reject_is_local() {
+    let cwd = std::env::temp_dir().join(format!(
+        "loopbiotic-real-codex-reject-{}",
+        std::process::id()
+    ));
+    let source = cwd.join("src/work.ts");
+    let buffer_text =
+        "export function displayName(first, last) {\n  return `${first} ${last}`;\n}\n";
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("create fixture");
+    std::fs::write(&source, buffer_text).expect("write fixture");
+
+    let model =
+        std::env::var("LOOPBIOTIC_REAL_CODEX_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".into());
+    let mut daemon = Daemon::spawn_codex_model(model);
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+
+    let editor_context = json!({
+        "cwd": cwd,
+        "file": "src/work.ts",
+        "cursor": {"line": 1, "column": 1},
+        "selection": null,
+        "buffer_text": buffer_text,
+        "buffer_start_line": 1,
+        "diagnostics": [],
+        "hints": [],
+        "artifacts": []
+    });
+    daemon.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "2",
+        "method": "session/start",
+        "params": start_session_params_with(
+            cwd.clone(),
+            "Change displayName to return first when last is empty.",
+            "fix",
+            buffer_text,
+        ),
+    }));
+    let patch_response =
+        daemon.response_for_with_editor_context("2", Duration::from_secs(120), &editor_context);
+    assert!(
+        patch_response.get("error").is_none(),
+        "unexpected patch error: {patch_response}"
+    );
+    let patch_result = &patch_response["result"];
+    assert_eq!(
+        patch_result["card"]["kind"],
+        json!("patch"),
+        "real Codex did not return a patch: {patch_result}"
+    );
+    let session_id = patch_result["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    let card_id = patch_result["card"]["id"]
+        .as_str()
+        .expect("card id")
+        .to_owned();
+    let patch_id = patch_result["card"]["patches"][0]["id"]
+        .as_str()
+        .expect("patch id")
+        .to_owned();
+
+    let (rejected, elapsed) = daemon.timed_request(
+        "3",
+        "patch/apply_result",
+        json!({
+            "session_id": session_id,
+            "card_id": card_id,
+            "accepted": false,
+            "patch_ids": [patch_id],
+            "changed_files": [],
+            "error": null,
+            "context": editor_context
+        }),
+    );
+    assert!(
+        rejected.get("error").is_none(),
+        "unexpected rejection error: {rejected}"
+    );
+    let result = &rejected["result"];
+    eprintln!(
+        "real Codex reject: elapsed={elapsed:?} kind={} title={:?} turn_tokens={} attempts={}",
+        result["card"]["kind"].as_str().unwrap_or("<missing>"),
+        result["card"]["title"].as_str().unwrap_or("<missing>"),
+        result["turn_token_usage"]["total_tokens"],
+        result["attempts"].as_array().map(Vec::len).unwrap_or(0),
+    );
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "reject took {elapsed:?}; it must not wait for Codex"
+    );
+    assert_eq!(result["card"]["kind"], json!("error"));
+    assert_eq!(result["card"]["title"], json!("Draft rejected"));
+    assert_eq!(result["turn_token_usage"]["total_tokens"], json!(0));
+    assert_eq!(result["attempts"], json!([]));
 }
 
 #[test]

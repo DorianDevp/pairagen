@@ -149,6 +149,22 @@ local action_height = action_config.height + (ui.has_border(action_config.border
 local action_bottom = action_top + action_height - 1
 assert(action_bottom < proposal_position.row - 1 or action_top > proposal_position.row + 1)
 assert(loopbiotic.actions_visible())
+loopbiotic.resume()
+assert(vim.api.nvim_get_current_win() == state.card_win)
+for _, key in ipairs({
+  config.values.keymaps.draft_accept,
+  config.values.keymaps.draft_reject,
+  config.values.keymaps.draft_retry,
+  config.values.keymaps.why,
+  config.values.keymaps.go_to,
+}) do
+  local mapping = vim.fn.maparg(key, "n", false, true)
+  assert(mapping.buffer == 1, "missing action-window mapping for " .. key)
+  assert(type(mapping.callback) == "function", "action-window mapping has no callback for " .. key)
+end
+local go_to_mapping = vim.fn.maparg(config.values.keymaps.go_to, "n", false, true)
+go_to_mapping.callback()
+assert(vim.api.nvim_get_current_win() == state.diff_win)
 loopbiotic.go_to()
 assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 2, 2 }))
 loopbiotic.hide()
@@ -159,6 +175,7 @@ assert(state.diff_buf == hidden_draft)
 assert(diff.valid_preview())
 loopbiotic.resume()
 assert(loopbiotic.actions_visible())
+assert(vim.api.nvim_get_current_win() == state.card_win)
 local proposal_card = state.card
 state.card = { id = "stopped-card", kind = "summary", title = "Stopped", next_actions = {} }
 loopbiotic.action("stop")

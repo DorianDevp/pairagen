@@ -12,6 +12,16 @@ local util = require("loopbiotic.util")
 local M = {}
 local namespace = vim.api.nvim_create_namespace("loopbiotic-patch")
 
+local function bind(buf, keys, callback)
+  local seen = {}
+  for _, key in ipairs(keys) do
+    if key and key ~= "" and not seen[key] then
+      seen[key] = true
+      vim.keymap.set("n", key, callback, { buffer = buf, nowait = true, silent = true })
+    end
+  end
+end
+
 function M.show(card, opts)
   opts = opts or {}
   local patch = (card.patches or {})[1]
@@ -114,7 +124,7 @@ end
 -- Retrying redrafts the current goal slice against the live buffer, which is
 -- cheap, so it comes first: recovery is one keypress. There is no "skip this
 -- hunk" choice because no skip path exists — patch cards carry a single hunk
--- and reject reworks the card rather than advancing past it.
+-- and rejecting a draft stops at an explicit retry/edit/stop decision.
 ---@param kind "malformed"|"drift" parse failure vs. stale buffer context
 ---@param actions (string|table)[]|nil the card's available actions
 ---@return { reason: string, choices: { label: string, action: "retry"|"cancel" }[] }|nil plan nil when the card cannot retry
@@ -272,16 +282,15 @@ function M.controls(card, opts)
     end
   end
 
-  vim.keymap.set("n", "a", M.accept, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "q", M.reject, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "r", M.retry, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "w", function()
+  bind(buf, { "a", keys.draft_accept }, M.accept)
+  bind(buf, { "q", keys.draft_reject }, M.reject)
+  bind(buf, { "r", keys.draft_retry }, M.retry)
+  bind(buf, { "w", keys.why }, function()
     require("loopbiotic").action("why")
-  end, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "e", function()
+  end)
+  bind(buf, { "e", "g", keys.go_to }, function()
     M.focus_change()
-  end, { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set("n", "g", M.focus_change, { buffer = buf, nowait = true, silent = true })
+  end)
   local details_key = keys.details or "z"
   pcall(vim.keymap.del, "n", details_key, { buffer = buf })
   if M.details_available(card) then
@@ -466,7 +475,7 @@ end
 
 function M.send(accepted, patch_ids, changed_files, error)
   local session_id = state.session_id
-  local request_id = thinking.start(accepted and "Continuing" or "Reworking", session_id)
+  local request_id = thinking.start(accepted and "Continuing" or "Rejecting", session_id)
 
   rpc.request("patch/apply_result", {
     session_id = session_id,
@@ -494,7 +503,10 @@ function M.send(accepted, patch_ids, changed_files, error)
     end
 
     -- Patch results historically never updated state.backend_model.
-    session.apply_turn_result(message.result, { update_model = false })
+    session.apply_turn_result(message.result, {
+      update_model = false,
+      track_backend_error = accepted,
+    })
   end)
 end
 

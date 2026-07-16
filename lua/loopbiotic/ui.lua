@@ -82,6 +82,9 @@ function M.render(buf, win, lines, opts)
   if win and vim.api.nvim_win_is_valid(win) then
     M.resize(win, #lines, opts)
     vim.wo[win].winhighlight = opts.winhighlight or "NormalFloat:LoopbioticNormal,FloatBorder:LoopbioticBorder"
+    if opts.enter == true then
+      M.focus(win)
+    end
 
     return buf, win
   end

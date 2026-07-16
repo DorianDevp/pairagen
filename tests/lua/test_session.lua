@@ -70,4 +70,24 @@ return function(t)
     end)
     state.reset()
   end)
+
+  t.test("local rejection cards do not count as repeated backend errors", function()
+    state.reset()
+    state.last_backend_error = "old backend failure"
+    state.backend_preflight_error = "old preflight failure"
+    with_stubbed_show(function()
+      session.apply_turn_result({
+        card = {
+          id = "rejected",
+          kind = "error",
+          title = "Draft rejected",
+          message = "The draft was rejected.",
+          actions = { "retry", "edit_prompt", "stop" },
+        },
+      }, { track_backend_error = false })
+      t.eq(state.last_backend_error, nil)
+      t.eq(state.backend_preflight_error, nil)
+    end)
+    state.reset()
+  end)
 end

@@ -19,9 +19,9 @@ use loopbiotic_backends::{
 use loopbiotic_context::ContextOptimizer;
 use loopbiotic_patch::PatchCoherence;
 use loopbiotic_protocol::{
-    Action, ActionResult, Card, CardKind, ContextBundle, ContextPolicy, MAX_GOAL_CHANGED_LINES,
-    MAX_GOAL_HUNKS_PER_PATCH, MAX_GOAL_PATCH_FILES, Mode, PatchApplyResult, StartSessionParams,
-    StartSessionResult, SummaryCard, TokenUsage,
+    Action, ActionResult, Card, CardKind, ContextBundle, ContextPolicy, ErrorCard,
+    MAX_GOAL_CHANGED_LINES, MAX_GOAL_HUNKS_PER_PATCH, MAX_GOAL_PATCH_FILES, Mode, PatchApplyResult,
+    StartSessionParams, StartSessionResult, SummaryCard, TokenUsage,
 };
 
 use crate::session::Session;
@@ -389,9 +389,9 @@ impl Engine {
 
         self.sessions.insert(session_id.clone(), session);
         if output.is_ok() {
-            // Covers both the next slice arriving (consumed speculation or a
-            // real turn) and the rework after a reject: once the new slice is
-            // under review, speculate on its continuation.
+            // Once an accepted result surfaces the next slice, speculate on
+            // its continuation. Rejections clear goal_slice_continues, so
+            // they stop here until the user explicitly retries.
             self.schedule_goal_continuation(&session_id).await;
         }
 
@@ -503,25 +503,43 @@ impl Engine {
 
         session.rejected_patches.extend(result.patch_ids.clone());
         session.pending_patch_cards.clear();
-        session.state = SessionState::PatchShown;
-        // The rejected slice is being reworked, so the continuation speculated
-        // from it is stale; its usage still folds into the session totals.
+        session.goal_slice_continues = false;
+        session.next_step = None;
+        // Rejecting is a local review decision, not permission to spend
+        // another model turn. Drop the stale continuation and leave an
+        // explicit Retry action if the user wants a replacement draft.
         self.cancel_goal_continuation(session).await;
 
-        if session.continuous_goal {
-            return self
-                .goal_turn_taken(
-                    &session_id,
-                    session,
-                    BackendAction::User(Action::Retry),
-                    progress,
-                    None,
-                )
-                .await;
-        }
+        session.state = if session.continuous_goal {
+            SessionState::GoalLoopFailed
+        } else {
+            SessionState::PatchFailed
+        };
+        let detail = result
+            .error
+            .filter(|error| !error.trim().is_empty())
+            .map(|error| format!(" No changes were applied: {error}"))
+            .unwrap_or_else(|| " No changes were applied.".into());
+        let card = Card::Error(ErrorCard {
+            id: session.next_card_id("rejected"),
+            title: "Draft rejected".into(),
+            message: format!(
+                "The draft was rejected.{detail} Retry only if you want the agent to generate a replacement."
+            ),
+            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+        });
+        session.cards.push(card.clone());
 
-        self.action_taken(&session_id, session, Action::Retry, progress, None)
-            .await
+        Ok(ActionResult {
+            session_id,
+            card,
+            goal: goal_progress(session),
+            token_usage: session.token_usage.clone(),
+            turn_token_usage: TokenUsage::default(),
+            context_report: session.context.report.clone(),
+            model: None,
+            attempts: vec![],
+        })
     }
 
     async fn goal_turn_taken(

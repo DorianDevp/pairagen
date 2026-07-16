@@ -222,7 +222,7 @@ async fn continuous_goal_reviews_a_multi_file_batch_without_more_model_turns() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn continuous_goal_reworks_a_rejected_hunk_without_leaving_the_loop() {
+async fn continuous_goal_reject_stops_without_another_model_turn() {
     let backend = Arc::new(MockBackend);
     let mut engine = Engine::new(backend);
     let mut goal = params();
@@ -241,14 +241,22 @@ async fn continuous_goal_reworks_a_rejected_hunk_without_leaving_the_loop() {
         context: editor_context("placeholder"),
     };
 
-    let reworked = engine.apply_result(result).await.unwrap();
+    let rejected = engine.apply_result(result).await.unwrap();
 
-    assert!(matches!(reworked.card, Card::Patch(_)));
-    assert!(reworked.turn_token_usage.total_tokens > 0);
-    assert!(reworked.goal.completed_steps.is_empty());
+    let Card::Error(card) = &rejected.card else {
+        panic!("expected a local rejection card, got {:?}", rejected.card);
+    };
+    assert_eq!(card.title, "Draft rejected");
+    assert!(card.actions.contains(&Action::Retry));
+    assert_eq!(rejected.turn_token_usage, TokenUsage::default());
+    assert!(rejected.goal.completed_steps.is_empty());
     assert_eq!(
-        reworked.goal.status,
+        rejected.goal.status,
         loopbiotic_protocol::GoalStatus::Active
+    );
+    assert_eq!(
+        engine.get(&rejected.session_id).unwrap().state,
+        SessionState::GoalLoopFailed
     );
 }
 
@@ -313,7 +321,7 @@ async fn rejects_apply_result_for_another_patch_card() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rejected_apply_returns_reworked_patch_without_summary() {
+async fn rejected_apply_waits_for_explicit_retry() {
     let backend = Arc::new(MockBackend);
     let mut engine = Engine::new(backend);
     let start = engine.start(params()).await.unwrap();
@@ -328,13 +336,24 @@ async fn rejected_apply_returns_reworked_patch_without_summary() {
         context: editor_context("placeholder"),
     };
 
-    let reworked = engine.apply_result(result).await.unwrap();
+    let rejected = engine.apply_result(result).await.unwrap();
 
-    assert!(matches!(reworked.card, Card::Patch(_)));
+    let Card::Error(card) = &rejected.card else {
+        panic!("expected a local rejection card, got {:?}", rejected.card);
+    };
+    assert!(card.message.contains("patch context is ambiguous"));
+    assert_eq!(rejected.turn_token_usage, TokenUsage::default());
     assert_eq!(
         engine.get(&start.session_id).unwrap().state,
-        SessionState::PatchShown
+        SessionState::PatchFailed
     );
+
+    let retried = engine
+        .action(&start.session_id, Action::Retry)
+        .await
+        .unwrap();
+    assert!(matches!(retried.card, Card::Patch(_)));
+    assert!(retried.turn_token_usage.total_tokens > 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -735,7 +754,7 @@ async fn settle_continuation(engine: &Engine, session_id: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rejected_slice_cancels_speculation_folds_its_usage_and_respeculates() {
+async fn rejected_slice_cancels_speculation_and_waits_for_explicit_retry() {
     let backend = Arc::new(CountingBackend::default());
     let mut engine = Engine::new(backend.clone());
     engine.set_source_context_provider(sliced_goal_provider());
@@ -750,7 +769,7 @@ async fn rejected_slice_cancels_speculation_folds_its_usage_and_respeculates() {
     // Let the speculation finish so cancelling it folds usage immediately.
     settle_continuation(&engine, &start.session_id).await;
 
-    let reworked = engine
+    let rejected = engine
         .apply_result(PatchApplyResult {
             session_id: start.session_id.clone(),
             card_id: start.card.id().into(),
@@ -763,56 +782,43 @@ async fn rejected_slice_cancels_speculation_folds_its_usage_and_respeculates() {
         .await
         .unwrap();
 
-    let Card::Patch(rework) = &reworked.card else {
-        panic!("expected a reworked slice, got {:?}", reworked.card);
+    let Card::Error(card) = &rejected.card else {
+        panic!("expected a local rejection card, got {:?}", rejected.card);
     };
-    assert_eq!(rework.patches[0].file, PathBuf::from("src/work.ts"));
-    assert!(rework.explanation.starts_with("Rework:"));
+    assert_eq!(card.title, "Draft rejected");
+    assert_eq!(rejected.turn_token_usage, TokenUsage::default());
     assert!(
-        reworked.token_usage.total_tokens
-            > usage_after_start + reworked.turn_token_usage.total_tokens,
+        rejected.token_usage.total_tokens > usage_after_start,
         "the cancelled speculation's usage must fold into the session totals"
     );
     assert!(
-        engine.continuations.contains_key(&start.session_id),
-        "a validated rework must re-speculate its continuation"
+        !engine.continuations.contains_key(&start.session_id),
+        "rejecting must leave no continuation in flight"
     );
-
-    // The rework keeps the plan, so accepting it consumes a speculated slice
-    // for the next planned file.
-    let second = engine
-        .apply_result(accept(
-            &reworked.session_id,
-            &reworked.card,
-            "PAYLOAD = PAYLOAD OR {}",
-        ))
-        .await
-        .unwrap();
-    let Card::Patch(second_patch) = &second.card else {
-        panic!("expected the second slice, got {:?}", second.card);
-    };
-    assert_eq!(second_patch.patches[0].file, PathBuf::from("src/caller.ts"));
-
-    // The consumed re-speculation surfaced the second slice, whose plan still
-    // continues, so exactly one speculation for the third slice must now be
-    // in flight; settle it so the call log is complete and deterministic.
-    assert!(
-        engine.continuations.contains_key(&second.session_id),
-        "the second slice under review must speculate the third"
-    );
-    settle_continuation(&engine, &second.session_id).await;
 
     let calls = backend.calls.lock().unwrap().clone();
-    // Start, cancelled speculation, rework, consumed re-speculation, and the
-    // (exactly one) speculation for the slice now under review. Any engine
-    // double-schedule or a take() falling back to a real turn would add a
-    // call and fail this exact count.
-    assert_eq!(calls.len(), 5, "unexpected backend calls: {calls:?}");
+    assert_eq!(calls.len(), 2, "reject triggered a backend turn: {calls:?}");
     assert!(calls[0].starts_with("progress:Start"));
     assert!(calls[1].starts_with("plain:User(Next)"));
-    assert!(calls[2].starts_with("progress:User(Retry)"));
-    assert!(calls[3].starts_with("plain:User(Next)"));
-    assert!(calls[4].starts_with("plain:User(Next)"));
+
+    let redrafted = engine
+        .action(&start.session_id, Action::Retry)
+        .await
+        .unwrap();
+    let Card::Patch(redraft) = &redrafted.card else {
+        panic!(
+            "expected an explicitly requested redraft, got {:?}",
+            redrafted.card
+        );
+    };
+    assert_eq!(redraft.patches[0].file, PathBuf::from("src/work.ts"));
+    let calls = backend.calls.lock().unwrap().clone();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("progress:User(Retry)")),
+        "explicit retry did not trigger a backend turn: {calls:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
