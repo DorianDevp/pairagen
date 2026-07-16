@@ -10,5 +10,6 @@ test -n "$cargo_version"
 test "$cargo_version" = "$lua_version"
 test -n "$rust_protocol"
 test "$rust_protocol" = "$lua_protocol"
+grep -q "^## \[$cargo_version\]" CHANGELOG.md
 
 echo "Versions match: v$cargo_version, protocol $rust_protocol"
