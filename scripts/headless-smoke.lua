@@ -172,7 +172,8 @@ state.session_id = nil
 state.card = nil
 vim.api.nvim_buf_delete(focus_source, { force = true })
 local long_goal = "Mam tutaj problem, bo ta pętla nie uwzględnia wszystkich elementów z kolejnych przebiegów"
-local long_explanation = "Oznacza korzeń podglądu tym samym dyskryminatorem w węźle nadrzędnym i zachowuje pełny opis zmiany"
+local long_explanation =
+  "Oznacza korzeń podglądu tym samym dyskryminatorem w węźle nadrzędnym i zachowuje pełny opis zmiany"
 local patch_card = {
   kind = "patch",
   title = "Preview root",
@@ -250,3 +251,50 @@ state.navigated_card = nil
 vim.cmd("tabonly")
 
 print("Loopbiotic headless smoke test passed")
+
+-- Optional real round-trip: when LOOPBIOTIC_SMOKE_BIN points at a loopbioticd
+-- binary, drive one session over JSON-RPC against the mock agent. Without the
+-- variable the smoke test keeps the stubbed behavior above and stops here.
+local smoke_bin = vim.env.LOOPBIOTIC_SMOKE_BIN
+if smoke_bin and smoke_bin ~= "" then
+  local loopbiotic = require("loopbiotic")
+  local rpc = require("loopbiotic.rpc")
+
+  assert(vim.fn.executable(smoke_bin) == 1, "LOOPBIOTIC_SMOKE_BIN is not executable: " .. smoke_bin)
+  loopbiotic.reset()
+  config.values.backend.command = vim.fn.fnamemodify(smoke_bin, ":p")
+  config.values.backend.args = { "--stdio" }
+  config.values.backend.agent = "mock"
+
+  vim.cmd("edit README.md")
+  -- The /hypothesis prefix pins the first card kind, keeping the round-trip
+  -- deterministic against the mock agent.
+  loopbiotic.start("/hypothesis Smoke round-trip: inspect this file", "auto")
+  local started = vim.wait(15000, function()
+    return state.session_id ~= nil and state.card ~= nil
+  end, 50)
+  assert(started, "smoke round-trip timed out waiting for the first card")
+  assert(state.card.kind == "hypothesis", "unexpected first card kind: " .. tostring(state.card.kind))
+  assert(loopbiotic.action_available(state.card, "follow"), "first card offers no follow action")
+  assert(loopbiotic.actions_visible(), "card actions are not visible after the first turn")
+
+  local first_card_id = state.card.id
+  loopbiotic.action("follow")
+  local followed = vim.wait(15000, function()
+    return state.card ~= nil and state.card.id ~= first_card_id and not state.thinking_request_id
+  end, 50)
+  assert(followed, "smoke round-trip timed out waiting for the follow card")
+  assert(state.card.kind == "finding", "unexpected follow card kind: " .. tostring(state.card.kind))
+
+  -- Stopping the backend mid-request must fail the in-flight callback and
+  -- clear the thinking spinner instead of leaving it stuck.
+  assert(loopbiotic.action_available(state.card, "why"), "follow card offers no why action")
+  loopbiotic.action("why")
+  assert(state.thinking_request_id, "expected a thinking spinner during the agent turn")
+  rpc.stop()
+  assert(not state.thinking_request_id, "rpc.stop left the thinking spinner active")
+
+  rpc.stop()
+  loopbiotic.reset()
+  print("Loopbiotic smoke round-trip passed")
+end
