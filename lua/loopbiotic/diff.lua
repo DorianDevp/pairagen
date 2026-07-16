@@ -38,21 +38,23 @@ function M.show(card, opts)
     return false
   end
 
+  -- Queued patches were validated daemon-side, so a failure here means the
+  -- draft went stale in review: parse failures are a malformed diff, while
+  -- resolve/apply failures mean the buffer drifted after the draft was made
+  -- (cards carry no queue-time changedtick, so resolution failure itself is
+  -- the drift signal). Offer recovery instead of dead-ending the goal.
   local source_lines = vim.api.nvim_buf_get_lines(source_buf, 0, -1, false)
   local hunk_ok, hunk = pcall(apply.parse_hunk, patch.diff)
   if not hunk_ok then
-    ui.notify(hunk, vim.log.levels.ERROR)
-    return false
+    return M.recover(card, "malformed", hunk)
   end
   local start_ok, source_start = pcall(apply.resolve_start, source_lines, hunk)
   if not start_ok then
-    ui.notify(source_start, vim.log.levels.ERROR)
-    return false
+    return M.recover(card, "drift", source_start)
   end
   local draft_ok, draft_lines = pcall(apply.apply_diff, source_lines, patch.diff)
   if not draft_ok then
-    ui.notify(draft_lines, vim.log.levels.ERROR)
-    return false
+    return M.recover(card, "drift", draft_lines)
   end
 
   local annotations = M.annotations(hunk, source_start)
@@ -103,6 +105,69 @@ function M.show(card, opts)
   M.focus_change()
 
   return true
+end
+
+-- Decide what recovery to offer for a queued patch that failed to preview.
+-- Pure (kinds and actions in, choices out) so headless tests can cover the
+-- decision table directly.
+--
+-- Retrying redrafts the current goal slice against the live buffer, which is
+-- cheap, so it comes first: recovery is one keypress. There is no "skip this
+-- hunk" choice because no skip path exists — patch cards carry a single hunk
+-- and reject reworks the card rather than advancing past it.
+---@param kind "malformed"|"drift" parse failure vs. stale buffer context
+---@param actions (string|table)[]|nil the card's available actions
+---@return { reason: string, choices: { label: string, action: "retry"|"cancel" }[] }|nil plan nil when the card cannot retry
+function M.recovery_plan(kind, actions)
+  local can_retry = false
+  for _, action in ipairs(actions or {}) do
+    if action == "retry" then
+      can_retry = true
+    end
+  end
+  if not can_retry then
+    return nil
+  end
+
+  return {
+    reason = kind == "malformed" and "the drafted patch is malformed"
+      or "draft no longer matches the buffer (edited since it was drafted)",
+    choices = {
+      { label = "Retry slice with current buffer", action = "retry" },
+      { label = "Cancel", action = "cancel" },
+    },
+  }
+end
+
+-- A queued patch failed to preview: prompt for recovery instead of leaving
+-- the goal at a dead end. The retry turn costs tokens, so it only fires on
+-- the user's explicit pick — never automatically. Always returns false so
+-- callers fall back to the plain card while the choice is pending.
+---@param card LoopbioticCard
+---@param kind "malformed"|"drift"
+---@param err string the underlying parse/resolve/apply error
+---@return boolean shown always false
+function M.recover(card, kind, err)
+  log.write("patch preview failed", { kind = kind, error = err })
+
+  local plan = M.recovery_plan(kind, card.actions or card.next_actions)
+  if not plan then
+    ui.notify(err, vim.log.levels.ERROR)
+    return false
+  end
+
+  vim.ui.select(plan.choices, {
+    prompt = "Loopbiotic: " .. plan.reason,
+    format_item = function(choice)
+      return choice.label
+    end,
+  }, function(choice)
+    if choice and choice.action == "retry" then
+      require("loopbiotic").action("retry", { allow_hidden = true })
+    end
+  end)
+
+  return false
 end
 
 function M.annotations(hunk, source_start)
