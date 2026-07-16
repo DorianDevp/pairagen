@@ -196,8 +196,8 @@ require("loopbiotic").setup({
 <leader>a
 Prompt
 Persistent agent goal
-Agent inspects the project and prepares the complete multi-file change
-One local editable hunk
+Agent inspects the project and returns the first file slice plus its plan
+One local editable hunk (the next slice is prepared while you review)
 Edit the inline draft
 Accept, Reject, edit, message, or ask Why
 Why → explanation → Back to the same pending draft
@@ -239,12 +239,18 @@ Unknown words after `/` are treated as normal prompt text, so paths like
 `/tmp/project` are safe.
 
 The goal and accepted-step count stay visible on cards and editable drafts. In
-the default `auto` mode the agent owns the complete process: it inspects the
-project and prepares the complete change across the required files in one turn.
-Loopbiotic then presents that batch hunk by hunk; `Accept` advances locally without
-another model call, and accepting the final complete hunk closes the goal
-locally. `Reject`, `Retry`, a file the agent could not inspect, or an explicit
-question can return control to the agent. User control is the hunk gate, not a
+the default `auto` mode the agent owns the complete process, delivered as file
+slices: each goal turn returns exactly one file's complete patch plus a plan
+of the remaining files, so no single wait spans the whole change. While a
+slice is under review, Loopbiotic already requests the next one on the same
+conversation — accepting the last hunk of a slice usually surfaces the next
+file instantly. `Accept` advances locally without another model call;
+accepting the final hunk of the last planned slice closes the goal locally.
+`Reject` cancels the speculative next slice (its token cost stays visible),
+reworks only the rejected file, and resumes the pipeline. Backends that
+ignore the slice contract still return one complete batch, which is presented
+exactly as before. `Retry`, a file the agent could not inspect, or an
+explicit question can return control to the agent. User control is the hunk gate, not a
 repeated discovery/assess/draft ceremony. Asking `Why`
 opens a side conversation about the pending hunk and then returns to that exact
 draft without advancing or replacing it. Explicit

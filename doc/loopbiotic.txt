@@ -17,11 +17,15 @@ designed for explicit user-controlled pair-programming steps rather than an
 open-ended chat session.
 
 In the default auto mode, one prompt starts a persistent goal loop. The agent
-inspects the project and returns the complete multi-file change as one batch.
-Loopbiotic validates that batch against live editor buffers and presents it one
-hunk at a time. Accepting a hunk advances through the local queue without a new
-model turn; rejecting or retrying returns control to the agent. The loop ends
-only after the complete batch is accepted and local diagnostics are checked.
+returns the change one file slice at a time, together with a plan of the
+remaining files; while a slice is under review Loopbiotic already requests the
+next one on the same conversation, so accepting usually surfaces the next
+file without a wait. Every slice is validated against live editor buffers and
+presented one hunk at a time. Accepting a hunk advances through the local
+queue without a new model turn; rejecting reworks only that file's slice and
+cancels the speculative next one. Backends that ignore the slice contract
+return one complete batch, presented exactly as before. The loop ends only
+after the final planned slice is accepted and local diagnostics are checked.
 Use `keymaps.why` (`<leader>pw` by default) on a draft to ask why; the answer
 keeps that exact hunk pending and offers `Back to draft`.
 

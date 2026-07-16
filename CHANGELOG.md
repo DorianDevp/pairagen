@@ -38,6 +38,18 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Goal turns are now sliced: the agent returns exactly one file's patch per
+  turn plus a plan of the remaining files, and Loopbiotic speculatively
+  requests the next slice on the same conversation while the current one is
+  under review. Time-to-first-hunk drops from the full-batch generation time
+  to a single slice, accepting usually surfaces the next file instantly, and
+  a rejected slice reworks one file instead of regenerating the whole batch
+  (the cancelled speculation's token cost stays visible in session totals).
+  Backends that ignore the slice contract keep the legacy complete-batch
+  behavior. New Lua-side additions: backend preflight in the prompt window
+  (failures surface before typing; composed prompts survive failed starts),
+  repeated-error escalation with actionable guidance, and a client-side
+  error boundary that preserves the session when a UI callback fails.
 - The `backend/warmup` handshake now reports an explicit identity: the active
   backend, the concrete model the next turn will use (configured, or resolved
   from the backend — the Claude CLI announces it at process start, Ollama
