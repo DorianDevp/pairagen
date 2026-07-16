@@ -21,6 +21,9 @@ mod token_report;
 
 const OPEN_LOCATION_TIMEOUT: Duration = Duration::from_secs(120);
 const READ_FILE_TIMEOUT: Duration = Duration::from_secs(10);
+/// JSON-RPC error code returned by `initialize` when the client announces a
+/// protocol version that differs from [`loopbiotic_protocol::PROTOCOL_VERSION`].
+const PROTOCOL_MISMATCH_CODE: i64 = -32001;
 static NEXT_EDITOR_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::main]
@@ -82,7 +85,12 @@ async fn serve_stdio() -> Result<()> {
 
     loop {
         let line = {
-            let queued = deferred.lock().expect("deferred lock").pop_front();
+            // A poisoned lock only means another thread panicked while holding
+            // it; the queue holds whole lines, so the inner data is still valid.
+            let queued = deferred
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pop_front();
             match queued {
                 Some(line) => line,
                 None => match lines.lock().await.recv().await {
@@ -229,7 +237,12 @@ async fn request_editor_context(
                 .cloned()
                 .and_then(|context| serde_json::from_value::<ContextBundle>(context).ok());
         }
-        deferred.lock().expect("deferred lock").push_back(line);
+        // A poisoned lock only means another thread panicked while holding
+        // it; the queue holds whole lines, so the inner data is still valid.
+        deferred
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push_back(line);
     }
 }
 
@@ -280,12 +293,34 @@ impl Server {
     ) -> Result<JsonRpcResponse, (Value, String)> {
         let id = request.id.clone();
         let result = match request.method.as_str() {
-            "initialize" => json!({
-                "server": "loopbioticd",
-                "version": env!("CARGO_PKG_VERSION"),
-                "protocol_version": loopbiotic_protocol::PROTOCOL_VERSION,
-                "backend": self.backend.capabilities(),
-            }),
+            "initialize" => {
+                // Old clients omit params.client.protocol_version entirely;
+                // the check only runs when the client announces a version.
+                let client_version = request
+                    .params
+                    .get("client")
+                    .and_then(|client| client.get("protocol_version"))
+                    .and_then(Value::as_u64);
+                if let Some(client_version) = client_version
+                    && client_version != u64::from(loopbiotic_protocol::PROTOCOL_VERSION)
+                {
+                    return Ok(JsonRpcResponse::err(
+                        id,
+                        PROTOCOL_MISMATCH_CODE,
+                        format!(
+                            "protocol version mismatch: client speaks protocol version {client_version}, loopbioticd speaks {}; update the Loopbiotic plugin and loopbioticd so both are on the same version",
+                            loopbiotic_protocol::PROTOCOL_VERSION
+                        ),
+                    ));
+                }
+
+                json!({
+                    "server": "loopbioticd",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "protocol_version": loopbiotic_protocol::PROTOCOL_VERSION,
+                    "backend": self.backend.capabilities(),
+                })
+            }
             "backend/list" => json!([self.backend.capabilities()]),
             "session/start" => {
                 let params = parse::<StartSessionParams>(&id, request.params)?;
@@ -555,4 +590,41 @@ fn print_help() -> Result<()> {
     eprintln!("loopbioticd dev token-report --check BASELINE CURRENT");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stale_server_response;
+
+    #[test]
+    fn stale_detects_response_to_daemon_initiated_request() {
+        assert!(is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":"loopbioticd_7","result":{"granted":false}}"#
+        ));
+    }
+
+    #[test]
+    fn stale_ignores_requests_even_with_daemon_style_id() {
+        assert!(!is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":"loopbioticd_7","method":"editor/open_location","params":{}}"#
+        ));
+    }
+
+    #[test]
+    fn stale_ignores_client_responses_and_requests() {
+        assert!(!is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":"client_1","result":{}}"#
+        ));
+        assert!(!is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#
+        ));
+    }
+
+    #[test]
+    fn stale_ignores_non_json_and_numeric_ids() {
+        assert!(!is_stale_server_response("not json"));
+        assert!(!is_stale_server_response(
+            r#"{"jsonrpc":"2.0","id":42,"result":{}}"#
+        ));
+    }
 }
