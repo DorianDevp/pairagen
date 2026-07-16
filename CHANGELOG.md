@@ -6,6 +6,39 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Backend turns now run under a configurable deadline
+  (`LOOPBIOTIC_TURN_TIMEOUT_SECS`, default 600, `0` disables). A wedged agent
+  CLI is killed and respawned on the next turn instead of hanging the session
+  forever; the Ollama HTTP client uses the same deadline.
+- Stopping or switching the backend now fails in-flight requests instead of
+  dropping their callbacks, so the thinking spinner can no longer get stuck.
+- RPC sends to an already-exited backend are dropped and logged instead of
+  throwing inside scheduled callbacks.
+- Managed `loopbioticd` downloads now have connect and transfer time limits,
+  and only the expected binary is extracted from the release archive.
+- Retry exhaustion and goal-batch shape mismatches in the session harness
+  degrade to error cards instead of panicking the daemon.
+- Push CI runs again: the workflow triggered on a nonexistent `main` branch.
+
+### Changed
+
+- `initialize` validates the client protocol version when one is supplied and
+  returns a structured error (`-32001`) on mismatch instead of failing later
+  with cryptic errors.
+- The project context scan no longer blocks async worker threads.
+- Internal restructuring: `engine.rs`, `codex_app.rs`, and the context crate
+  are split into focused modules; duplicated backend and Lua helpers are
+  shared; Lua state reset is defined next to the state it resets.
+
+### Added
+
+- Lua tooling (`stylua`, `selene`, LuaLS config) enforced in CI, headless Lua
+  unit tests for the patch engine and session state, `loopbioticd` JSON-RPC
+  integration tests, session state-machine transition tests, and a real
+  daemon round-trip smoke test.
+
 ## [0.3.2] - 2026-07-14
 
 ### Added
