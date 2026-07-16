@@ -523,11 +523,13 @@ end
 -- the backend/warmup identity, then the model reported after the last turn.
 -- The word "default" is never displayed.
 function M.model_display()
-  local identity = state.agent_identity
-  local identity_model = type(identity) == "table" and identity.model or nil
-  local resolved = prompt.resolved_model(config.model(), identity_model, state.backend_model)
+  local label = prompt.model_label(config.model(), state.agent_identity, state.backend_model)
 
-  return resolved or "agent default (not yet resolved)"
+  if label:find("model?", 1, true) == 1 then
+    return (label:gsub("^model%?", "agent default (not yet resolved)"))
+  end
+
+  return label
 end
 
 function M.model(name)

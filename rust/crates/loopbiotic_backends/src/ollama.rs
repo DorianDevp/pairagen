@@ -185,6 +185,7 @@ impl BackendAdapter for OllamaBackend {
             // known without asking the server.
             model: Some(self.model.clone()),
             models: self.list_models().await,
+            phases: None,
         }
     }
 

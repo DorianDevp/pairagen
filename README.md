@@ -163,10 +163,15 @@ The prompt window title always names the active agent and the concrete model
 the next turn will use, e.g. `codex / gpt-5.4-mini`. Without a configured
 model it shows the model the backend announces during warmup (or reported
 after the last turn), and `model?` until one is known — it never shows
-`default`. Press `<C-l>` (`keymaps.models`) inside the prompt to pick a model
-from every known candidate: the configured model, the models the backend
-enumerates (for example Ollama's local tags), an optional `models` list on the
-agent definition, and the model reported by the last turn. The picked model
+`default`. The title always names the patch-drafting model; when an agent
+runs discovery on a different model (the shipped claude agent pins
+`discovery_model = "haiku"`), that is shown separately, e.g.
+`claude-fable-5 · discovery haiku`. Press `<C-l>` (`keymaps.models`) inside
+the prompt to pick a model from every known candidate: the configured model,
+the models the backend enumerates (Ollama's local tags; claude offers its
+stable CLI aliases `sonnet`, `opus`, `haiku`), an optional `models` list on
+the agent definition, and the model reported by the last turn. Picking sets
+the patch model; `discovery_model` stays as configured. The picked model
 persists per agent exactly like `:LoopbioticModel`; the prompt window and its
 typed text stay open.
 

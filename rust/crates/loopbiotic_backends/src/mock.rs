@@ -64,6 +64,7 @@ impl BackendAdapter for MockBackend {
             backend: "mock".into(),
             model: Some("mock-model".into()),
             models: vec!["mock-model".into(), "mock-mini".into()],
+            phases: None,
         }
     }
 

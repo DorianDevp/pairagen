@@ -16,8 +16,8 @@ use crate::support::{
     optional_env, report_progress, turn_phase, turn_timeout_from_env,
 };
 use crate::{
-    BackendAdapter, BackendIdentity, BackendMetadata, BackendRequest, BackendResponse,
-    ProgressReporter, enforce_card_contract, estimate_tokens,
+    BackendAdapter, BackendIdentity, BackendMetadata, BackendPhaseModels, BackendRequest,
+    BackendResponse, ProgressReporter, enforce_card_contract, estimate_tokens,
 };
 
 const SYSTEM_PROMPT: &str = r#"You are a local Loopbiotic pair-programming partner inside the user's editor.
@@ -66,9 +66,10 @@ struct ClaudeAppState {
     // Pre-spawned discovery process created by warmup() before a session
     // exists, adopted by the next session's first discovery turn.
     warm: Option<Arc<Mutex<ClaudeSlot>>>,
-    // Latest model the CLI reported (init event or turn result); survives
-    // slot turnover so identity() can answer without respawning.
-    last_reported_model: Option<String>,
+    // Model a flagless CLI process reported — its true default. Only ever
+    // written from processes that ran without --model, so a pinned
+    // discovery model can never masquerade as the CLI default.
+    cli_default_model: Option<String>,
 }
 
 #[derive(Default)]
@@ -281,17 +282,6 @@ impl ClaudeAppBackend {
         }
     }
 
-    /// The configured model as one identity string: the discovery model, or
-    /// "discovery,patch" when the two phases run different models.
-    fn configured_model(&self) -> Option<String> {
-        let discovery = self.phase_model(Phase::Discovery)?;
-
-        match self.phase_model(Phase::Patch) {
-            Some(patch) if patch != discovery => Some(format!("{discovery},{patch}")),
-            _ => Some(discovery),
-        }
-    }
-
     fn phase_thinking(&self, phase: Phase) -> Option<String> {
         match phase {
             // Patch turns keep the CLI's adaptive thinking: diff correctness
@@ -388,14 +378,28 @@ impl ClaudeAppBackend {
         Ok(())
     }
 
-    /// Resolves the CLI's own default model when none is configured: the
-    /// latest model a turn or init event reported, else the init event of the
-    /// warm discovery process (spawning it warmup-style when needed).
-    async fn discovered_default_model(&self) -> Option<String> {
-        if let Some(model) = self.state.lock().await.last_reported_model.clone() {
+    /// Resolves the CLI's own default model (what a process spawned without
+    /// --model runs): cached, else read from the warm discovery process when
+    /// discovery itself is flagless, else from a short-lived flagless probe.
+    async fn cli_default_model(&self) -> Option<String> {
+        if let Some(model) = self.state.lock().await.cli_default_model.clone() {
             return Some(model);
         }
 
+        let model = if self.phase_model(Phase::Discovery).is_none() {
+            self.warm_init_model().await
+        } else {
+            self.probe_default_model().await
+        };
+
+        if let Some(model) = model.as_ref() {
+            self.state.lock().await.cli_default_model = Some(model.clone());
+        }
+
+        model
+    }
+
+    async fn warm_init_model(&self) -> Option<String> {
         self.warm_up().await.ok()?;
         let warm = self.state.lock().await.warm.clone()?;
         let mut slot = warm.lock().await;
@@ -404,12 +408,20 @@ impl ClaudeAppBackend {
             // still unread on stdout.
             slot.reported_model = read_init_model(&mut slot).await;
         }
-        let model = slot.reported_model.clone();
-        drop(slot);
 
-        if let Some(model) = model.as_ref() {
-            self.state.lock().await.last_reported_model = Some(model.clone());
-        }
+        slot.reported_model.clone()
+    }
+
+    /// The warm discovery process runs a pinned model, so it cannot reveal
+    /// the CLI default; spawn a flagless process just long enough to read
+    /// its init event.
+    async fn probe_default_model(&self) -> Option<String> {
+        let mut slot = ClaudeSlot {
+            process: self.spawn_process(&None, &None).ok(),
+            ..ClaudeSlot::default()
+        };
+        let model = read_init_model(&mut slot).await;
+        slot.kill_process();
 
         model
     }
@@ -662,7 +674,9 @@ impl BackendAdapter for ClaudeAppBackend {
     ) -> Result<BackendResponse> {
         let output = self.ask(&req, progress.as_ref()).await?;
         if let Some(model) = output.model.as_ref() {
-            self.state.lock().await.last_reported_model = Some(model.clone());
+            if self.phase_model(turn_phase(&req)).is_none() {
+                self.state.lock().await.cli_default_model = Some(model.clone());
+            }
         }
         let card = crate::parse_card(&output.text).unwrap_or_else(|error| {
             Self::error_card(format!("{error}\n\nRaw output:\n{}", output.text))
@@ -693,16 +707,38 @@ impl BackendAdapter for ClaudeAppBackend {
     }
 
     async fn identity(&self) -> BackendIdentity {
-        let model = match self.configured_model() {
+        // `model` names the patch-phase model — the one that writes code.
+        // A pinned discovery model is reported separately via `phases` so a
+        // cheap discovery default is never presented as "the" model.
+        let patch = match self.model.clone() {
             Some(model) => Some(model),
-            None => self.discovered_default_model().await,
+            None => self.cli_default_model().await,
         };
+        let discovery = self.discovery_model.clone().or_else(|| patch.clone());
+        let phases = (discovery != patch).then(|| BackendPhaseModels {
+            discovery: discovery.clone(),
+            patch: patch.clone(),
+        });
+
+        // The CLI has no model-listing API; offer the concrete models we
+        // know about plus the stable aliases the CLI resolves server-side.
+        let mut models: Vec<String> = vec![];
+        for candidate in [&patch, &discovery].into_iter().flatten() {
+            if !models.contains(candidate) {
+                models.push(candidate.clone());
+            }
+        }
+        for alias in ["sonnet", "opus", "haiku"] {
+            if !models.iter().any(|known| known == alias) {
+                models.push(alias.into());
+            }
+        }
 
         BackendIdentity {
             backend: "claude_app".into(),
-            model,
-            // The claude CLI has no model-listing API.
-            models: vec![],
+            model: patch,
+            models,
+            phases,
         }
     }
 
@@ -1043,11 +1079,15 @@ mod tests {
 
         assert_eq!(identity.backend, "claude_app");
         assert_eq!(identity.model.as_deref(), Some("claude-fable-5"));
-        assert!(identity.models.is_empty());
+        assert!(identity.phases.is_none());
+        assert_eq!(
+            identity.models,
+            ["claude-fable-5", "sonnet", "opus", "haiku"]
+        );
     }
 
     #[tokio::test]
-    async fn identity_joins_differing_discovery_and_patch_models() {
+    async fn identity_reports_phase_models_when_discovery_differs() {
         let backend = ClaudeAppBackend::with_turn_timeout(
             "claude-unused",
             vec![],
@@ -1059,21 +1099,48 @@ mod tests {
 
         let identity = backend.identity().await;
 
-        assert_eq!(
-            identity.model.as_deref(),
-            Some("claude-haiku-4-5,claude-opus-4-8")
-        );
+        // The patch model is "the" model; the pinned discovery model rides
+        // along in phases instead of hijacking the headline.
+        assert_eq!(identity.model.as_deref(), Some("claude-opus-4-8"));
+        let phases = identity.phases.expect("differing phases must be reported");
+        assert_eq!(phases.discovery.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(phases.patch.as_deref(), Some("claude-opus-4-8"));
     }
 
     #[tokio::test]
-    async fn identity_falls_back_to_the_last_reported_model() {
+    async fn identity_never_reports_a_pinned_discovery_model_as_the_model() {
+        // The shipped default config: discovery pinned to a cheap model, no
+        // patch model configured. The probe command does not exist, so the
+        // CLI default stays unknown — identity must say so rather than
+        // claim the discovery model is what patch turns will run.
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            None,
+            Some("haiku".into()),
+            None,
+            None,
+        );
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.model, None);
+        let phases = identity.phases.expect("differing phases must be reported");
+        assert_eq!(phases.discovery.as_deref(), Some("haiku"));
+        assert_eq!(phases.patch, None);
+        assert_eq!(identity.models, ["haiku", "sonnet", "opus"]);
+    }
+
+    #[tokio::test]
+    async fn identity_falls_back_to_the_cached_cli_default() {
         let backend =
             ClaudeAppBackend::with_turn_timeout("claude-unused", vec![], None, None, None, None);
-        backend.state.lock().await.last_reported_model = Some("claude-fable-5".into());
+        backend.state.lock().await.cli_default_model = Some("claude-fable-5".into());
 
         let identity = backend.identity().await;
 
         assert_eq!(identity.model.as_deref(), Some("claude-fable-5"));
+        assert!(identity.phases.is_none());
     }
 
     #[tokio::test]

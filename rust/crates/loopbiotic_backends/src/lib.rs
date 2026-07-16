@@ -52,6 +52,7 @@ pub trait BackendAdapter: Send + Sync {
             backend: self.capabilities().name,
             model: None,
             models: vec![],
+            phases: None,
         }
     }
 
@@ -63,6 +64,16 @@ pub struct BackendIdentity {
     pub backend: String,
     pub model: Option<String>,
     pub models: Vec<String>,
+    /// Set when the backend runs different models per turn phase; `model`
+    /// then names the patch-phase model (the one that writes code).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phases: Option<BackendPhaseModels>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BackendPhaseModels {
+    pub discovery: Option<String>,
+    pub patch: Option<String>,
 }
 
 pub type ProgressReporter = Arc<dyn Fn(BackendProgress) + Send + Sync>;

@@ -90,13 +90,24 @@ function M.resolved_model(configured, identity_model, backend_model)
 end
 
 -- Title-ready model name; "model?" until any concrete model is known. The
--- word "default" is never rendered.
+-- word "default" is never rendered. When the backend runs a different
+-- discovery model (identity.phases), it is shown alongside the patch model
+-- instead of being presented as "the" model.
 ---@param configured string|nil
----@param identity_model string|nil
+---@param identity table|nil backend/warmup identity ({ model, models, phases })
 ---@param backend_model string|nil
 ---@return string
-function M.model_label(configured, identity_model, backend_model)
-  return M.resolved_model(configured, identity_model, backend_model) or "model?"
+function M.model_label(configured, identity, backend_model)
+  local identity_model = type(identity) == "table" and identity.model or nil
+  local label = M.resolved_model(configured, identity_model, backend_model) or "model?"
+  local phases = type(identity) == "table" and type(identity.phases) == "table" and identity.phases or nil
+  local discovery = phases and phases.discovery
+
+  if type(discovery) == "string" and discovery ~= "" and discovery ~= label then
+    return label .. " · discovery " .. discovery
+  end
+
+  return label
 end
 
 -- Deduped model-picker candidates, in resolution-priority order: configured
@@ -120,6 +131,10 @@ function M.model_candidates(configured, identity, agent_models, backend_model)
   add(configured)
   if type(identity) == "table" then
     add(identity.model)
+    if type(identity.phases) == "table" then
+      add(identity.phases.patch)
+      add(identity.phases.discovery)
+    end
     if type(identity.models) == "table" then
       for _, name in ipairs(identity.models) do
         add(name)
@@ -136,9 +151,7 @@ end
 
 function M.title(kind)
   local agent = config.agent()
-  local identity = state.agent_identity
-  local identity_model = type(identity) == "table" and identity.model or nil
-  local model = M.model_label(config.model(), identity_model, state.backend_model)
+  local model = M.model_label(config.model(), state.agent_identity, state.backend_model)
 
   return string.format(" Loopbiotic %s · %s / %s ", kind, agent, model)
 end

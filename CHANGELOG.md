@@ -48,6 +48,11 @@ The project follows [Semantic Versioning](https://semver.org/).
   (`keymaps.models`) opens a model picker fed by the backend-enumerated
   models, an optional per-agent `models` list, and the last reported model.
   Selections persist per agent exactly like `:LoopbioticModel`.
+- Identity is phase-aware: the reported model is always the patch-drafting
+  one, and a differing pinned discovery model (the shipped claude agent uses
+  `discovery_model = "haiku"`) is shown separately instead of masquerading
+  as the active model. The claude picker offers the CLI aliases `sonnet`,
+  `opus`, and `haiku` since the CLI has no model-listing API.
 - Lua tooling (`stylua`, `selene`, LuaLS config) enforced in CI, headless Lua
   unit tests for the patch engine and session state, `loopbioticd` JSON-RPC
   integration tests, session state-machine transition tests, and a real

@@ -46,11 +46,15 @@ budget is reached. Set it to 0 to disable the guard.
 
 The prompt window title names the active agent and the concrete model the
 next turn will use, falling back to the backend-announced model and then
-`model?` — it never shows `default`. Press `keymaps.models` (`<C-l>` by
+`model?` — it never shows `default`. The title always names the
+patch-drafting model; a differing pinned discovery model (the shipped claude
+agent uses `discovery_model = "haiku"`) is shown separately, e.g.
+`claude-fable-5 · discovery haiku`. Press `keymaps.models` (`<C-l>` by
 default) inside the prompt to pick from the known models: the configured
-model, the models the backend enumerates, the agent's `models` list in
-`setup()`, and the model reported by the last turn. The choice persists per
-agent like |:LoopbioticModel| and keeps the prompt window and its text open.
+model, the models the backend enumerates (claude offers the CLI aliases
+`sonnet`, `opus`, `haiku`), the agent's `models` list in `setup()`, and the
+model reported by the last turn. Picking sets the patch model and persists
+per agent like |:LoopbioticModel|, keeping the prompt window and text open.
 
 Loopbiotic has been tested primarily with the Codex CLI app-server backend.
 

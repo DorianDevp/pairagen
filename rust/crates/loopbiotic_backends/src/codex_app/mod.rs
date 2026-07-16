@@ -389,6 +389,7 @@ impl BackendAdapter for CodexAppBackend {
             // with model: null use the server's own default.
             model: self.model.clone(),
             models: vec![],
+            phases: None,
         }
     }
 

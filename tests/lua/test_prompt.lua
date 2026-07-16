@@ -4,19 +4,32 @@ return function(t)
   local state = require("loopbiotic.state")
 
   t.test("model_label prefers the configured model", function()
-    t.eq(prompt.model_label("configured", "identity", "backend"), "configured")
+    t.eq(prompt.model_label("configured", { model = "identity" }, "backend"), "configured")
   end)
 
   t.test("model_label falls back to identity, then backend, then model?", function()
-    t.eq(prompt.model_label(nil, "identity", "backend"), "identity")
+    t.eq(prompt.model_label(nil, { model = "identity" }, "backend"), "identity")
     t.eq(prompt.model_label(nil, nil, "backend"), "backend")
     t.eq(prompt.model_label(nil, nil, nil), "model?")
   end)
 
   t.test("model_label treats empty strings and vim.NIL as unknown", function()
-    t.eq(prompt.model_label("", "", ""), "model?")
-    t.eq(prompt.model_label(vim.NIL, vim.NIL, vim.NIL), "model?")
-    t.eq(prompt.model_label("", vim.NIL, "backend"), "backend")
+    t.eq(prompt.model_label("", { model = "" }, ""), "model?")
+    t.eq(prompt.model_label(vim.NIL, { model = vim.NIL }, vim.NIL), "model?")
+    t.eq(prompt.model_label("", { model = vim.NIL }, "backend"), "backend")
+  end)
+
+  t.test("model_label shows a differing discovery model alongside, never as the model", function()
+    -- The shipped claude default: discovery pinned, patch model unknown.
+    local identity = { model = vim.NIL, phases = { discovery = "haiku", patch = vim.NIL } }
+    t.eq(prompt.model_label(nil, identity, nil), "model? · discovery haiku")
+
+    identity = { model = "claude-fable-5", phases = { discovery = "haiku", patch = "claude-fable-5" } }
+    t.eq(prompt.model_label(nil, identity, nil), "claude-fable-5 · discovery haiku")
+
+    -- Same model in both phases: no suffix.
+    identity = { model = "claude-fable-5" }
+    t.eq(prompt.model_label(nil, identity, nil), "claude-fable-5")
   end)
 
   t.test("model_label never yields the word default", function()
@@ -49,6 +62,17 @@ return function(t)
     )
 
     t.eq(candidates, { "configured", "identity", "alpha", "beta", "gamma", "backend" })
+  end)
+
+  t.test("model_candidates includes phase models", function()
+    local candidates = prompt.model_candidates(
+      nil,
+      { model = vim.NIL, phases = { discovery = "haiku", patch = vim.NIL }, models = { "sonnet", "haiku" } },
+      nil,
+      nil
+    )
+
+    t.eq(candidates, { "haiku", "sonnet" })
   end)
 
   t.test("model_candidates filters nil, vim.NIL, and empty values", function()
