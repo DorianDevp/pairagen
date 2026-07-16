@@ -16,6 +16,27 @@ local M = {
 }
 local protocol_version = require("loopbiotic.version").protocol
 
+-- Send one JSON-RPC line to the backend. Callers can run from scheduled
+-- callbacks after on_exit already cleared the job, so a missing or closed
+-- channel is logged instead of thrown.
+---@param payload string encoded JSON-RPC message, without trailing newline
+---@return boolean sent
+local function try_send(payload)
+  if not M.job then
+    log.event("rpc_send_dropped", { reason = "backend is not running" })
+    return false
+  end
+
+  local ok, sent = pcall(vim.fn.chansend, M.job, payload .. "\n")
+  if not ok or sent == 0 then
+    log.event("rpc_send_dropped", { reason = ok and "channel closed" or tostring(sent) })
+    return false
+  end
+
+  return true
+end
+
+-- Start the backend if it is not already running or starting.
 function M.ensure()
   if M.job and vim.fn.jobwait({ M.job }, 0)[1] == -1 then
     return
@@ -43,6 +64,8 @@ function M.ensure()
   end)
 end
 
+-- Spawn the backend process and perform the protocol handshake.
+---@param backend_command string
 function M.start(backend_command)
   if M.job and vim.fn.jobwait({ M.job }, 0)[1] == -1 then
     return
@@ -123,6 +146,8 @@ function M.start(backend_command)
   end)
 end
 
+-- Stop the backend. In-flight and queued requests are failed with an aborted
+-- error (like on_exit) so their callers can settle instead of waiting forever.
 function M.stop()
   M.generation = M.generation + 1
   if M.job and vim.fn.jobwait({ M.job }, 0)[1] == -1 then
@@ -133,11 +158,16 @@ function M.stop()
   M.ready = false
   M.incompatible = false
   M.starting = false
-  M.queue = {}
-  M.pending = {}
   M.buffer = ""
+  M.fail_all("Loopbiotic backend was stopped")
 end
 
+-- Send a request, starting and queueing on the backend when it is not ready
+-- yet. The callback always receives a response table ({ result = ... } or
+-- { error = ... }).
+---@param method string
+---@param params table|nil
+---@param callback fun(message: table)
 function M.request(method, params, callback)
   if M.incompatible then
     callback({
@@ -162,8 +192,10 @@ function M.request(method, params, callback)
   M.send(method, params, callback)
 end
 
+---@param method string
+---@param params table|nil
+---@param callback fun(message: table)
 function M.send(method, params, callback)
-
   local id = M.next_id
   M.next_id = M.next_id + 1
   M.pending[id] = callback
@@ -180,9 +212,20 @@ function M.send(method, params, callback)
     method = method,
     params = params or {},
   })
-  vim.fn.chansend(M.job, payload .. "\n")
+  if not try_send(payload) then
+    M.pending[id] = nil
+    callback({
+      error = {
+        code = -32098,
+        message = "Loopbiotic backend is not running",
+      },
+    })
+  end
 end
 
+-- Fail every queued and pending request with one aborted-error response.
+---@param message string
+---@return integer failed how many callbacks were invoked
 function M.fail_all(message)
   local response = {
     error = {
@@ -207,17 +250,25 @@ function M.fail_all(message)
   return failed
 end
 
+-- Register a handler for a backend notification (method without id).
+---@param method string
+---@param callback fun(params: table)
 function M.on(method, callback)
   M.notifications[method] = callback
 end
 
 -- Handlers for requests initiated by loopbioticd (method + id). The handler
 -- receives (params, respond); it must call respond(result) exactly once.
+---@param method string
+---@param callback fun(params: table, respond: fun(result: table))
 function M.on_request(method, callback)
   M.requests = M.requests or {}
   M.requests[method] = callback
 end
 
+-- Answer a backend-initiated request.
+---@param id integer|string
+---@param result table
 function M.respond(id, result)
   local payload = vim.json.encode({
     jsonrpc = "2.0",
@@ -226,7 +277,7 @@ function M.respond(id, result)
   })
 
   log.event("rpc_server_response", { id = id })
-  vim.fn.chansend(M.job, payload .. "\n")
+  try_send(payload)
 end
 
 function M.on_data(data)
@@ -272,14 +323,11 @@ function M.handle(line)
     local id = message.id
 
     if not handler then
-      vim.fn.chansend(
-        M.job,
-        vim.json.encode({
-          jsonrpc = "2.0",
-          id = id,
-          error = { code = -32601, message = "unknown editor request " .. message.method },
-        }) .. "\n"
-      )
+      try_send(vim.json.encode({
+        jsonrpc = "2.0",
+        id = id,
+        error = { code = -32601, message = "unknown editor request " .. message.method },
+      }))
       return
     end
 
