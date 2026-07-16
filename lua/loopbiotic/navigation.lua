@@ -61,12 +61,18 @@ function M.open_location(location)
   end
   target_win = target_buf and M.current_tab_window(target_buf) or nil
 
+  -- Ex/tab commands issued from a focused float can leave that float as the
+  -- originating tab's tp_curwin. If a later async render closes it from
+  -- another tab, Neovim's tabline may dereference the freed window.
+  local normal = M.normal_window()
+  if normal ~= vim.api.nvim_get_current_win() then
+    vim.api.nvim_set_current_win(normal)
+  end
+
   if target_win then
     vim.api.nvim_set_current_win(target_win)
   elseif target_buf and open == "current" then
-    local win = M.normal_window()
-    vim.api.nvim_set_current_win(win)
-    vim.api.nvim_win_set_buf(win, target_buf)
+    vim.api.nvim_win_set_buf(normal, target_buf)
   elseif open == "tab" then
     local existing = target_buf and M.any_window(target_buf) or nil
     if existing then

@@ -67,6 +67,17 @@ return function(t)
     t.eq(tag, "ok")
   end)
 
+  t.test("decoded JSON nulls become ordinary absent Lua values", function()
+    local decoded = vim.json.decode('{"context_report":null,"location":{"annotation":null},"items":[1,null,3]}')
+    local normalized = util.normalize_json_nulls(decoded)
+
+    t.eq(normalized.context_report, nil, "top-level null")
+    t.eq(normalized.location.annotation, nil, "nested null")
+    t.eq(normalized.items[1], 1, "array prefix")
+    t.eq(normalized.items[2], nil, "array null")
+    t.eq(normalized.items[3], 3, "array suffix")
+  end)
+
   t.test("attempt logs keep violation classes while redacting contract content", function()
     local sanitized = require("loopbiotic.log").sanitize({
       outcome = "contract_retry",

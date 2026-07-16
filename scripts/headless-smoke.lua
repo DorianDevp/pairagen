@@ -253,6 +253,7 @@ state.session_id = "headless-session"
 card.show(location_card)
 assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 4, 1 }))
 local previous_float_win = state.card_win
+local previous_float_tab = vim.api.nvim_get_current_tabpage()
 vim.cmd("tabnew")
 vim.wait(1000, function()
   return state.card_win
@@ -260,8 +261,11 @@ vim.wait(1000, function()
     and vim.api.nvim_win_get_tabpage(state.card_win) == vim.api.nvim_get_current_tabpage()
 end)
 assert(vim.api.nvim_win_get_tabpage(state.card_win) == vim.api.nvim_get_current_tabpage())
-assert(not vim.api.nvim_win_is_valid(previous_float_win))
+assert(vim.api.nvim_win_is_valid(previous_float_win))
 require("loopbiotic.ui").close(state.card_win)
+vim.api.nvim_set_current_tabpage(previous_float_tab)
+require("loopbiotic.ui").cleanup_deferred()
+assert(not vim.api.nvim_win_is_valid(previous_float_win))
 state.card_win = nil
 state.card = nil
 state.last_card = nil

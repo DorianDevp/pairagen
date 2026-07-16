@@ -692,6 +692,97 @@ fn real_codex_interactive_question_fix_accept_workflow() {
     );
 }
 
+/// Real-agent regression for the client path that previously crashed
+/// Neovim: ask for a draft, then send a message before accepting or rejecting
+/// it. The pending patch must be replaced by conversation, never redrafted
+/// implicitly.
+///
+/// cargo test -p loopbioticd --test rpc \
+///   real_codex_reply_replaces_pending_draft_conversationally -- --ignored --nocapture
+#[test]
+#[ignore = "requires an authenticated real Codex CLI"]
+fn real_codex_reply_replaces_pending_draft_conversationally() {
+    let cwd = std::env::temp_dir().join(format!(
+        "loopbiotic-real-codex-draft-reply-{}",
+        std::process::id()
+    ));
+    let source = cwd.join("src/work.ts");
+    let original = "export function displayName(first, last) {\n  return `${first} ${last}`;\n}\n";
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("create fixture");
+    std::fs::write(&source, original).expect("write fixture");
+
+    let mut daemon = Daemon::spawn_codex();
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+
+    let context = json!({
+        "cwd": cwd,
+        "file": "src/work.ts",
+        "cursor": {"line": 2, "column": 3},
+        "selection": null,
+        "buffer_text": original,
+        "buffer_start_line": 1,
+        "diagnostics": [],
+        "hints": [],
+        "artifacts": []
+    });
+
+    let first_response = daemon.request(
+        "2",
+        "session/start",
+        start_session_params_with(
+            cwd,
+            "What is the smallest safe behavior when last is empty?",
+            "auto",
+            original,
+        ),
+    );
+    let first = daemon.finish_turn(first_response, Duration::from_secs(120), Some(&context));
+    assert_conversational(&first, "initial question");
+    let session_id = first["session_id"].as_str().expect("session id").to_owned();
+
+    let fix_response = daemon.request(
+        "3",
+        "session/action",
+        json!({
+            "session_id": session_id,
+            "action": "fix",
+            "context": context,
+        }),
+    );
+    let fix = daemon.finish_turn(fix_response, Duration::from_secs(120), Some(&context));
+    assert_eq!(
+        fix["card"]["kind"],
+        json!("patch"),
+        "Fix did not draft: {fix}"
+    );
+
+    let reply_started = Instant::now();
+    daemon.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "4",
+        "method": "session/reply",
+        "params": {
+            "session_id": session_id,
+            "text": "Before I apply that draft, explain the tradeoff in one concise response.",
+            "context": context,
+        },
+    }));
+    let reply_response =
+        daemon.response_for_with_editor_context("4", Duration::from_secs(120), &context);
+    let first_visible = reply_started.elapsed();
+    assert!(
+        first_visible <= REAL_CODEX_CONVERSATION_BUDGET,
+        "reply over a pending draft held the editor for {first_visible:?}"
+    );
+    let reply = daemon.finish_turn(reply_response, Duration::from_secs(120), Some(&context));
+    eprintln!(
+        "real Codex draft reply: first_visible={first_visible:?} final_kind={}",
+        reply["card"]["kind"].as_str().unwrap_or("<missing>")
+    );
+    assert_conversational(&reply, "reply over pending draft");
+}
+
 /// Real cancellation gate with deliberately tiny interaction budgets so the
 /// real Codex turn yields a Working card deterministically.
 ///

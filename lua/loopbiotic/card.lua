@@ -50,6 +50,10 @@ local labels = {
 
 function M.show(card, opts)
   opts = opts or {}
+  local diff = require("loopbiotic.diff")
+  if card.kind ~= "patch" and diff.valid_preview() then
+    diff.restore_source()
+  end
   if state.details_card ~= card then
     state.details_card = card
     state.details_expanded = false
@@ -67,7 +71,6 @@ function M.show(card, opts)
   end
 
   if card.kind == "patch" then
-    local diff = require("loopbiotic.diff")
     if diff.valid_preview() then
       diff.controls(card, opts)
       return

@@ -307,13 +307,14 @@ end
 function M.handle(line)
   local ok, message = pcall(vim.json.decode, line)
 
-  if not ok then
+  if not ok or type(message) ~= "table" then
     log.write("invalid backend JSON", line)
     ui.notify("Invalid backend JSON", vim.log.levels.ERROR)
 
     return
   end
 
+  message = util.normalize_json_nulls(message)
   log.event(message.method and not message.id and "rpc_notification" or "rpc_response", message)
 
   if message.method and not message.id then

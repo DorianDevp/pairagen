@@ -87,6 +87,7 @@ function M.setup(opts)
     group = group,
     callback = function()
       vim.schedule(function()
+        ui.cleanup_deferred()
         if state.card and state.session_id and not state.thinking_request_id then
           card.show(state.card)
         end
@@ -339,6 +340,11 @@ function M.reply(text)
 
   if state.card and state.card.kind == "working" then
     state.cancelled_turn_id = state.card.turn_id
+  end
+
+  local diff = require("loopbiotic.diff")
+  if diff.valid_preview() then
+    diff.restore_source()
   end
 
   status.hide()

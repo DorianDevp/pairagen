@@ -69,15 +69,17 @@ end
 function M.apply_turn_result(result, opts)
   opts = opts or {}
 
-  state.token_usage = result.token_usage
-  state.turn_token_usage = result.turn_token_usage
-  if opts.update_model ~= false then
-    state.backend_model = result.model or state.backend_model
+  state.token_usage = type(result.token_usage) == "table" and result.token_usage or nil
+  state.turn_token_usage = type(result.turn_token_usage) == "table" and result.turn_token_usage or nil
+  if opts.update_model ~= false and type(result.model) == "string" then
+    state.backend_model = result.model
   end
-  state.context_report = result.context_report
-  log.event("context_optimization", result.context_report or {})
-  log.event("agent_attempts", result.attempts or {})
-  state.goal = result.goal or state.goal
+  state.context_report = type(result.context_report) == "table" and result.context_report or nil
+  log.event("context_optimization", state.context_report or {})
+  log.event("agent_attempts", type(result.attempts) == "table" and result.attempts or {})
+  if type(result.goal) == "table" then
+    state.goal = result.goal
+  end
   if opts.track_backend_error == false then
     state.last_backend_error = nil
     state.backend_preflight_error = nil
@@ -87,7 +89,9 @@ function M.apply_turn_result(result, opts)
   if result.card and result.card.kind ~= "working" then
     state.cancelled_turn_id = nil
   end
-  require("loopbiotic.card").show(result.card)
+  if type(result.card) == "table" then
+    require("loopbiotic.card").show(result.card)
+  end
 end
 
 return M

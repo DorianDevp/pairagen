@@ -31,6 +31,12 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Resuming an already-visible action card now moves focus into its window,
   and patch action cards register every configured shortcut they display
   (accept, reject, retry, why, and go-to) in addition to their single-key aliases.
+- Working cards tolerate protocol `null` metadata instead of failing while
+  rendering their token footer. Sending a message while a draft is open now
+  restores the source and abandons the preview before conversation starts;
+  tab navigation never starts from a float, and background-tab action floats
+  are closed only after their tab becomes current, avoiding a Neovim tabline
+  use-after-free.
 - Mechanical model diff wrappers are normalized before validation: CRLF line
   endings, markdown fences, matching git headers, and unambiguous `./`, `a/`,
   or `b/` path prefixes. Prose, rename/copy metadata, unmatched fences, and

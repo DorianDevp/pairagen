@@ -2,6 +2,18 @@ local config = require("loopbiotic.config")
 
 local M = {}
 local resize_group = vim.api.nvim_create_augroup("LoopbioticFloatViewport", { clear = true })
+local deferred_closes = {}
+
+local function normal_window(tab)
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
+    local ok, win_config = pcall(vim.api.nvim_win_get_config, win)
+    if ok and win_config.relative == "" then
+      return win
+    end
+  end
+
+  return nil
+end
 
 function M.setup_highlights()
   local highlights = {
@@ -19,8 +31,44 @@ function M.setup_highlights()
 end
 
 function M.close(win)
-  if win and vim.api.nvim_win_is_valid(win) then
-    vim.api.nvim_win_close(win, true)
+  if not win then
+    return true
+  end
+  if not vim.api.nvim_win_is_valid(win) then
+    deferred_closes[win] = nil
+    return true
+  end
+
+  local tab = vim.api.nvim_win_get_tabpage(win)
+  if tab ~= vim.api.nvim_get_current_tabpage() then
+    -- Closing a focused float from another tab can leave tp_curwin pointing
+    -- at freed memory in Neovim 0.12. Hide it now and close it when that tab
+    -- becomes current, after first selecting a normal editor window.
+    deferred_closes[win] = true
+    pcall(vim.api.nvim_win_set_config, win, { hide = true })
+    return false
+  end
+
+  if vim.api.nvim_get_current_win() == win then
+    local normal = normal_window(tab)
+    if not normal then
+      return false
+    end
+    vim.api.nvim_set_current_win(normal)
+  end
+
+  deferred_closes[win] = nil
+  return pcall(vim.api.nvim_win_close, win, true)
+end
+
+function M.cleanup_deferred()
+  local current_tab = vim.api.nvim_get_current_tabpage()
+  for win in pairs(deferred_closes) do
+    if not vim.api.nvim_win_is_valid(win) then
+      deferred_closes[win] = nil
+    elseif vim.api.nvim_win_get_tabpage(win) == current_tab then
+      M.close(win)
+    end
   end
 end
 

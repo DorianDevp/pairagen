@@ -39,4 +39,42 @@ return function(t)
     vim.cmd("bwipeout!")
     vim.fn.delete(file)
   end)
+
+  t.test("tab navigation leaves the origin tab on a normal window", function()
+    local config = require("loopbiotic.config")
+    local ui = require("loopbiotic.ui")
+    local previous_open = config.values.navigation.open
+    local file = vim.fn.tempname() .. ".ts"
+    vim.fn.writefile({ "export const answer = 42;" }, file)
+
+    local origin_tab = vim.api.nvim_get_current_tabpage()
+    local origin_win = vim.api.nvim_get_current_win()
+    local float_buf, float_win = ui.float({ "Focused action card" }, { enter = true })
+    config.values.navigation.open = "tab"
+
+    local ok, err = pcall(function()
+      t.eq(navigation.open_location({ file = file, line = 1, column = 1 }), true)
+      t.eq(vim.api.nvim_get_current_tabpage() ~= origin_tab, true, "opened another tab")
+      t.eq(vim.api.nvim_tabpage_get_win(origin_tab), origin_win, "origin current window")
+      t.eq(vim.api.nvim_win_is_valid(float_win), true, "float remains valid")
+    end)
+
+    ui.close(float_win)
+    vim.api.nvim_set_current_tabpage(origin_tab)
+    ui.cleanup_deferred()
+    vim.cmd("tabonly")
+    if vim.api.nvim_buf_is_valid(float_buf) then
+      vim.api.nvim_buf_delete(float_buf, { force = true })
+    end
+    local target_buf = vim.fn.bufnr(file)
+    if target_buf >= 0 and vim.api.nvim_buf_is_valid(target_buf) then
+      vim.api.nvim_buf_delete(target_buf, { force = true })
+    end
+    vim.fn.delete(file)
+    config.values.navigation.open = previous_open
+
+    if not ok then
+      error(err, 0)
+    end
+  end)
 end
