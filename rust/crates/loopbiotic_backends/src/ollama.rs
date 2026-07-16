@@ -4,7 +4,7 @@ use loopbiotic_protocol::{BackendInfo, Card, TokenUsage};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::support::{error_card, optional_env, report_progress};
+use crate::support::{error_card, optional_env, report_progress, turn_timeout_from_env};
 use crate::{
     BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, ProgressReporter,
     enforce_card_contract, estimate_tokens,
@@ -51,11 +51,17 @@ impl OllamaBackend {
         model: impl Into<String>,
         keep_alive: impl Into<String>,
     ) -> Self {
+        // There is no child process to kill here, so a hung Ollama server is
+        // bounded by the same turn deadline the process backends use.
+        let mut builder = reqwest::Client::builder();
+        if let Some(limit) = turn_timeout_from_env() {
+            builder = builder.timeout(limit);
+        }
         Self {
             host: host.into().trim_end_matches('/').to_string(),
             model: model.into(),
             keep_alive: keep_alive.into(),
-            client: reqwest::Client::new(),
+            client: builder.build().unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
