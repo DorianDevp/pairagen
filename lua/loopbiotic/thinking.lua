@@ -38,9 +38,13 @@ function M.start(label, session_id)
   end, { buffer = state.thinking_buf, nowait = true, silent = true })
 
   state.thinking_timer = uv.new_timer()
-  state.thinking_timer:start(0, config.values.thinking.interval, vim.schedule_wrap(function()
-    M.tick(request_id)
-  end))
+  state.thinking_timer:start(
+    0,
+    config.values.thinking.interval,
+    vim.schedule_wrap(function()
+      M.tick(request_id)
+    end)
+  )
 
   return request_id
 end

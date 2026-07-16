@@ -1,5 +1,11 @@
 local M = {}
 
+---@class LoopbioticHunk
+---@field old_start integer 1-based first source line of the hunk
+---@field old_len integer source line count claimed by the header
+---@field lines { kind: "context"|"remove"|"add", text: string }[]
+---@field old_lines string[] context and removed lines, in order
+
 -- Two lines match if they are equal ignoring leading/trailing whitespace.
 -- Mirrors the daemon's tolerant patch matching so a hunk whose context drifted
 -- on indentation still applies against the live buffer.
@@ -7,6 +13,10 @@ local function line_matches(a, b)
   return vim.trim(a or "") == vim.trim(b or "")
 end
 
+-- Apply a backend file patch to its (possibly newly opened) buffer.
+---@param file_patch { file: string, diff: string }
+---@return boolean ok
+---@return string|nil error
 function M.patch(file_patch)
   local buf = M.buffer(file_patch.file)
 
@@ -28,6 +38,9 @@ function M.patch(file_patch)
   return true, nil
 end
 
+-- Find the loaded buffer editing a file, if any.
+---@param file string
+---@return integer|nil buf
 function M.buffer(file)
   local target = vim.fn.fnamemodify(file, ":p")
 
@@ -40,6 +53,11 @@ function M.buffer(file)
   return nil
 end
 
+-- Apply a single-hunk unified diff to source lines. Errors when the hunk
+-- cannot be parsed or its context no longer matches.
+---@param source string[]
+---@param diff string
+---@return string[] output
 function M.apply_diff(source, diff)
   local hunk = M.parse_hunk(diff)
   if hunk.old_len == 0 and #source == 1 and source[1] == "" then
@@ -69,6 +87,9 @@ function M.apply_diff(source, diff)
   return output
 end
 
+-- Parse a unified diff that must contain exactly one hunk. Errors otherwise.
+---@param diff string
+---@return LoopbioticHunk
 function M.parse_hunk(diff)
   local hunk = { old_start = nil, old_len = nil, lines = {}, old_lines = {} }
 
@@ -108,6 +129,12 @@ function M.parse_hunk(diff)
   return hunk
 end
 
+-- Locate where the hunk applies: the header position when it still matches,
+-- otherwise the unique whitespace-tolerant match. Errors when the context is
+-- missing or ambiguous.
+---@param source string[]
+---@param hunk LoopbioticHunk
+---@return integer offset 0-based line offset the hunk applies at
 function M.resolve_start(source, hunk)
   if hunk.old_len == 0 then
     if #source == 0 or (#source == 1 and source[1] == "") then
@@ -138,6 +165,11 @@ function M.resolve_start(source, hunk)
   return matches[1]
 end
 
+-- Whether expected lines match source at a 0-based offset (whitespace-tolerant).
+---@param source string[]
+---@param start integer
+---@param expected string[]
+---@return boolean
 function M.matches_at(source, start, expected)
   for index, line in ipairs(expected) do
     if not line_matches(source[start + index], line) then

@@ -1,0 +1,5 @@
+std = "vim"
+
+[rules]
+# Card and config tables legitimately mix array and keyed parts.
+mixed_table = "allow"

@@ -1,5 +1,40 @@
 local M = {}
 
+---@class LoopbioticBackendConfig
+---@field command string|nil explicit loopbioticd path; nil resolves/installs one
+---@field args string[]
+---@field mode string default prompt mode ("auto", "fix", "explain", ...)
+---@field agent string key into LoopbioticConfig.agents
+---@field prefetch "off"|"fix" speculative patch prefetch
+---@field token_budget integer ask before another turn past this session total; 0 disables
+
+---@class LoopbioticAgentConfig
+---@field kind "mock"|"agent"|"codex_app"|"claude_app"|"ollama"|"generic"
+---@field command? string
+---@field args? string[]
+---@field model? string
+---@field model_flag? string
+---@field models? string[]
+---@field effort? string codex_app only
+---@field discovery_model? string claude_app only
+---@field discovery_thinking? integer claude_app only
+---@field host? string ollama only
+---@field keep_alive? string ollama only
+
+---@class LoopbioticConfig
+---@field backend LoopbioticBackendConfig
+---@field distribution { repository?: string, base_url?: string, auto_install?: boolean, version?: string }
+---@field logging { enabled: boolean, include_content: boolean, max_files: integer }
+---@field agents table<string, LoopbioticAgentConfig>
+---@field keymaps table<string, string>
+---@field prompt { border: string, width: integer, height: integer, padding_x: integer, padding_y: integer, zindex: integer }
+---@field card { border: string, max_width: integer, max_height: integer }
+---@field thinking { enabled: boolean, interval: integer }
+---@field context table context capture limits, optimization policy, and LSP hint options
+---@field navigation { open: "current"|"tab"|"split"|"vsplit", annotate: boolean }
+---@field diff { layout: string, apply_to_buffer: boolean, max_changed_lines: integer }
+
+---@type LoopbioticConfig
 M.values = {
   backend = {
     command = nil,
@@ -348,9 +383,7 @@ function M.agent_env(agent)
       LOOPBIOTIC_CLAUDE_ARGS_JSON = vim.json.encode(args),
       LOOPBIOTIC_CLAUDE_MODEL = agent.model or "",
       LOOPBIOTIC_CLAUDE_DISCOVERY_MODEL = agent.discovery_model or "",
-      LOOPBIOTIC_CLAUDE_DISCOVERY_THINKING = agent.discovery_thinking
-          and tostring(agent.discovery_thinking)
-        or "",
+      LOOPBIOTIC_CLAUDE_DISCOVERY_THINKING = agent.discovery_thinking and tostring(agent.discovery_thinking) or "",
     }
   end
 

@@ -61,7 +61,8 @@ function M.render(buf, win, lines, opts)
   opts = opts or {}
   lines = M.lines(lines)
 
-  if win
+  if
+    win
     and vim.api.nvim_win_is_valid(win)
     and vim.api.nvim_win_get_tabpage(win) ~= vim.api.nvim_get_current_tabpage()
   then
