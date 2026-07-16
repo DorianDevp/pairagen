@@ -1,4 +1,7 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+use loopbiotic_protocol::ViolationClass;
+
+use crate::violation::violation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnifiedDiff {
@@ -49,7 +52,13 @@ impl UnifiedDiff {
             }
 
             let Some(hunk) = current.as_mut() else {
-                continue;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                return Err(violation(
+                    ViolationClass::MalformedDiff,
+                    format!("unexpected content before first diff hunk: {line}"),
+                ));
             };
 
             if let Some(text) = line.strip_prefix(' ') {
@@ -61,7 +70,10 @@ impl UnifiedDiff {
             } else if line == "\\ No newline at end of file" {
                 continue;
             } else {
-                return Err(anyhow!("invalid diff line {line}"));
+                return Err(violation(
+                    ViolationClass::MalformedDiff,
+                    format!("invalid diff line {line}"),
+                ));
             }
         }
 
@@ -70,7 +82,10 @@ impl UnifiedDiff {
         }
 
         if hunks.is_empty() {
-            return Err(anyhow!("diff has no hunks"));
+            return Err(violation(
+                ViolationClass::MalformedDiff,
+                "diff has no hunks",
+            ));
         }
 
         Ok(Self { hunks })
@@ -104,7 +119,10 @@ fn parse_hunk(line: &str) -> Result<Hunk> {
     let parts = line.split_whitespace().collect::<Vec<_>>();
 
     if parts.len() < 3 {
-        return Err(anyhow!("invalid hunk header"));
+        return Err(violation(
+            ViolationClass::MalformedDiff,
+            "invalid hunk header",
+        ));
     }
 
     let (old_start, old_len) = parse_range(parts[1], '-')?;
@@ -122,13 +140,18 @@ fn parse_hunk(line: &str) -> Result<Hunk> {
 fn parse_range(value: &str, prefix: char) -> Result<(usize, usize)> {
     let value = value
         .strip_prefix(prefix)
-        .ok_or_else(|| anyhow!("invalid hunk range"))?;
+        .ok_or_else(|| violation(ViolationClass::MalformedDiff, "invalid hunk range"))?;
     let mut parts = value.split(',');
     let start = parts
         .next()
-        .ok_or_else(|| anyhow!("missing range start"))?
-        .parse()?;
-    let len = parts.next().unwrap_or("1").parse()?;
+        .ok_or_else(|| violation(ViolationClass::MalformedDiff, "missing range start"))?
+        .parse()
+        .map_err(|_| violation(ViolationClass::MalformedDiff, "invalid hunk range start"))?;
+    let len = parts
+        .next()
+        .unwrap_or("1")
+        .parse()
+        .map_err(|_| violation(ViolationClass::MalformedDiff, "invalid hunk range length"))?;
 
     Ok((start, len))
 }
@@ -144,5 +167,18 @@ mod tests {
 
         assert_eq!(parsed.hunks.len(), 1);
         assert_eq!(parsed.hunks[0].old_start, 1);
+    }
+
+    #[test]
+    fn rejects_unhandled_content_before_the_first_hunk() {
+        let error =
+            UnifiedDiff::parse("--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n")
+                .unwrap_err();
+
+        assert_eq!(
+            crate::violation_class(&error),
+            Some(ViolationClass::MalformedDiff)
+        );
+        assert!(error.to_string().contains("before first diff hunk"));
     }
 }

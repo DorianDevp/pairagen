@@ -396,7 +396,12 @@ async fn converts_bad_patch_to_error_card() {
         panic!("expected error card");
     };
 
-    assert!(card.message.contains("diff has no hunks"));
+    assert!(
+        card.message
+            .contains("unexpected content before first diff hunk")
+    );
+    assert!(result.attempts.iter().all(|attempt| attempt.violation_class
+        == Some(loopbiotic_protocol::ViolationClass::MalformedDiff)));
 
     let retry = engine
         .action(&start.session_id, Action::Retry)
@@ -432,7 +437,12 @@ async fn repairs_invalid_patch_before_showing_it_to_user() {
     );
     assert!(result.attempts[0].candidate_card.is_some());
     assert_eq!(result.attempts[0].token_usage.total_tokens, 15);
+    assert_eq!(
+        result.attempts[0].violation_class,
+        Some(loopbiotic_protocol::ViolationClass::ContextMismatch)
+    );
     assert_eq!(result.attempts[1].outcome, "accepted");
+    assert_eq!(result.attempts[1].violation_class, None);
     assert_eq!(result.turn_token_usage.total_tokens, 30);
 }
 
@@ -450,6 +460,8 @@ async fn preserves_wrong_card_type_and_raw_backend_output_for_fix() {
     assert!(card.message.contains("expected patch card"));
     assert!(card.message.contains("Received card kind: Finding"));
     assert!(card.message.contains("raw finding from backend"));
+    assert!(result.attempts.iter().all(|attempt| attempt.violation_class
+        == Some(loopbiotic_protocol::ViolationClass::KindMismatch)));
 
     let retry = engine
         .action(&start.session_id, Action::Retry)
@@ -495,6 +507,7 @@ async fn start_returns_typed_card_when_backend_fails() {
     assert!(card.message.contains("backend unavailable"));
     assert_eq!(result.turn_token_usage, Default::default());
     assert_eq!(result.attempts[0].outcome, "backend_error");
+    assert_eq!(result.attempts[0].violation_class, None);
     assert!(
         result.attempts[0]
             .detail
@@ -523,8 +536,13 @@ async fn retains_duplicate_observations_without_showing_them_again() {
     assert_eq!(card.annotation, None);
     assert_eq!(result.attempts.len(), 2);
     assert_eq!(result.attempts[0].outcome, "duplicate_retry");
+    assert_eq!(
+        result.attempts[0].violation_class,
+        Some(loopbiotic_protocol::ViolationClass::DuplicateStep)
+    );
     assert!(result.attempts[0].candidate_card.is_some());
     assert_eq!(result.attempts[1].outcome, "accepted");
+    assert_eq!(result.attempts[1].violation_class, None);
 
     let observations = &engine.get(&start.session_id).unwrap().known_observations;
     assert_eq!(observations.len(), 3);

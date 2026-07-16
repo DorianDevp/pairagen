@@ -67,6 +67,20 @@ return function(t)
     t.eq(tag, "ok")
   end)
 
+  t.test("attempt logs keep violation classes while redacting contract content", function()
+    local sanitized = require("loopbiotic.log").sanitize({
+      outcome = "contract_retry",
+      violation_class = "context_mismatch",
+      detail = "private source line",
+      candidate_card = { explanation = "private patch" },
+    })
+
+    t.eq(sanitized.outcome, "contract_retry", "outcome")
+    t.eq(sanitized.violation_class, "context_mismatch", "violation class")
+    t.eq(sanitized.detail.redacted, true, "detail redacted")
+    t.eq(sanitized.candidate_card.redacted, true, "candidate redacted")
+  end)
+
   t.test("repeated_error escalates only on identical consecutive messages", function()
     t.eq(session.repeated_error(nil, "boom"), false, "first error")
     t.eq(session.repeated_error("boom", "boom"), true, "same error twice")

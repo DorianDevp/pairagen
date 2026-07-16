@@ -4,10 +4,12 @@
 
 use anyhow::{Result, anyhow};
 use loopbiotic_backends::{BackendAction, BackendProgress, BackendResponse, ProgressReporter};
-use loopbiotic_patch::{PatchCoherence, PatchNormalizer, PatchValidator};
+use loopbiotic_patch::{
+    PatchCoherence, PatchNormalizer, PatchValidator, violation, violation_class,
+};
 use loopbiotic_protocol::{
     Action, AgentAttempt, Card, ContextBundle, ErrorCard, MAX_GOAL_CHANGED_LINES,
-    MAX_GOAL_HUNKS_PER_PATCH, MAX_GOAL_PATCH_FILES, TokenUsage,
+    MAX_GOAL_HUNKS_PER_PATCH, MAX_GOAL_PATCH_FILES, TokenUsage, ViolationClass,
 };
 
 use crate::session::Session;
@@ -61,6 +63,7 @@ impl Engine {
                         outcome: "backend_error".into(),
                         token_usage: TokenUsage::default(),
                         detail: Some(detail),
+                        violation_class: None,
                         candidate_card: None,
                         activities: vec![],
                     });
@@ -99,6 +102,7 @@ impl Engine {
                             "location_granted",
                             Some(request.location.file.display().to_string()),
                             attempt_usage,
+                            None,
                             false,
                         ));
                         session.context = granted.clone();
@@ -115,6 +119,7 @@ impl Engine {
                     "location_declined",
                     Some(request.location.file.display().to_string()),
                     attempt_usage,
+                    None,
                     false,
                 ));
                 response.card = Card::Deny(loopbiotic_protocol::DenyCard {
@@ -143,6 +148,7 @@ impl Engine {
                     },
                     Some(reason.clone()),
                     attempt_usage,
+                    Some(ViolationClass::DuplicateStep),
                     true,
                 ));
                 if attempt < 2 {
@@ -178,6 +184,7 @@ impl Engine {
                     },
                     Some(reason.clone()),
                     attempt_usage,
+                    Some(ViolationClass::DuplicateStep),
                     true,
                 ));
                 if attempt < 2 {
@@ -211,6 +218,7 @@ impl Engine {
             }
             .map(|()| PatchCoherence::annotate(&mut candidate));
             if let Err(error) = validation {
+                let class = violation_class(&error).unwrap_or(ViolationClass::Other);
                 let detail = error.to_string();
                 attempts.push(agent_attempt(
                     attempt + 1,
@@ -222,6 +230,7 @@ impl Engine {
                     },
                     Some(detail.clone()),
                     attempt_usage,
+                    Some(class),
                     true,
                 ));
                 if attempt < 2 {
@@ -259,6 +268,7 @@ impl Engine {
                 "accepted",
                 None,
                 attempt_usage,
+                None,
                 false,
             ));
             response.metadata.token_usage = token_usage;
@@ -304,7 +314,10 @@ impl Engine {
             // Guarded by the `matches!` early return above; degrade to a
             // contract failure (retry/rejected card) instead of panicking if
             // that guard ever drifts.
-            return Err(anyhow!("goal batch candidate is no longer a patch card"));
+            return Err(violation(
+                ViolationClass::IncoherentBatch,
+                "goal batch candidate is no longer a patch card",
+            ));
         };
 
         for index in 0..card.patches.len() {
@@ -316,13 +329,21 @@ impl Engine {
             } else {
                 None
             }
-            .ok_or_else(|| anyhow!("editor source is unavailable for {}", file.display()))?;
+            .ok_or_else(|| {
+                violation(
+                    ViolationClass::IncoherentBatch,
+                    format!("editor source is unavailable for {}", file.display()),
+                )
+            })?;
 
             if !context_targets(&source, &file) {
-                return Err(anyhow!(
-                    "editor returned {} while validating {}",
-                    source.file.display(),
-                    file.display()
+                return Err(violation(
+                    ViolationClass::IncoherentBatch,
+                    format!(
+                        "editor returned {} while validating {}",
+                        source.file.display(),
+                        file.display()
+                    ),
                 ));
             }
 
@@ -337,20 +358,26 @@ impl Engine {
                 actions: card.actions.clone(),
             });
             PatchNormalizer::normalize_card(&mut single, &source)
-                .map_err(|error| anyhow!("{}: {error}", file.display()))?;
+                .map_err(|error| error.context(file.display().to_string()))?;
             PatchValidator::validate_card_against_context(&single, &source)
-                .map_err(|error| anyhow!("{}: {error}", file.display()))?;
+                .map_err(|error| error.context(file.display().to_string()))?;
 
             let Card::Patch(single) = single else {
                 // Constructed as a patch card just above and normalization
                 // never changes the card kind; degrade instead of panicking.
-                return Err(anyhow!(
-                    "{}: patch normalization changed the card kind",
-                    file.display()
+                return Err(violation(
+                    ViolationClass::IncoherentBatch,
+                    format!(
+                        "{}: patch normalization changed the card kind",
+                        file.display()
+                    ),
                 ));
             };
             card.patches[index] = single.patches.into_iter().next().ok_or_else(|| {
-                anyhow!("{}: patch normalization dropped the hunk", file.display())
+                violation(
+                    ViolationClass::IncoherentBatch,
+                    format!("{}: patch normalization dropped the hunk", file.display()),
+                )
             })?;
         }
 
@@ -364,6 +391,7 @@ fn agent_attempt(
     outcome: &str,
     detail: Option<String>,
     token_usage: TokenUsage,
+    violation_class: Option<ViolationClass>,
     include_candidate: bool,
 ) -> AgentAttempt {
     AgentAttempt {
@@ -372,6 +400,7 @@ fn agent_attempt(
         outcome: outcome.into(),
         token_usage,
         detail,
+        violation_class,
         candidate_card: include_candidate.then(|| response.card.clone()),
         activities: response.metadata.activities.clone(),
     }
