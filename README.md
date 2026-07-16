@@ -327,7 +327,7 @@ Choosing `Fix` on a card first moves the source context to the card's
 The patch agent therefore receives the recommended consumer or template instead
 of the file where discovery happened.
 
-The future optional classical-ML ranking design is documented in [`ml.md`](ml.md).
+The future optional classical-ML ranking design is documented in [`doc/ml.md`](doc/ml.md).
 The current implementation does not train or run an ML model.
 
 ## Commands
