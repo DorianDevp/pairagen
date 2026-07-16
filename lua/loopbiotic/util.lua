@@ -31,6 +31,21 @@ function M.observation_node(observation, index)
   return string.format("[%s%d%s%s]", kind, index, active, repeats)
 end
 
+-- Clamp a 1-indexed line / 0-indexed column pair to positions that exist in
+-- buf, so it is always safe to pass to nvim_win_set_cursor. Card locations
+-- come from the agent and draft cursors are computed against post-apply
+-- content, so both can point past the end of the real buffer (for example a
+-- hunk that appends to a one-line barrel file).
+---@param buf integer
+---@param line integer|nil
+---@param column integer|nil
+---@return integer[] pos { line, column }
+function M.clamp_cursor(buf, line, column)
+  local count = vim.api.nvim_buf_line_count(buf)
+
+  return { math.min(math.max(line or 1, 1), math.max(count, 1)), math.max(column or 0, 0) }
+end
+
 -- Whether file lies inside root (default: the current working directory).
 -- Symlinks are resolved when the paths exist.
 ---@param file string|nil

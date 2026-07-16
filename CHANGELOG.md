@@ -8,6 +8,10 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Navigating to a card or draft no longer throws "Cursor position outside
+  buffer" when the target line does not exist yet — for example a patch hunk
+  that appends to the end of a short file, or an agent-supplied location past
+  the end of the buffer. Cursor targets are now clamped to the real buffer.
 - Backend turns now run under a configurable deadline
   (`LOOPBIOTIC_TURN_TIMEOUT_SECS`, default 600, `0` disables). A wedged agent
   CLI is killed and respawned on the next turn instead of hanging the session

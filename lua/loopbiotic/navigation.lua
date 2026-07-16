@@ -85,13 +85,13 @@ function M.open_location(location)
     vim.cmd("edit " .. vim.fn.fnameescape(file))
   end
 
-  local line = location.line or 1
-  local column = location.column or 1
+  local buf = vim.api.nvim_get_current_buf()
+  local pos = util.clamp_cursor(buf, location.line, (location.column or 1) - 1)
 
-  vim.api.nvim_win_set_cursor(0, { line, math.max(column - 1, 0) })
-  state.source_buf = vim.api.nvim_get_current_buf()
-  state.source_cursor = { line, math.max(column - 1, 0) }
-  extmarks.annotate(0, line, location.annotation)
+  vim.api.nvim_win_set_cursor(0, pos)
+  state.source_buf = buf
+  state.source_cursor = pos
+  extmarks.annotate(0, pos[1], location.annotation)
   vim.cmd("normal! zz")
 
   return true

@@ -419,8 +419,10 @@ function M.go_to()
   if state.source_buf and vim.api.nvim_buf_is_valid(state.source_buf) then
     local win = context.buffer_window(state.source_buf)
     if win then
+      local cursor = state.source_cursor or { 1, 0 }
       vim.api.nvim_set_current_win(win)
-      vim.api.nvim_win_set_cursor(win, state.source_cursor or { 1, 0 })
+      -- The buffer may have shrunk since the position was captured.
+      vim.api.nvim_win_set_cursor(win, util.clamp_cursor(state.source_buf, cursor[1], cursor[2]))
       vim.cmd("normal! zz")
       return
     end
