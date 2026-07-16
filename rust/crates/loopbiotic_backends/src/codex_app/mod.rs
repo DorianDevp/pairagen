@@ -405,6 +405,12 @@ impl BackendAdapter for CodexAppBackend {
     }
 }
 
+/// Opens every turn prompt. A `const` so it can never interpolate volatile
+/// data: it anchors the byte-stable prefix the provider prompt cache keys on.
+const PROMPT_STATIC_HEADER: &str = "Return exactly one JSON Loopbiotic op. No markdown. No prose.
+Patch file paths must be relative.
+";
+
 fn prompt(req: &BackendRequest, include_context: bool) -> String {
     let patch_turn = turn_phase(req) == Phase::Patch;
     let goal_loop = req.card_contract.allow_goal_completion;
@@ -512,21 +518,24 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
         "Source context is unchanged from the preceding turn in this Loopbiotic thread. Reuse that exact buffer and ranked project context.".into()
     };
 
+    // Block order is byte-order for the provider prompt cache: the static
+    // header first, then the turn-kind-stable contract and rules, then the
+    // session-stable block, and the volatile per-turn data last. Everything
+    // above the "Required card kind" line must stay free of per-turn values.
     format!(
-        r#"Return exactly one JSON Loopbiotic op. No markdown. No prose.
-
+        r#"{PROMPT_STATIC_HEADER}
 Allowed ops:
 {output_contract}
 
 Rules:
-- Required card kind: {expected_kind}. Return that exact kind.
-- Patch file paths must be relative.
 {turn_rules}
 
 Session prompt: {prompt}
+Mode: {mode}
+
+Required card kind: {expected_kind}. Return that exact kind.
 Completed local steps: {completed_steps}
 Known findings and signals (do not repeat): {known_observations}
-Mode: {mode}
 Action: {action}
 Last card: {last}
 {source_context}"#,
@@ -655,6 +664,64 @@ mod tests {
         assert_eq!(identity.backend, "codex_app");
         assert_eq!(identity.model.as_deref(), Some("gpt-5.3-codex"));
         assert!(identity.models.is_empty());
+    }
+
+    #[test]
+    fn prompt_keeps_a_stable_prefix_across_turns_of_one_session() {
+        let turn_a = request();
+        let mut turn_b = request();
+        turn_b.action = BackendAction::User(Action::Follow);
+        turn_b
+            .session
+            .completed_steps
+            .push("renamed the helper".into());
+        turn_b
+            .session
+            .known_observations
+            .push("the guard drops zero".into());
+        turn_b.session.card_count = 3;
+        turn_b.session.last_summary = Some("Renamed the helper".into());
+        turn_b.context.buffer_text = "changed source payload".into();
+        turn_b.context.cursor.line = 12;
+
+        let a = prompt(&turn_a, true);
+        let b = prompt(&turn_b, true);
+
+        // The static header, the turn-kind-stable contract and rules, and the
+        // session-stable block must stay byte-identical between turns of the
+        // same kind; volatile data may only start at the required-kind line.
+        let stable_block_len = a.find("Required card kind").expect("kind line present");
+        assert_eq!(Some(stable_block_len), b.find("Required card kind"));
+        let shared = crate::common_prefix_len(&a, &b);
+        assert!(
+            shared >= stable_block_len,
+            "volatile bytes leaked into the stable prefix: shared {shared} < stable {stable_block_len}\nA: {a}\nB: {b}"
+        );
+    }
+
+    #[test]
+    fn prompt_static_block_is_stable_across_sessions() {
+        let session_a = request();
+        let mut session_b = request();
+        session_b.session.id = "s_9".into();
+        session_b.session.prompt = "add retry logic to the fetcher".into();
+        session_b.action = BackendAction::User(Action::Follow);
+        session_b.context.buffer_text = "other payload".into();
+
+        let a = prompt(&session_a, true);
+        let b = prompt(&session_b, true);
+
+        // Everything before the session block — the static header plus the
+        // turn-kind-stable contract and rules — must be byte-identical across
+        // sessions running the same turn kind.
+        assert!(a.starts_with(PROMPT_STATIC_HEADER));
+        let static_block_len = a.find("Session prompt:").expect("session line present");
+        assert_eq!(Some(static_block_len), b.find("Session prompt:"));
+        let shared = crate::common_prefix_len(&a, &b);
+        assert!(
+            shared >= static_block_len,
+            "session bytes leaked into the static block: shared {shared} < static {static_block_len}"
+        );
     }
 
     #[test]

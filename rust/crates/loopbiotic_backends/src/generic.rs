@@ -63,6 +63,10 @@ impl GenericCliBackend {
     }
 }
 
+/// The op contract sent on every turn. A `const` so it can never interpolate
+/// volatile data: it opens the prompt and anchors the provider prompt cache.
+const GENERIC_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. Outside goal completion, return open_location when the change belongs in a different file than the supplied buffer. Goal slices may patch any file inspected with read-only tools. error is only for technical failures. limits.expected, when set, is the required op (deny always allowed; choice also allowed for hypothesis/finding); when null, choose the best fitting op and ask via choice when ambiguous. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.";
+
 pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     let mut rules = vec![
         json!(
@@ -81,6 +85,8 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
             "Explain why the next coherent block matters and return control to the user after that step."
         ),
     ];
+    // Goal rules append after the static base so the shared byte prefix of
+    // the rules array survives across goal and non-goal turns.
     if req.card_contract.allow_goal_completion {
         rules.push(json!(
             "Goal turn: return exactly one file's complete patch per response — the most foundational unresolved file first — plus plan {remaining:[{file,summary}],complete}. Set plan.complete true only on the final slice; remaining is then empty. Use up to limits.hunks_per_patch hunks and limits.changed_lines per hunk for that one file; Loopbiotic verifies and reviews the slice locally, then asks for the next planned slice."
@@ -92,9 +98,18 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
             "If limits.goal_completion is true and limits.expected is finding, explain why the pending hunk is the right next step without replacing it or advancing the goal."
         ));
     }
-    let value = json!({
-            "api": "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. Outside goal completion, return open_location when the change belongs in a different file than the supplied buffer. Goal slices may patch any file inspected with read-only tools. error is only for technical failures. limits.expected, when set, is the required op (deny always allowed; choice also allowed for hypothesis/finding); when null, choose the best fitting op and ask via choice when ambiguous. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
-            "stream": {
+
+    // Field order is byte-order: static contract first, session-stable next,
+    // volatile per-turn data last, so a provider prompt cache can reuse the
+    // longest possible prefix between one-shot requests. `ordered_json_object`
+    // preserves this order; `json!` alone would sort keys alphabetically and
+    // lead with the volatile action.
+    let fields: Vec<(&str, serde_json::Value)> = vec![
+        // Static: identical bytes across all turns and sessions.
+        ("api", json!(GENERIC_API_CONTRACT)),
+        (
+            "stream",
+            json!({
                 "protocol": "ndjson",
                 "progress": {"t": "loopbiotic_progress", "phase": "short phase", "message": "short user-visible activity summary"},
                 "result": {"t": "loopbiotic_result", "result": "the final Loopbiotic op JSON object"},
@@ -103,31 +118,42 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
                     "Progress messages must be concise user-visible summaries of work, never hidden reasoning or private chain-of-thought.",
                     "The final output may instead be a raw Loopbiotic op for backwards compatibility."
                 ]
-            },
-            "rules": rules,
-            "limits": {
+            }),
+        ),
+        ("rules", serde_json::Value::Array(rules)),
+        // Session-stable: identical bytes on every turn of one session.
+        (
+            "s",
+            json!({
+                "id": req.session.id,
+                "mode": req.session.mode,
+                "p": req.session.prompt,
+            }),
+        ),
+        // Turn-kind-stable: constant across all turns of the same kind.
+        (
+            "limits",
+            json!({
                 "one": req.card_contract.one_card_only,
                 "max": req.card_contract.max_body_chars,
                 "patch_files": req.card_contract.max_patch_files,
                 "hunks_per_patch": req.card_contract.max_hunks_per_patch,
                 "changed_lines": req.card_contract.max_changed_lines,
                 "goal_completion": req.card_contract.allow_goal_completion,
-                "expected": req.card_contract.expected_kind
-            },
-            "s": {
-                "id": req.session.id,
-                "p": req.session.prompt,
-                "completed_steps": req.session.completed_steps,
-                "known_observations": req.session.known_observations,
-                "mode": req.session.mode,
-                "n": req.session.card_count,
-                "last": req.session.last_summary
-            },
-        "a": action_value(&req.action),
-        "ctx": crate::backend_context(&req.context)
-    });
+                "expected": req.card_contract.expected_kind,
+            }),
+        ),
+        // Append-only within a session.
+        ("completed_steps", json!(req.session.completed_steps)),
+        ("known_observations", json!(req.session.known_observations)),
+        // Volatile: changes every turn.
+        ("a", action_value(&req.action)),
+        ("last", json!(req.session.last_summary)),
+        ("n", json!(req.session.card_count)),
+        ("ctx", crate::backend_context(&req.context)),
+    ];
 
-    serde_json::to_string(&value).unwrap_or_default()
+    crate::support::ordered_json_object(&fields)
 }
 
 #[async_trait]
@@ -375,6 +401,63 @@ mod tests {
         assert!(goal.contains("exactly one file's complete patch"));
         assert!(goal.contains("plan {remaining:[{file,summary}],complete}"));
         assert!(goal.contains("next planned file slice"));
+    }
+
+    #[test]
+    fn generic_prompt_keeps_a_stable_prefix_across_turns_of_one_session() {
+        let turn_a = crate::test_request();
+        let mut turn_b = crate::test_request();
+        turn_b.action = crate::BackendAction::User(loopbiotic_protocol::Action::Follow);
+        turn_b
+            .session
+            .completed_steps
+            .push("renamed the helper".into());
+        turn_b
+            .session
+            .known_observations
+            .push("the guard drops zero".into());
+        turn_b.session.card_count = 4;
+        turn_b.session.last_summary = Some("Renamed the helper".into());
+        turn_b.context.buffer_text = "fn main() { changed() }".into();
+
+        let a = generic_prompt(&turn_a);
+        let b = generic_prompt(&turn_b);
+
+        // The static contract (api, stream, rules), the session-stable `s`
+        // block, and the turn-kind-stable `limits` block must stay
+        // byte-identical between turns; only the trailing per-turn data may
+        // differ, or one-shot requests lose every provider cache hit.
+        let stable_block_len = a.find("\"completed_steps\"").expect("lists present");
+        assert_eq!(Some(stable_block_len), b.find("\"completed_steps\""));
+        let shared = crate::common_prefix_len(&a, &b);
+        assert!(
+            shared >= stable_block_len,
+            "volatile bytes leaked into the stable prefix: shared {shared} < stable {stable_block_len}"
+        );
+    }
+
+    #[test]
+    fn generic_prompt_static_block_is_stable_across_sessions() {
+        let session_a = crate::test_request();
+        let mut session_b = crate::test_request();
+        session_b.session.id = "s_2".into();
+        session_b.session.prompt = "add retry logic to the fetcher".into();
+        session_b.action = crate::BackendAction::User(loopbiotic_protocol::Action::Fix);
+        session_b.context.buffer_text = "fn other() {}".into();
+
+        let a = generic_prompt(&session_a);
+        let b = generic_prompt(&session_b);
+
+        // The whole static block — everything before the session-stable `s`
+        // key — must be byte-identical across sessions of the same turn kind.
+        let static_block_len = a.find(",\"s\":{").expect("session block present");
+        assert_eq!(Some(static_block_len), b.find(",\"s\":{"));
+        let shared = crate::common_prefix_len(&a, &b);
+        assert!(
+            shared >= static_block_len,
+            "session bytes leaked into the static block: shared {shared} < static {static_block_len}"
+        );
+        assert!(a.starts_with("{\"api\":"));
     }
 
     #[test]

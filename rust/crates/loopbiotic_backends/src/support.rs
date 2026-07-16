@@ -111,6 +111,28 @@ pub(crate) fn context_fingerprint(req: &BackendRequest) -> u64 {
     hasher.finish()
 }
 
+/// Serializes `fields` as one JSON object with exactly the given key order.
+/// serde_json's default map sorts keys alphabetically, so `json!` alone cannot
+/// put stable keys first. Provider prompt caches key on byte-stable prefixes:
+/// every byte before the first difference is cacheable, so session-stable
+/// fields must serialize before every volatile byte.
+pub(crate) fn ordered_json_object(fields: &[(&str, Value)]) -> String {
+    let mut out = String::from("{");
+    for (index, (key, value)) in fields.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        // Keys are internal identifiers; values come from serde_json itself,
+        // so serialization cannot fail in practice.
+        out.push_str(&serde_json::to_string(key).unwrap_or_default());
+        out.push(':');
+        out.push_str(&serde_json::to_string(value).unwrap_or_default());
+    }
+    out.push('}');
+
+    out
+}
+
 pub(crate) fn action_value(action: &BackendAction) -> Value {
     match action {
         BackendAction::Start => json!({"kind": "start"}),
@@ -183,6 +205,21 @@ pub(crate) fn optional_env(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordered_json_object_preserves_field_order() {
+        // serde_json's default map would sort these keys as a, b, z; caching
+        // needs the caller's stable-first order to survive serialization.
+        let out = ordered_json_object(&[
+            ("z", json!({"k": 1})),
+            ("a", json!("v")),
+            ("b", json!([1, 2])),
+        ]);
+
+        assert_eq!(out, r#"{"z":{"k":1},"a":"v","b":[1,2]}"#);
+        let value: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["z"]["k"], 1);
+    }
 
     #[test]
     fn serializes_user_action_as_protocol_value() {

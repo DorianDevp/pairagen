@@ -757,46 +757,75 @@ impl BackendAdapter for ClaudeAppBackend {
 fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
     let goal_turn = req.card_contract.allow_goal_completion
         && req.card_contract.expected_kind != Some(loopbiotic_protocol::CardKind::Finding);
-    let mut value = json!({
-        "s": {
-            "id": req.session.id,
-            "p": req.session.prompt,
-            "completed_steps": req.session.completed_steps,
-            "known_observations": req.session.known_observations,
-            "mode": req.session.mode,
-            "n": req.session.card_count,
-            "last": req.session.last_summary
-        },
-        "a": action_value(&req.action),
-        "limits": {
-            "one": req.card_contract.one_card_only,
-            "max": req.card_contract.max_body_chars,
-            "patch_files": req.card_contract.max_patch_files,
-            "hunks_per_patch": req.card_contract.max_hunks_per_patch,
-            "changed_lines": req.card_contract.max_changed_lines,
-            "goal_completion": req.card_contract.allow_goal_completion,
-            "expected": req.card_contract.expected_kind
-        }
-    });
+
+    // Provider prompt caches key on byte-stable prefixes, so fields serialize
+    // stable-first: the session-stable block, then blocks that only change
+    // when the turn kind changes, then the truly per-turn data. The static
+    // contract itself lives in SYSTEM_PROMPT, which the conversation carries
+    // once per process. `ordered_json_object` preserves exactly this order;
+    // `json!` alone would sort keys alphabetically and put volatile bytes
+    // first.
+    let mut fields: Vec<(&str, Value)> = vec![
+        // Session-stable: identical bytes on every turn of one session.
+        (
+            "s",
+            json!({
+                "id": req.session.id,
+                "mode": req.session.mode,
+                "p": req.session.prompt,
+            }),
+        ),
+        // Turn-kind-stable: constant across all turns of the same kind
+        // (expected op and the goal/non-goal limit set).
+        (
+            "limits",
+            json!({
+                "one": req.card_contract.one_card_only,
+                "max": req.card_contract.max_body_chars,
+                "patch_files": req.card_contract.max_patch_files,
+                "hunks_per_patch": req.card_contract.max_hunks_per_patch,
+                "changed_lines": req.card_contract.max_changed_lines,
+                "goal_completion": req.card_contract.allow_goal_completion,
+                "expected": req.card_contract.expected_kind,
+            }),
+        ),
+    ];
 
     if goal_turn {
-        value["slice"] = json!(if matches!(
-            req.action,
-            crate::BackendAction::User(loopbiotic_protocol::Action::Next)
-        ) {
-            "Continue with the next planned file slice: one file's complete patch plus the refreshed plan."
+        fields.push((
+            "slice",
+            json!(
+                if matches!(
+                    req.action,
+                    crate::BackendAction::User(loopbiotic_protocol::Action::Next)
+                ) {
+                    "Continue with the next planned file slice: one file's complete patch plus the refreshed plan."
+                } else {
+                    "Return exactly one file's complete patch (the most foundational unresolved file first) plus plan {remaining:[{file,summary}],complete}."
+                }
+            ),
+        ));
+    }
+
+    // Append-only within a session: the serialized prefix of these lists
+    // stays byte-stable as they grow.
+    fields.push(("completed_steps", json!(req.session.completed_steps)));
+    fields.push(("known_observations", json!(req.session.known_observations)));
+
+    // Volatile: changes every turn, so it must trail everything cacheable.
+    fields.push(("a", action_value(&req.action)));
+    fields.push(("last", json!(req.session.last_summary)));
+    fields.push(("n", json!(req.session.card_count)));
+    fields.push((
+        "ctx",
+        if include_context {
+            crate::backend_context(&req.context)
         } else {
-            "Return exactly one file's complete patch (the most foundational unresolved file first) plus plan {remaining:[{file,summary}],complete}."
-        });
-    }
+            json!("unchanged; reuse the context from the previous message")
+        },
+    ));
 
-    if include_context {
-        value["ctx"] = crate::backend_context(&req.context);
-    } else {
-        value["ctx"] = json!("unchanged; reuse the context from the previous message");
-    }
-
-    serde_json::to_string(&value).unwrap_or_default()
+    crate::support::ordered_json_object(&fields)
 }
 
 fn parse_stream_event(value: &Value) -> StreamEvent {
@@ -1219,5 +1248,98 @@ mod tests {
         assert!(with_context.contains("buffer_text"));
         assert!(!without_context.contains("buffer_text"));
         assert!(without_context.contains("unchanged"));
+    }
+
+    #[test]
+    fn turn_prompt_keeps_a_stable_prefix_across_turns_of_one_session() {
+        let turn_a = crate::test_request();
+        let mut turn_b = crate::test_request();
+        turn_b.action = crate::BackendAction::User(loopbiotic_protocol::Action::Follow);
+        turn_b
+            .session
+            .completed_steps
+            .push("renamed the helper".into());
+        turn_b
+            .session
+            .known_observations
+            .push("the guard drops zero".into());
+        turn_b.session.card_count = 3;
+        turn_b.session.last_summary = Some("Renamed the helper".into());
+        turn_b.context.buffer_text = "fn main() { changed() }".into();
+        turn_b.context.cursor.line = 9;
+
+        let a = turn_prompt(&turn_a, true);
+        let b = turn_prompt(&turn_b, true);
+
+        // Everything before the append-only lists — the session-stable `s`
+        // block and the turn-kind-stable `limits` block — must stay
+        // byte-identical so a provider prompt cache can reuse it. Volatile
+        // fields (action, counts, context) may only trail that prefix.
+        let stable_block_len = a.find("\"completed_steps\"").expect("lists present");
+        assert_eq!(Some(stable_block_len), b.find("\"completed_steps\""));
+        let shared = crate::common_prefix_len(&a, &b);
+        assert!(
+            shared >= stable_block_len,
+            "volatile bytes leaked into the stable prefix: shared {shared} < stable {stable_block_len}\nA: {a}\nB: {b}"
+        );
+    }
+
+    #[test]
+    fn goal_turn_prompt_keeps_a_stable_prefix_across_slices() {
+        let mut turn_a = crate::test_request();
+        turn_a.card_contract.allow_goal_completion = true;
+        turn_a.action = crate::BackendAction::User(loopbiotic_protocol::Action::Next);
+        let mut turn_b = turn_a.clone();
+        turn_b.session.completed_steps.push("patched lib.rs".into());
+        turn_b.session.card_count = 2;
+        turn_b.context.buffer_text = "pub fn changed() {}".into();
+
+        let a = turn_prompt(&turn_a, true);
+        let b = turn_prompt(&turn_b, true);
+
+        // Consecutive goal continuations share `s`, `limits`, and the slice
+        // instruction; only the accepted-step history and context change.
+        let stable_block_len = a.find("\"completed_steps\"").expect("lists present");
+        assert!(a[..stable_block_len].contains("\"slice\""));
+        assert!(crate::common_prefix_len(&a, &b) >= stable_block_len);
+    }
+
+    #[test]
+    fn turn_prompt_static_lead_is_stable_across_sessions() {
+        let session_a = crate::test_request();
+        let mut session_b = crate::test_request();
+        session_b.session.id = "s_2".into();
+        session_b.session.prompt = "add retry logic to the fetcher".into();
+
+        let a = turn_prompt(&session_a, true);
+        let b = turn_prompt(&session_b, true);
+
+        // Cross-session cache reuse comes from SYSTEM_PROMPT, delivered once
+        // per process via --append-system-prompt; the turn prompt itself only
+        // guarantees its structural lead-in before the session id.
+        let static_lead = "{\"s\":{\"id\":\"";
+        assert!(a.starts_with(static_lead), "unexpected lead: {a}");
+        assert!(crate::common_prefix_len(&a, &b) >= static_lead.len());
+    }
+
+    #[test]
+    fn spawn_args_carry_the_static_contract_and_no_session_data() {
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            Some("claude-fable-5".into()),
+            None,
+            None,
+            None,
+        );
+
+        let first = backend.spawn_args(&Some("claude-fable-5".into()));
+        let second = backend.spawn_args(&Some("claude-fable-5".into()));
+
+        // The spawn arguments define the process-level static block (system
+        // prompt included); they must be identical for every spawn of the
+        // same configuration so the provider cache keys stay byte-stable.
+        assert_eq!(first, second);
+        assert!(first.contains(&SYSTEM_PROMPT.to_string()));
     }
 }

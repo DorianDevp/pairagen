@@ -246,6 +246,16 @@ pub struct SessionSnapshot {
     pub last_summary: Option<String>,
 }
 
+/// Length of the shared byte prefix of two prompts — the part a provider
+/// prompt cache can reuse across the two requests.
+#[cfg(test)]
+pub(crate) fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.bytes()
+        .zip(b.bytes())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
 #[cfg(test)]
 pub(crate) fn test_request() -> BackendRequest {
     BackendRequest {
