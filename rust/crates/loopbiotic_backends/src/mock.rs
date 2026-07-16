@@ -7,8 +7,8 @@ use loopbiotic_protocol::{
 use serde_json::to_string;
 
 use crate::{
-    BackendAction, BackendAdapter, BackendMetadata, BackendRequest, BackendResponse,
-    estimate_tokens,
+    BackendAction, BackendAdapter, BackendIdentity, BackendMetadata, BackendRequest,
+    BackendResponse, estimate_tokens,
 };
 
 #[derive(Default)]
@@ -55,6 +55,16 @@ impl BackendAdapter for MockBackend {
             card,
             raw_output: None,
         })
+    }
+
+    /// Fixed identity so the warmup identity contract is testable end to end
+    /// without a real model backend.
+    async fn identity(&self) -> BackendIdentity {
+        BackendIdentity {
+            backend: "mock".into(),
+            model: Some("mock-model".into()),
+            models: vec!["mock-model".into(), "mock-mini".into()],
+        }
     }
 
     fn capabilities(&self) -> BackendInfo {

@@ -400,7 +400,7 @@ impl Server {
                     .await
                     .map_err(|error| (id.clone(), error.to_string()))?;
 
-                json!({"ok": true})
+                json!({"ok": true, "identity": self.backend.identity().await})
             }
             "shutdown" => json!({"ok": true}),
             method => return Err((id, format!("unknown method {method}"))),

@@ -4,7 +4,7 @@ pub mod context;
 pub mod patch;
 pub mod rpc;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 pub use agent::*;
 pub use card::*;

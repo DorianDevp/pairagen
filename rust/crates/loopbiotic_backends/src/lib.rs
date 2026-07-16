@@ -44,7 +44,25 @@ pub trait BackendAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Reports who will answer the next turn: the adapter name, the concrete
+    /// model it resolves to (configured, else discovered, else unknown), and
+    /// any models the backend can enumerate for switching.
+    async fn identity(&self) -> BackendIdentity {
+        BackendIdentity {
+            backend: self.capabilities().name,
+            model: None,
+            models: vec![],
+        }
+    }
+
     fn capabilities(&self) -> BackendInfo;
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BackendIdentity {
+    pub backend: String,
+    pub model: Option<String>,
+    pub models: Vec<String>,
 }
 
 pub type ProgressReporter = Arc<dyn Fn(BackendProgress) + Send + Sync>;
@@ -251,6 +269,35 @@ pub(crate) fn test_request() -> BackendRequest {
 mod tests {
     use super::*;
     use loopbiotic_protocol::{HypothesisCard, SummaryCard};
+
+    struct BareAdapter;
+
+    #[async_trait]
+    impl BackendAdapter for BareAdapter {
+        async fn next_card(&self, _req: BackendRequest) -> Result<BackendResponse> {
+            unreachable!("identity tests never run a turn")
+        }
+
+        fn capabilities(&self) -> BackendInfo {
+            BackendInfo {
+                name: "bare".into(),
+                streaming: false,
+                patches: false,
+                reasoning: false,
+                can_read_project: false,
+                can_use_tools: false,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_identity_reports_the_adapter_name_without_a_model() {
+        let identity = BareAdapter.identity().await;
+
+        assert_eq!(identity.backend, "bare");
+        assert_eq!(identity.model, None);
+        assert!(identity.models.is_empty());
+    }
 
     fn hypothesis() -> Card {
         Card::Hypothesis(HypothesisCard {

@@ -19,8 +19,8 @@ use crate::support::{
     optional_env, report_progress, turn_phase, turn_timeout_from_env,
 };
 use crate::{
-    BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, ProgressReporter,
-    enforce_card_contract, estimate_tokens,
+    BackendAdapter, BackendIdentity, BackendMetadata, BackendRequest, BackendResponse,
+    ProgressReporter, enforce_card_contract, estimate_tokens,
 };
 
 use transport::{CodexAppProcess, CodexAppState, TurnOutput};
@@ -381,6 +381,17 @@ impl BackendAdapter for CodexAppBackend {
         self.warm_up().await
     }
 
+    async fn identity(&self) -> BackendIdentity {
+        BackendIdentity {
+            backend: "codex_app".into(),
+            // The app-server initialize handshake reports no default model or
+            // model list, so only the configured model can be named; turns
+            // with model: null use the server's own default.
+            model: self.model.clone(),
+            models: vec![],
+        }
+    }
+
     fn capabilities(&self) -> BackendInfo {
         BackendInfo {
             name: "codex_app".into(),
@@ -623,6 +634,18 @@ mod tests {
             lane.lock().await.process.is_none(),
             "timed-out process must be invalidated so the next turn spawns fresh"
         );
+    }
+
+    #[tokio::test]
+    async fn identity_reports_the_configured_model_without_spawning() {
+        let backend =
+            CodexAppBackend::new("codex-unused", vec![], Some("gpt-5.3-codex".into()), None);
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.backend, "codex_app");
+        assert_eq!(identity.model.as_deref(), Some("gpt-5.3-codex"));
+        assert!(identity.models.is_empty());
     }
 
     #[test]

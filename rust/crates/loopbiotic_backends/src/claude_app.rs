@@ -16,8 +16,8 @@ use crate::support::{
     optional_env, report_progress, turn_phase, turn_timeout_from_env,
 };
 use crate::{
-    BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, ProgressReporter,
-    enforce_card_contract, estimate_tokens,
+    BackendAdapter, BackendIdentity, BackendMetadata, BackendRequest, BackendResponse,
+    ProgressReporter, enforce_card_contract, estimate_tokens,
 };
 
 const SYSTEM_PROMPT: &str = r#"You are a local Loopbiotic pair-programming partner inside the user's editor.
@@ -66,6 +66,9 @@ struct ClaudeAppState {
     // Pre-spawned discovery process created by warmup() before a session
     // exists, adopted by the next session's first discovery turn.
     warm: Option<Arc<Mutex<ClaudeSlot>>>,
+    // Latest model the CLI reported (init event or turn result); survives
+    // slot turnover so identity() can answer without respawning.
+    last_reported_model: Option<String>,
 }
 
 #[derive(Default)]
@@ -278,6 +281,17 @@ impl ClaudeAppBackend {
         }
     }
 
+    /// The configured model as one identity string: the discovery model, or
+    /// "discovery,patch" when the two phases run different models.
+    fn configured_model(&self) -> Option<String> {
+        let discovery = self.phase_model(Phase::Discovery)?;
+
+        match self.phase_model(Phase::Patch) {
+            Some(patch) if patch != discovery => Some(format!("{discovery},{patch}")),
+            _ => Some(discovery),
+        }
+    }
+
     fn phase_thinking(&self, phase: Phase) -> Option<String> {
         match phase {
             // Patch turns keep the CLI's adaptive thinking: diff correctness
@@ -372,6 +386,32 @@ impl ClaudeAppBackend {
         }
 
         Ok(())
+    }
+
+    /// Resolves the CLI's own default model when none is configured: the
+    /// latest model a turn or init event reported, else the init event of the
+    /// warm discovery process (spawning it warmup-style when needed).
+    async fn discovered_default_model(&self) -> Option<String> {
+        if let Some(model) = self.state.lock().await.last_reported_model.clone() {
+            return Some(model);
+        }
+
+        self.warm_up().await.ok()?;
+        let warm = self.state.lock().await.warm.clone()?;
+        let mut slot = warm.lock().await;
+        if slot.reported_model.is_none() {
+            // The warm process has not run a turn yet, so its init event is
+            // still unread on stdout.
+            slot.reported_model = read_init_model(&mut slot).await;
+        }
+        let model = slot.reported_model.clone();
+        drop(slot);
+
+        if let Some(model) = model.as_ref() {
+            self.state.lock().await.last_reported_model = Some(model.clone());
+        }
+
+        model
     }
 
     /// Returns the slot for this turn's phase, creating it (or adopting the
@@ -563,6 +603,31 @@ impl ClaudeAppBackend {
     }
 }
 
+/// Reads the freshly spawned CLI's init/system event, which names the model
+/// the process will use. Bounded by a short deadline so identity() can never
+/// hang on a wedged CLI; only called before the process's first turn.
+async fn read_init_model(slot: &mut ClaudeSlot) -> Option<String> {
+    const INIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    let process = slot.process.as_mut()?;
+    let init = async {
+        while let Ok(Some(line)) = process.stdout.next_line().await {
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let StreamEvent::Init(model) = parse_stream_event(&value) {
+                return model;
+            }
+        }
+        None
+    };
+
+    tokio::time::timeout(INIT_TIMEOUT, init)
+        .await
+        .ok()
+        .flatten()
+}
+
 async fn send_turn(slot: &mut ClaudeSlot, prompt: &str) -> Result<()> {
     let message = json!({
         "type": "user",
@@ -596,6 +661,9 @@ impl BackendAdapter for ClaudeAppBackend {
         progress: Option<ProgressReporter>,
     ) -> Result<BackendResponse> {
         let output = self.ask(&req, progress.as_ref()).await?;
+        if let Some(model) = output.model.as_ref() {
+            self.state.lock().await.last_reported_model = Some(model.clone());
+        }
         let card = crate::parse_card(&output.text).unwrap_or_else(|error| {
             Self::error_card(format!("{error}\n\nRaw output:\n{}", output.text))
         });
@@ -622,6 +690,20 @@ impl BackendAdapter for ClaudeAppBackend {
 
     async fn warmup(&self) -> Result<()> {
         self.warm_up().await
+    }
+
+    async fn identity(&self) -> BackendIdentity {
+        let model = match self.configured_model() {
+            Some(model) => Some(model),
+            None => self.discovered_default_model().await,
+        };
+
+        BackendIdentity {
+            backend: "claude_app".into(),
+            model,
+            // The claude CLI has no model-listing API.
+            models: vec![],
+        }
     }
 
     fn capabilities(&self) -> BackendInfo {
@@ -941,6 +1023,89 @@ mod tests {
         assert!(
             slot.process.is_none(),
             "timed-out process must be cleared so the next turn spawns fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_reports_the_configured_model_without_spawning() {
+        // "claude-unused" does not exist; the configured path must answer
+        // without ever spawning a process.
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            Some("claude-fable-5".into()),
+            None,
+            None,
+            None,
+        );
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.backend, "claude_app");
+        assert_eq!(identity.model.as_deref(), Some("claude-fable-5"));
+        assert!(identity.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn identity_joins_differing_discovery_and_patch_models() {
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            Some("claude-opus-4-8".into()),
+            Some("claude-haiku-4-5".into()),
+            None,
+            None,
+        );
+
+        let identity = backend.identity().await;
+
+        assert_eq!(
+            identity.model.as_deref(),
+            Some("claude-haiku-4-5,claude-opus-4-8")
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_falls_back_to_the_last_reported_model() {
+        let backend =
+            ClaudeAppBackend::with_turn_timeout("claude-unused", vec![], None, None, None, None);
+        backend.state.lock().await.last_reported_model = Some("claude-fable-5".into());
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.model.as_deref(), Some("claude-fable-5"));
+    }
+
+    #[tokio::test]
+    async fn read_init_model_parses_the_init_event_from_the_process_stream() {
+        // `echo` stands in for the CLI: it prints the init event and exits.
+        let init = json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "model": "claude-fable-5"
+        });
+        let mut child = Command::new("echo")
+            .arg(init.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut slot = ClaudeSlot {
+            process: Some(ClaudeAppProcess {
+                child,
+                stdin,
+                stdout: BufReader::new(stdout).lines(),
+            }),
+            ..ClaudeSlot::default()
+        };
+
+        assert_eq!(
+            read_init_model(&mut slot).await.as_deref(),
+            Some("claude-fable-5")
         );
     }
 

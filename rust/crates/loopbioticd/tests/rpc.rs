@@ -248,6 +248,29 @@ fn session_start_returns_first_mock_card() {
 }
 
 #[test]
+fn backend_warmup_reports_the_backend_identity() {
+    let mut daemon = Daemon::spawn();
+
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+
+    let response = daemon.request("2", "backend/warmup", json!({}));
+
+    assert!(
+        response.get("error").is_none(),
+        "unexpected error: {response}"
+    );
+    let result = &response["result"];
+    assert_eq!(result["ok"], json!(true));
+    assert_eq!(result["identity"]["backend"], json!("mock"));
+    assert_eq!(result["identity"]["model"], json!("mock-model"));
+    assert_eq!(
+        result["identity"]["models"],
+        json!(["mock-model", "mock-mini"])
+    );
+}
+
+#[test]
 fn unknown_method_returns_error_response() {
     let mut daemon = Daemon::spawn();
 
