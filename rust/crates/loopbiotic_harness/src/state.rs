@@ -261,6 +261,7 @@ mod tests {
             explanation: "e".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![],
             actions: vec![Action::Apply],
         })

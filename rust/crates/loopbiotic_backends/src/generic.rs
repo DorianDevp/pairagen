@@ -64,8 +64,36 @@ impl GenericCliBackend {
 }
 
 pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
+    let mut rules = vec![
+        json!(
+            "If a.kind is user and a.action is fix, return a patch op unless a patch is impossible."
+        ),
+        json!(
+            "If s.mode is fix and a.kind is start, return a patch op unless a patch is impossible."
+        ),
+        json!(
+            "For non-fix actions, do not return a patch op unless limits.goal_completion is true."
+        ),
+        json!(
+            "A non-goal patch is one small local pair-programming step: one file, one hunk, and no more changed lines than the supplied limit; its plan is null."
+        ),
+        json!(
+            "Explain why the next coherent block matters and return control to the user after that step."
+        ),
+    ];
+    if req.card_contract.allow_goal_completion {
+        rules.push(json!(
+            "Goal turn: return exactly one file's complete patch per response — the most foundational unresolved file first — plus plan {remaining:[{file,summary}],complete}. Set plan.complete true only on the final slice; remaining is then empty. Use up to limits.hunks_per_patch hunks and limits.changed_lines per hunk for that one file; Loopbiotic verifies and reviews the slice locally, then asks for the next planned slice."
+        ));
+        rules.push(json!(
+            "On a goal continuation (a.action is next), continue with the next planned file slice."
+        ));
+        rules.push(json!(
+            "If limits.goal_completion is true and limits.expected is finding, explain why the pending hunk is the right next step without replacing it or advancing the goal."
+        ));
+    }
     let value = json!({
-            "api": "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,goal_complete,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. Outside goal completion, return open_location when the change belongs in a different file than the supplied buffer. Goal batches may patch every file inspected with read-only tools. error is only for technical failures. limits.expected, when set, is the required op (deny always allowed; choice also allowed for hypothesis/finding); when null, choose the best fitting op and ask via choice when ambiguous. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
+            "api": "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|other_lead|retry|edit_prompt|open|run_check|next|stop. Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. Outside goal completion, return open_location when the change belongs in a different file than the supplied buffer. Goal slices may patch any file inspected with read-only tools. error is only for technical failures. limits.expected, when set, is the required op (deny always allowed; choice also allowed for hypothesis/finding); when null, choose the best fitting op and ask via choice when ambiguous. Patch only for fix. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.",
             "stream": {
                 "protocol": "ndjson",
                 "progress": {"t": "loopbiotic_progress", "phase": "short phase", "message": "short user-visible activity summary"},
@@ -76,15 +104,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
                     "The final output may instead be a raw Loopbiotic op for backwards compatibility."
                 ]
             },
-            "rules": [
-                "If a.kind is user and a.action is fix, return a patch op unless a patch is impossible.",
-                "If s.mode is fix and a.kind is start, return a patch op unless a patch is impossible.",
-                "For non-fix actions, do not return a patch op unless limits.goal_completion is true.",
-                "If limits.goal_completion is true, inspect every required file and return the complete multi-file patch batch in one turn. Use up to limits.patch_files files, limits.hunks_per_patch hunks per file, and limits.changed_lines per hunk; Loopbiotic verifies and reviews them locally. Set goal_complete true when accepting the batch finishes the goal.",
-                "If limits.goal_completion is true and limits.expected is finding, explain why the pending hunk is the right next step without replacing it or advancing the goal.",
-                "A non-goal patch is one small local pair-programming step: one file, one hunk, and no more changed lines than the supplied limit.",
-                "Explain why the next coherent block matters and return control to the user after that step."
-            ],
+            "rules": rules,
             "limits": {
                 "one": req.card_contract.one_card_only,
                 "max": req.card_contract.max_body_chars,
@@ -344,6 +364,18 @@ fn first_json_object(output: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_prompt_adds_the_slice_rule_only_on_goal_turns() {
+        let mut req = crate::test_request();
+        assert!(!generic_prompt(&req).contains("exactly one file's complete patch"));
+
+        req.card_contract.allow_goal_completion = true;
+        let goal = generic_prompt(&req);
+        assert!(goal.contains("exactly one file's complete patch"));
+        assert!(goal.contains("plan {remaining:[{file,summary}],complete}"));
+        assert!(goal.contains("next planned file slice"));
+    }
 
     #[test]
     fn extracts_json_card() {

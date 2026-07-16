@@ -172,6 +172,10 @@ async fn continuous_goal_reviews_a_multi_file_batch_without_more_model_turns() {
     assert!(!first_patch.goal_complete);
     assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
     assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert!(
+        engine.continuations.is_empty(),
+        "a legacy full batch must not trigger slice speculation"
+    );
 
     let second = engine
         .apply_result(PatchApplyResult {
@@ -578,6 +582,321 @@ async fn action_uses_refreshed_editor_context() {
     assert_eq!(card.patches[0].file, PathBuf::from("templates/layout.html"));
 }
 
+fn accept(session_id: &str, card: &Card, buffer: &str) -> PatchApplyResult {
+    let Card::Patch(card) = card else {
+        panic!("expected a pending patch card, got {card:?}");
+    };
+    let mut context = editor_context(buffer);
+    context.file = card.patches[0].file.clone();
+
+    PatchApplyResult {
+        session_id: session_id.into(),
+        card_id: card.id.clone(),
+        accepted: true,
+        patch_ids: vec![card.patches[0].id.clone()],
+        changed_files: vec![card.patches[0].file.clone()],
+        error: None,
+        context,
+    }
+}
+
+fn sliced_goal_provider() -> SourceContextProvider {
+    Arc::new(|file, _session_id| {
+        Box::pin(async move {
+            let text = match file.to_str() {
+                Some("src/work.ts") => "placeholder",
+                Some("src/caller.ts") => "caller",
+                Some("src/shape.ts") => "shape",
+                _ => return None,
+            };
+            let mut context = editor_context(text);
+            context.file = file;
+            Some(context)
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sliced_goal_speculates_and_consumes_each_next_slice_on_accept() {
+    let backend = Arc::new(CountingBackend::default());
+    let mut engine = Engine::new(backend.clone());
+    engine.set_source_context_provider(sliced_goal_provider());
+    let mut goal = params();
+    goal.mode = Mode::Auto;
+
+    let first = engine.start(goal).await.unwrap();
+    let Card::Patch(first_patch) = &first.card else {
+        panic!(
+            "expected the first slice, got {:?}; attempts {:?}",
+            first.card, first.attempts
+        );
+    };
+    assert_eq!(first_patch.patches[0].file, PathBuf::from("src/work.ts"));
+    assert!(!first_patch.goal_complete);
+    let plan = first_patch
+        .plan
+        .as_ref()
+        .expect("first slice carries a plan");
+    assert!(!plan.complete);
+    assert_eq!(plan.remaining.len(), 2);
+    assert!(
+        engine.continuations.contains_key(&first.session_id),
+        "the next slice must be speculated while the first is reviewed"
+    );
+
+    let second = engine
+        .apply_result(accept(
+            &first.session_id,
+            &first.card,
+            "payload = payload or {}",
+        ))
+        .await
+        .unwrap();
+    let Card::Patch(second_patch) = &second.card else {
+        panic!("expected the second slice, got {:?}", second.card);
+    };
+    assert_eq!(second_patch.patches[0].file, PathBuf::from("src/caller.ts"));
+    assert!(!second_patch.goal_complete);
+    assert!(
+        second.turn_token_usage.total_tokens > 0,
+        "the consumed speculation's usage must stay visible"
+    );
+    assert_eq!(second.goal.status, loopbiotic_protocol::GoalStatus::Active);
+    assert!(
+        engine.continuations.contains_key(&second.session_id),
+        "the final slice must be speculated while the second is reviewed"
+    );
+
+    let third = engine
+        .apply_result(accept(&second.session_id, &second.card, "CALLER"))
+        .await
+        .unwrap();
+    let Card::Patch(third_patch) = &third.card else {
+        panic!("expected the final slice, got {:?}", third.card);
+    };
+    assert_eq!(third_patch.patches[0].file, PathBuf::from("src/shape.ts"));
+    assert!(third_patch.goal_complete, "final slice completes the goal");
+    assert!(
+        !engine.continuations.contains_key(&third.session_id),
+        "a complete plan leaves nothing to speculate"
+    );
+
+    let complete = engine
+        .apply_result(accept(&third.session_id, &third.card, "SHAPE"))
+        .await
+        .unwrap();
+    assert!(matches!(complete.card, Card::Summary(_)));
+    assert_eq!(
+        complete.goal.status,
+        loopbiotic_protocol::GoalStatus::Complete
+    );
+    assert_eq!(complete.goal.completed_steps.len(), 3);
+    assert_eq!(complete.turn_token_usage.total_tokens, 0);
+
+    // One real turn plus two consumed speculations; no user action waited for
+    // a fresh model turn after the first card.
+    let calls = backend.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 3, "unexpected backend calls: {calls:?}");
+    assert!(calls[0].starts_with("progress:Start"));
+    assert!(calls[1].starts_with("plain:User(Next)"));
+    assert!(calls[2].starts_with("plain:User(Next)"));
+}
+
+/// Waits until the session's scheduled continuation turn has finished on the
+/// backend. `schedule_goal_continuation` inserts the map entry synchronously,
+/// so a pending speculation can never be missed here; only its background
+/// completion is awaited.
+async fn settle_continuation(engine: &Engine, session_id: &str) {
+    for _ in 0..2_000 {
+        if engine.continuations[session_id].is_finished() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("speculated continuation for {session_id} never finished");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_slice_cancels_speculation_folds_its_usage_and_respeculates() {
+    let backend = Arc::new(CountingBackend::default());
+    let mut engine = Engine::new(backend.clone());
+    engine.set_source_context_provider(sliced_goal_provider());
+    let mut goal = params();
+    goal.mode = Mode::Auto;
+    let start = engine.start(goal).await.unwrap();
+    let Card::Patch(first_patch) = &start.card else {
+        panic!("expected the first slice, got {:?}", start.card);
+    };
+    let usage_after_start = start.token_usage.total_tokens;
+
+    // Let the speculation finish so cancelling it folds usage immediately.
+    settle_continuation(&engine, &start.session_id).await;
+
+    let reworked = engine
+        .apply_result(PatchApplyResult {
+            session_id: start.session_id.clone(),
+            card_id: start.card.id().into(),
+            accepted: false,
+            patch_ids: vec![first_patch.patches[0].id.clone()],
+            changed_files: vec![],
+            error: Some("wrong shape".into()),
+            context: editor_context("placeholder"),
+        })
+        .await
+        .unwrap();
+
+    let Card::Patch(rework) = &reworked.card else {
+        panic!("expected a reworked slice, got {:?}", reworked.card);
+    };
+    assert_eq!(rework.patches[0].file, PathBuf::from("src/work.ts"));
+    assert!(rework.explanation.starts_with("Rework:"));
+    assert!(
+        reworked.token_usage.total_tokens
+            > usage_after_start + reworked.turn_token_usage.total_tokens,
+        "the cancelled speculation's usage must fold into the session totals"
+    );
+    assert!(
+        engine.continuations.contains_key(&start.session_id),
+        "a validated rework must re-speculate its continuation"
+    );
+
+    // The rework keeps the plan, so accepting it consumes a speculated slice
+    // for the next planned file.
+    let second = engine
+        .apply_result(accept(
+            &reworked.session_id,
+            &reworked.card,
+            "PAYLOAD = PAYLOAD OR {}",
+        ))
+        .await
+        .unwrap();
+    let Card::Patch(second_patch) = &second.card else {
+        panic!("expected the second slice, got {:?}", second.card);
+    };
+    assert_eq!(second_patch.patches[0].file, PathBuf::from("src/caller.ts"));
+
+    // The consumed re-speculation surfaced the second slice, whose plan still
+    // continues, so exactly one speculation for the third slice must now be
+    // in flight; settle it so the call log is complete and deterministic.
+    assert!(
+        engine.continuations.contains_key(&second.session_id),
+        "the second slice under review must speculate the third"
+    );
+    settle_continuation(&engine, &second.session_id).await;
+
+    let calls = backend.calls.lock().unwrap().clone();
+    // Start, cancelled speculation, rework, consumed re-speculation, and the
+    // (exactly one) speculation for the slice now under review. Any engine
+    // double-schedule or a take() falling back to a real turn would add a
+    // call and fail this exact count.
+    assert_eq!(calls.len(), 5, "unexpected backend calls: {calls:?}");
+    assert!(calls[0].starts_with("progress:Start"));
+    assert!(calls[1].starts_with("plain:User(Next)"));
+    assert!(calls[2].starts_with("progress:User(Retry)"));
+    assert!(calls[3].starts_with("plain:User(Next)"));
+    assert!(calls[4].starts_with("plain:User(Next)"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn user_retry_on_a_slice_cancels_speculation_and_stops_speculating() {
+    let backend = Arc::new(CountingBackend::default());
+    let mut engine = Engine::new(backend.clone());
+    engine.set_source_context_provider(sliced_goal_provider());
+    let mut goal = params();
+    goal.mode = Mode::Auto;
+    let first = engine.start(goal).await.unwrap();
+    assert!(engine.continuations.contains_key(&first.session_id));
+
+    let redrafted = engine
+        .action(&first.session_id, Action::Retry)
+        .await
+        .unwrap();
+
+    assert!(matches!(redrafted.card, Card::Patch(_)));
+    assert!(
+        !engine.continuations.contains_key(&first.session_id),
+        "a redraft abandons the slice chain, so nothing may be speculated"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_file_goal_without_plan_completes_as_a_batch_of_one() {
+    let backend = Arc::new(SingleFileNoPlanBackend::default());
+    let mut engine = Engine::new(backend.clone());
+    let mut goal = params();
+    goal.mode = Mode::Auto;
+    goal.buffer_text = "first".into();
+
+    let first = engine.start(goal).await.unwrap();
+    let Card::Patch(card) = &first.card else {
+        panic!("expected the whole batch as one card, got {:?}", first.card);
+    };
+    assert!(
+        card.goal_complete,
+        "legacy goal_complete governs completion"
+    );
+    assert_eq!(card.plan, None);
+    assert!(
+        engine.continuations.is_empty(),
+        "a planless response must not trigger slice speculation"
+    );
+
+    let complete = engine
+        .apply_result(accept(&first.session_id, &first.card, "FIRST"))
+        .await
+        .unwrap();
+
+    assert!(matches!(complete.card, Card::Summary(_)));
+    assert_eq!(
+        complete.goal.status,
+        loopbiotic_protocol::GoalStatus::Complete
+    );
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+}
+
+#[derive(Default)]
+struct SingleFileNoPlanBackend {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl BackendAdapter for SingleFileNoPlanBackend {
+    async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(req.card_contract.allow_goal_completion);
+
+        Ok(BackendResponse {
+            card: Card::Patch(PatchCard {
+                id: "c_single".into(),
+                title: "Complete local change".into(),
+                explanation: "One edit finishes the goal.".into(),
+                warnings: vec![],
+                goal_complete: true,
+                plan: None,
+                patches: vec![FilePatch {
+                    id: "p_single".into(),
+                    file: "src/work.ts".into(),
+                    diff: "@@ -1,1 +1,1 @@\n-first\n+FIRST\n".into(),
+                    explanation: "Updates the only required location.".into(),
+                }],
+                actions: vec![Action::Apply, Action::Why, Action::Retry, Action::Stop],
+            }),
+            raw_output: None,
+            metadata: BackendMetadata {
+                backend: "single_file_no_plan".into(),
+                model: None,
+                token_usage: Some(TokenUsage::estimated(100, 20)),
+                activities: vec![],
+                attempts: vec![],
+            },
+        })
+    }
+
+    fn capabilities(&self) -> BackendInfo {
+        MockBackend::info()
+    }
+}
+
 #[derive(Default)]
 struct FlakyBackend {
     failed: AtomicBool,
@@ -607,6 +926,7 @@ impl BackendAdapter for BatchGoalBackend {
                 explanation: "Prepare both independent edits.".into(),
                 warnings: vec![],
                 goal_complete: true,
+                plan: None,
                 patches: vec![FilePatch {
                     id: "p_batch".into(),
                     file: "src/work.ts".into(),
@@ -649,6 +969,7 @@ impl BackendAdapter for MultiFileGoalBackend {
                 explanation: "Update both required files.".into(),
                 warnings: vec![],
                 goal_complete: true,
+                plan: None,
                 patches: vec![
                     FilePatch {
                         id: "p_work".into(),
@@ -846,6 +1167,7 @@ impl BackendAdapter for BadPatchBackend {
                 explanation: "Invalid patch.".into(),
                 warnings: vec![],
                 goal_complete: false,
+                plan: None,
                 patches: vec![FilePatch {
                     id: "p_1".into(),
                     file: "src/work.ts".into(),
@@ -900,6 +1222,7 @@ impl BackendAdapter for RepairingPatchBackend {
                     explanation: "This attempt has stale context.".into(),
                     warnings: vec![],
                     goal_complete: false,
+                    plan: None,
                     patches: vec![FilePatch {
                         id: "p_1".into(),
                         file: "src/work.ts".into(),
@@ -917,6 +1240,7 @@ impl BackendAdapter for RepairingPatchBackend {
                     explanation: "Use exact current context.".into(),
                     warnings: vec![],
                     goal_complete: false,
+                    plan: None,
                     patches: vec![FilePatch {
                         id: "p_1".into(),
                         file: "src/work.ts".into(),
@@ -1208,6 +1532,7 @@ impl BackendAdapter for NavigatingBackend {
                     explanation: "Sets the icon size on the component.".into(),
                     warnings: vec![],
                     goal_complete: false,
+                    plan: None,
                     patches: vec![FilePatch {
                         id: "p_1".into(),
                         file: req.context.file.clone(),

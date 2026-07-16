@@ -165,7 +165,7 @@ impl CodexAppBackend {
             "You are a local Loopbiotic pair-programming partner. You may use at most two targeted read-only project tool calls to find the next relevant code block. Stop searching once the supplied context supports an exact location. Never edit files. Return exactly one final JSON object matching the supplied output schema and no prose."
         };
         let developer_instructions = if goal_loop {
-            "Drive the original goal from start to finish. In one work turn inspect every required file and return the complete multi-file patch batch; Loopbiotic reviews its hunks locally. When the user asks why, explain the pending hunk without advancing or replacing it. Preserve progress across turns and do not repeat accepted work."
+            "Drive the original goal from start to finish, one file slice per work turn: return exactly one file's complete patch plus a plan of the remaining files, and continue with the next planned slice when asked; Loopbiotic reviews each slice's hunks locally. When the user asks why, explain the pending hunk without advancing or replacing it. Preserve progress across turns and do not repeat accepted work."
         } else if patch_turn {
             "Work as an equal pair-programming partner. Propose one coherent local block at the supplied location and explain why this is the useful next move. Do not take over the whole task. Return one structured patch hunk as an editable draft, not a finished agenda."
         } else {
@@ -417,20 +417,28 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
          - The exact pending patch remains awaiting user acceptance after this answer."
             .into()
     } else if goal_loop {
+        let lead = if matches!(
+            req.action,
+            crate::BackendAction::User(loopbiotic_protocol::Action::Next)
+        ) {
+            "- Continue with the next planned file slice; the previous slice was accepted.\n"
+        } else {
+            ""
+        };
         format!(
-            "- Continue executing the original session goal from the accepted progress; never restart or repeat a completed step.\n\
-             - Inspect every required project file with targeted read-only tools and prepare the complete change in this turn.\n\
-             - Tool reads are valid patch source. Loopbiotic verifies every returned hunk against the corresponding live editor buffer before review.\n\
-             - Return one structured patch batch with up to {} files, up to {} hunks per file, and at most {} added/removed lines per hunk. Include every required edit; review granularity is handled locally.\n\
-             - Create missing files directly in the same batch before patches that reference them.\n\
+            "{lead}\
+             - Continue executing the original session goal from the accepted progress; never restart or repeat a completed step.\n\
+             - Return exactly one file's complete patch in this response: the most foundational unresolved file first. Never batch a second file into the same response.\n\
+             - Inspect that file with targeted read-only tools. Tool reads are valid patch source: Loopbiotic verifies every returned hunk against the corresponding live editor buffer before review.\n\
+             - The file's patch may use up to {} hunks and at most {} added/removed lines per hunk.\n\
+             - With the patch return plan: the remaining files that still need their own slice, each with a one-line summary, plus complete. Set complete=true only when this patch is the final slice; remaining is then empty.\n\
+             - Create a missing file as its own slice before the slices that reference it.\n\
              - Use open_location only when a required source cannot be inspected with read-only project tools.\n\
-             - Set goal_complete=true when accepting the complete returned patch finishes the original goal. Set it false only when another file or independently inspected stage remains.\n\
+             - Set goal_complete=true only together with plan.complete=true.\n\
              - Return summary only when every requirement in the original goal is satisfied; cite the completed result.\n\
              - Return choice only when a genuine user decision blocks all safe progress.\n\
-             - Do not return a finding, an assessment, a plan, or instructions for the user to request another draft.",
-            req.card_contract.max_patch_files,
-            req.card_contract.max_hunks_per_patch,
-            req.card_contract.max_changed_lines,
+             - Do not return a finding, an assessment, or instructions for the user to request another draft.",
+            req.card_contract.max_hunks_per_patch, req.card_contract.max_changed_lines,
         )
     } else if patch_turn {
         format!(
@@ -458,7 +466,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
     let output_contract = if goal_question {
         "- finding: concise explanation of the pending hunk"
     } else if goal_loop {
-        "- patch: one complete structured patch for local hunk-by-hunk review; include goal_complete\n\
+        "- patch: one file's complete structured patch for local hunk-by-hunk review; include goal_complete and plan {remaining: [{file, summary}], complete}\n\
 - open_location: when the next hunk belongs in another buffer; put the target in location (not next) and the explanation in reason (not message)\n\
 - choice: only for a blocking user decision\n\
 - summary: only when the complete original goal is satisfied"
@@ -694,14 +702,41 @@ mod tests {
     }
 
     #[test]
-    fn goal_prompt_requests_one_verified_multi_file_batch() {
+    fn goal_prompt_requests_one_file_slice_with_a_plan() {
         let mut request = request();
         request.card_contract.allow_goal_completion = true;
         request.card_contract.expected_kind = None;
         let prompt = prompt(&request, true);
 
         assert!(prompt.contains("Tool reads are valid patch source"));
-        assert!(prompt.contains("complete change in this turn"));
-        assert!(prompt.contains("Create missing files directly in the same batch"));
+        assert!(prompt.contains("exactly one file's complete patch"));
+        assert!(prompt.contains("With the patch return plan"));
+        assert!(prompt.contains("complete=true only when this patch is the final slice"));
+        assert!(!prompt.contains("Continue with the next planned file slice"));
+    }
+
+    #[test]
+    fn goal_continuation_prompt_asks_for_the_next_planned_slice() {
+        let mut request = request();
+        request.card_contract.allow_goal_completion = true;
+        request.card_contract.expected_kind = None;
+        request.action = BackendAction::User(Action::Next);
+        let prompt = prompt(&request, true);
+
+        assert!(prompt.contains("Continue with the next planned file slice"));
+        assert!(prompt.contains("exactly one file's complete patch"));
+    }
+
+    #[test]
+    fn non_goal_prompts_omit_the_slice_instruction() {
+        let mut request = request();
+        request.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Patch);
+
+        let patch_prompt = prompt(&request, true);
+        assert!(!patch_prompt.contains("With the patch return plan"));
+
+        request.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Hypothesis);
+        let discovery_prompt = prompt(&request, true);
+        assert!(!discovery_prompt.contains("exactly one file's complete patch"));
     }
 }

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use loopbiotic_protocol::{
-    Action, BackendInfo, Card, ErrorCard, FilePatch, FindingCard, HypothesisCard, PatchCard,
-    SummaryCard, TokenUsage,
+    Action, BackendInfo, Card, ErrorCard, FilePatch, FindingCard, GoalPlan, HypothesisCard,
+    PatchCard, PlannedStep, SummaryCard, TokenUsage,
 };
 use serde_json::to_string;
 
@@ -73,26 +73,166 @@ impl BackendAdapter for MockBackend {
     }
 }
 
+/// Later slices of the mock's three-slice goal. The first slice always
+/// targets the live buffer; these two use fixed single-line sources so tests
+/// (and the daemon's editor/read_file flow) can serve matching buffers.
+const MOCK_SLICES: &[(&str, &str, &str, &str)] = &[
+    (
+        "src/caller.ts",
+        "caller",
+        "CALLER",
+        "Update the consumer to read the new payload shape.",
+    ),
+    (
+        "src/shape.ts",
+        "shape",
+        "SHAPE",
+        "Align the shared shape declaration with the new payload.",
+    ),
+];
+
+/// Emulates a sliced three-slice goal: the current buffer first (plan lists
+/// the two remaining files), then each planned file in turn, the last slice
+/// marked complete. A retry reworks the pending slice instead of advancing.
 fn goal_card(req: &BackendRequest) -> Card {
-    if req.session.completed_steps.len() >= 2 {
-        Card::Summary(SummaryCard {
+    let last_plan = match &req.session.last_card {
+        Some(Card::Patch(card)) => card.plan.as_ref(),
+        _ => None,
+    };
+
+    if matches!(req.action, BackendAction::User(Action::Retry)) {
+        if let Some(Card::Patch(card)) = &req.session.last_card {
+            return rework_card(card);
+        }
+    }
+
+    let Some(plan) = last_plan else {
+        // A fresh goal turn: slice the live buffer first.
+        return slice_card(
+            "c_slice_1",
+            patch_card(req),
+            GoalPlan {
+                remaining: MOCK_SLICES
+                    .iter()
+                    .map(|(file, _, _, summary)| PlannedStep {
+                        file: (*file).into(),
+                        summary: (*summary).into(),
+                    })
+                    .collect(),
+                complete: false,
+            },
+        );
+    };
+
+    let Some(next) = plan.remaining.first() else {
+        return Card::Summary(SummaryCard {
             id: "c_complete".into(),
             title: "Goal complete".into(),
-            summary: "The payload and its caller now preserve the required shape.".into(),
+            summary: "The payload and its callers now preserve the required shape.".into(),
             changed_files: vec!["src/work.ts".into()],
             next_actions: vec![Action::RunCheck, Action::Stop],
+        });
+    };
+    let Some((file, source, replacement, summary)) = MOCK_SLICES
+        .iter()
+        .find(|(file, _, _, _)| *file == next.file)
+    else {
+        return unsupported_card(Action::Next);
+    };
+
+    let remaining = plan
+        .remaining
+        .iter()
+        .skip(1)
+        .cloned()
+        .collect::<Vec<PlannedStep>>();
+    let index = MOCK_SLICES.len() - plan.remaining.len() + 2;
+    slice_card(
+        &format!("c_slice_{index}"),
+        Card::Patch(PatchCard {
+            id: String::new(),
+            title: format!("Slice {index}: {file}"),
+            explanation: (*summary).into(),
+            warnings: vec![],
+            goal_complete: false,
+            plan: None,
+            patches: vec![FilePatch {
+                id: format!("p_slice_{index}"),
+                file: (*file).into(),
+                diff: format!("@@ -1,1 +1,1 @@\n-{source}\n+{replacement}\n"),
+                explanation: (*summary).into(),
+            }],
+            actions: goal_actions(),
+        }),
+        GoalPlan {
+            complete: remaining.is_empty(),
+            remaining,
+        },
+    )
+}
+
+fn slice_card(id: &str, card: Card, plan: GoalPlan) -> Card {
+    let Card::Patch(mut card) = card else {
+        return card;
+    };
+    card.id = id.into();
+    card.goal_complete = false;
+    card.plan = Some(plan);
+    Card::Patch(card)
+}
+
+/// Reworks the pending slice in place: same file and plan, alternated line so
+/// the rework is visibly different from the rejected draft.
+fn rework_card(card: &PatchCard) -> Card {
+    let patch = &card.patches[0];
+    let flipped = patch
+        .diff
+        .lines()
+        .map(|line| match line.split_at_checked(1) {
+            Some(("+", text)) => format!("+{}", flip_case(text)),
+            _ => line.to_string(),
         })
-    } else {
-        let mut card = patch_card(req);
-        if req.session.completed_steps.len() == 1
-            && let Card::Patch(patch) = &mut card
-        {
-            patch.title = "Complete payload shape".into();
-            patch.explanation = "Add the data member required by the caller.".into();
-            patch.patches[0].explanation = "Provides the caller-visible data member.".into();
-        }
-        card
-    }
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    Card::Patch(PatchCard {
+        id: format!("{}_rework", card.id),
+        title: card.title.clone(),
+        explanation: format!("Rework: {}", card.explanation),
+        warnings: vec![],
+        goal_complete: false,
+        plan: card.plan.clone(),
+        patches: vec![FilePatch {
+            id: format!("{}_rework", patch.id),
+            file: patch.file.clone(),
+            diff: flipped,
+            explanation: format!("Rework: {}", patch.explanation),
+        }],
+        actions: goal_actions(),
+    })
+}
+
+fn flip_case(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_uppercase() {
+                character.to_ascii_lowercase()
+            } else {
+                character.to_ascii_uppercase()
+            }
+        })
+        .collect()
+}
+
+fn goal_actions() -> Vec<Action> {
+    vec![
+        Action::Apply,
+        Action::Why,
+        Action::Retry,
+        Action::EditPrompt,
+        Action::Stop,
+    ]
 }
 
 impl MockBackend {
@@ -208,6 +348,7 @@ fn patch_card(req: &BackendRequest) -> Card {
         explanation: "Ensure the empty branch returns the same payload shape.".into(),
         warnings: vec![],
         goal_complete: req.card_contract.allow_goal_completion,
+        plan: None,
         patches: vec![FilePatch {
             id: "p_1".into(),
             file: relative_file(req).into(),

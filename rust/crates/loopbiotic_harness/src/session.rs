@@ -31,6 +31,10 @@ pub struct Session {
     pub completed_steps: Vec<String>,
     pub completed_step_signatures: Vec<(PathBuf, String)>,
     pub pending_patch_cards: VecDeque<PatchCard>,
+    /// True while the slice under review came from a sliced goal response
+    /// whose plan says more file slices follow; the engine speculatively
+    /// requests the next slice and consumes it once the queue drains.
+    pub goal_slice_continues: bool,
     pub goal_status: GoalStatus,
     pub next_step: Option<String>,
     pub continuous_goal: bool,
@@ -67,6 +71,7 @@ impl Session {
             completed_steps: vec![],
             completed_step_signatures: vec![],
             pending_patch_cards: VecDeque::new(),
+            goal_slice_continues: false,
             goal_status: GoalStatus::Active,
             next_step: None,
             continuous_goal,

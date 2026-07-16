@@ -76,6 +76,26 @@
     "goal_complete": {
       "type": ["boolean", "null"]
     },
+    "plan": {
+      "type": ["object", "null"],
+      "required": ["remaining", "complete"],
+      "properties": {
+        "remaining": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["file", "summary"],
+            "properties": {
+              "file": { "type": "string" },
+              "summary": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "complete": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
     "patches": {
       "type": ["array", "null"],
       "items": {

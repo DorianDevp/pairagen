@@ -134,8 +134,28 @@ pub struct PatchCard {
     /// queued card retains this flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub goal_complete: bool,
+    /// Sliced goal turns return exactly one file's patch plus this plan of
+    /// what remains. Absent on legacy full-batch responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<GoalPlan>,
     pub patches: Vec<FilePatch>,
     pub actions: Vec<Action>,
+}
+
+/// The remainder of a sliced goal: which files still need their own slice and
+/// whether the current slice is the final one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GoalPlan {
+    #[serde(default)]
+    pub remaining: Vec<PlannedStep>,
+    /// True when the goal has no further slices after the current one.
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlannedStep {
+    pub file: String,
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -232,5 +252,70 @@ mod tests {
 
         assert_eq!(json["kind"], "hypothesis");
         assert_eq!(json["actions"][0], "follow");
+    }
+
+    fn patch_card(plan: Option<GoalPlan>) -> Card {
+        Card::Patch(PatchCard {
+            id: "c_p".into(),
+            title: "Slice".into(),
+            explanation: "One file.".into(),
+            warnings: vec![],
+            goal_complete: false,
+            plan,
+            patches: vec![],
+            actions: vec![Action::Apply],
+        })
+    }
+
+    #[test]
+    fn serializes_goal_plan_on_sliced_patch_cards() {
+        let card = patch_card(Some(GoalPlan {
+            remaining: vec![PlannedStep {
+                file: "src/caller.ts".into(),
+                summary: "Update the consumer.".into(),
+            }],
+            complete: false,
+        }));
+
+        let json = serde_json::to_value(card.clone()).unwrap();
+
+        assert_eq!(json["plan"]["complete"], false);
+        assert_eq!(json["plan"]["remaining"][0]["file"], "src/caller.ts");
+        assert_eq!(
+            json["plan"]["remaining"][0]["summary"],
+            "Update the consumer."
+        );
+        let round_trip: Card = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, card);
+    }
+
+    #[test]
+    fn omits_absent_plan_and_accepts_planless_patch_cards() {
+        let json = serde_json::to_value(patch_card(None)).unwrap();
+        assert!(json.get("plan").is_none());
+
+        // Cards serialized before the plan field existed must still parse.
+        let legacy = serde_json::json!({
+            "kind": "patch",
+            "id": "c_p",
+            "title": "Slice",
+            "explanation": "One file.",
+            "patches": [],
+            "actions": ["apply"],
+        });
+        let card: Card = serde_json::from_value(legacy).unwrap();
+        let Card::Patch(card) = card else {
+            panic!("expected patch card");
+        };
+        assert_eq!(card.plan, None);
+        assert!(!card.goal_complete);
+    }
+
+    #[test]
+    fn goal_plan_remaining_defaults_to_empty() {
+        let plan: GoalPlan = serde_json::from_value(serde_json::json!({"complete": true})).unwrap();
+
+        assert!(plan.complete);
+        assert!(plan.remaining.is_empty());
     }
 }

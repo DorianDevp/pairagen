@@ -32,7 +32,7 @@ use goal::{
     queue_goal_patch_cards, update_goal_state,
 };
 use observations::{observation_prompt_line, prepare_observation_card, record_observations};
-use prefetch::Prefetch;
+use prefetch::{Continuation, Prefetch};
 use validate::validate_apply_result;
 
 pub struct Engine {
@@ -41,6 +41,14 @@ pub struct Engine {
     context_optimizer: ContextOptimizer,
     prefetch_mode: PrefetchMode,
     prefetches: HashMap<String, Prefetch>,
+    /// In-flight speculative goal-continuation turns, keyed by session.
+    continuations: HashMap<String, Continuation>,
+    /// Cancelled continuations still running on the backend; their usage is
+    /// folded into the session totals once they finish.
+    cancelled_continuations: Vec<(
+        String,
+        tokio::task::JoinHandle<Result<loopbiotic_backends::BackendResponse>>,
+    )>,
     location_granter: Option<LocationGranter>,
     source_context_provider: Option<SourceContextProvider>,
 }
@@ -81,6 +89,8 @@ impl Engine {
             context_optimizer: ContextOptimizer::default(),
             prefetch_mode: PrefetchMode::Off,
             prefetches: HashMap::new(),
+            continuations: HashMap::new(),
+            cancelled_continuations: vec![],
             location_granter: None,
             source_context_provider: None,
         }
@@ -138,6 +148,7 @@ impl Engine {
 
         self.sessions.insert(session_id.clone(), session);
         self.schedule_prefetch(&session_id).await;
+        self.schedule_goal_continuation(&session_id).await;
 
         Ok(StartSessionResult {
             session_id,
@@ -162,6 +173,11 @@ impl Engine {
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         let mut session = self.take_session(session_id)?;
+        if matches!(action, Action::Retry | Action::EditPrompt | Action::Stop) {
+            // These actions abandon the pending slice, so a speculated
+            // continuation built on top of it can only be wasted work.
+            self.cancel_goal_continuation(&mut session).await;
+        }
         let prefetched = self.take_prefetch(&mut session, &action).await;
         let result = self
             .action_taken(session_id, &mut session, action, progress, prefetched)
@@ -170,6 +186,7 @@ impl Engine {
         self.sessions.insert(session_id.into(), session);
         if result.is_ok() {
             self.schedule_prefetch(session_id).await;
+            self.schedule_goal_continuation(session_id).await;
         }
 
         result
@@ -186,6 +203,9 @@ impl Engine {
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         let mut session = self.take_session(session_id)?;
+        // A reply reworks or replaces whatever is pending, so a speculated
+        // continuation of the current slice is stale.
+        self.cancel_goal_continuation(&mut session).await;
         let result = self
             .reply_taken(session_id, &mut session, text, progress)
             .await;
@@ -193,6 +213,7 @@ impl Engine {
         self.sessions.insert(session_id.into(), session);
         if result.is_ok() {
             self.schedule_prefetch(session_id).await;
+            self.schedule_goal_continuation(session_id).await;
         }
 
         result
@@ -235,7 +256,10 @@ impl Engine {
         if session.state == SessionState::PatchShown
             && matches!(action, Action::Retry | Action::EditPrompt)
         {
+            // The redraft replaces the pending slice chain, so there is no
+            // longer a planned continuation to speculate on.
             session.pending_patch_cards.clear();
+            session.goal_slice_continues = false;
         }
 
         let state = session.state.next(&action)?;
@@ -363,7 +387,13 @@ impl Engine {
             .apply_result_taken(&mut session, result, progress)
             .await;
 
-        self.sessions.insert(session_id, session);
+        self.sessions.insert(session_id.clone(), session);
+        if output.is_ok() {
+            // Covers both the next slice arriving (consumed speculation or a
+            // real turn) and the rework after a reject: once the new slice is
+            // under review, speculate on its continuation.
+            self.schedule_goal_continuation(&session_id).await;
+        }
 
         output
     }
@@ -422,12 +452,17 @@ impl Engine {
                 if completes_goal {
                     return Ok(complete_goal_locally(&session_id, session));
                 }
+                // The last queued hunk was accepted: consume the slice that
+                // was speculated while the user reviewed (awaiting it if it is
+                // still generating); without one, run the turn for real.
+                let speculated = self.take_goal_continuation(&session_id).await;
                 return self
                     .goal_turn_taken(
                         &session_id,
                         session,
                         BackendAction::User(Action::Next),
                         progress,
+                        speculated,
                     )
                     .await;
             }
@@ -469,6 +504,9 @@ impl Engine {
         session.rejected_patches.extend(result.patch_ids.clone());
         session.pending_patch_cards.clear();
         session.state = SessionState::PatchShown;
+        // The rejected slice is being reworked, so the continuation speculated
+        // from it is stale; its usage still folds into the session totals.
+        self.cancel_goal_continuation(session).await;
 
         if session.continuous_goal {
             return self
@@ -477,6 +515,7 @@ impl Engine {
                     session,
                     BackendAction::User(Action::Retry),
                     progress,
+                    None,
                 )
                 .await;
         }
@@ -491,12 +530,13 @@ impl Engine {
         session: &mut Session,
         action: BackendAction,
         progress: Option<ProgressReporter>,
+        speculated: Option<loopbiotic_backends::BackendResponse>,
     ) -> Result<ActionResult> {
         let expected = NextState::GoalLoop;
         let context = session.context.clone();
         session.state = SessionState::Thinking;
         let response = self
-            .next_distinct_response(session, action, context, &expected, progress, None)
+            .next_distinct_response(session, action, context, &expected, progress, speculated)
             .await;
         let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
         let attempts = response.metadata.attempts.clone();

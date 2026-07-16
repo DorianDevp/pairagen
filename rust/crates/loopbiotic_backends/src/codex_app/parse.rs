@@ -13,6 +13,8 @@ struct StructuredPatchOp {
     explanation: String,
     #[serde(default)]
     goal_complete: bool,
+    #[serde(default)]
+    plan: Option<loopbiotic_protocol::GoalPlan>,
     patches: Vec<StructuredFilePatch>,
 }
 
@@ -87,6 +89,7 @@ fn parse_structured_patch(output: &str) -> Result<Card> {
         explanation: op.explanation,
         warnings: vec![],
         goal_complete: op.goal_complete,
+        plan: op.plan,
         patches,
         actions: vec![
             Action::Apply,

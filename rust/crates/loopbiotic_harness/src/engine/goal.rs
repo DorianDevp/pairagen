@@ -109,8 +109,21 @@ pub(super) fn completed_patch_steps(session: &Session) -> Vec<String> {
 pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Result<Card> {
     let Card::Patch(card) = card else {
         session.pending_patch_cards.clear();
+        session.goal_slice_continues = false;
         return Ok(card);
     };
+
+    // A sliced goal response: exactly one file plus a plan of what remains.
+    // Multi-file responses (or responses without a plan) keep the legacy
+    // full-batch semantics, where `goal_complete` alone decides completion.
+    let slice_plan = (card.patches.len() == 1)
+        .then(|| card.plan.clone())
+        .flatten();
+    let completes = slice_plan
+        .as_ref()
+        .map(|plan| plan.complete)
+        .unwrap_or(card.goal_complete);
+    session.goal_slice_continues = slice_plan.as_ref().is_some_and(|plan| !plan.complete);
 
     let mut cards = Vec::new();
     for patch in card.patches {
@@ -133,6 +146,7 @@ pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Resul
                 explanation: explanation.clone(),
                 warnings: card.warnings.clone(),
                 goal_complete: false,
+                plan: slice_plan.clone(),
                 patches: vec![loopbiotic_protocol::FilePatch {
                     id: format!("{}_h{}", patch.id, index + 1),
                     file: patch.file.clone(),
@@ -149,7 +163,7 @@ pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Resul
         .next()
         .ok_or_else(|| anyhow!("goal patch contains no reviewable hunks"))?;
     let mut pending = cards.collect::<VecDeque<_>>();
-    if card.goal_complete {
+    if completes {
         if let Some(last) = pending.back_mut() {
             last.goal_complete = true;
         } else {

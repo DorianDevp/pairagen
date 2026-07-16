@@ -234,7 +234,7 @@ impl Engine {
                         });
                     }
                     let instruction = if matches!(expected, NextState::GoalLoop) {
-                        "Re-read every affected file with read-only tools and return the corrected complete multi-file batch. Context/remove lines must be exact and contiguous in each corresponding source. Do not split the goal into another model turn; use open_location only if a required source cannot be inspected."
+                        "Re-read every affected file with read-only tools and return the corrected patch with the same scope as before (the same file slice plus its plan, or the same complete batch). Context/remove lines must be exact and contiguous in each corresponding source. Use open_location only if a required source cannot be inspected."
                     } else {
                         "Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card. If the change belongs in a different file than the supplied buffer, return an open_location op with that place instead of another patch."
                     };
@@ -332,6 +332,7 @@ impl Engine {
                 explanation: card.explanation.clone(),
                 warnings: vec![],
                 goal_complete: card.goal_complete,
+                plan: None,
                 patches: vec![card.patches[index].clone()],
                 actions: card.actions.clone(),
             });
@@ -510,6 +511,7 @@ mod tests {
             explanation: "Keep validation local.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_repeat".into(),
                 file: PathBuf::from("src/work.ts"),

@@ -474,6 +474,7 @@ mod tests {
             explanation: "Indent the block.".into(),
             warnings: vec![],
             goal_complete: true,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_format".into(),
                 file: PathBuf::from("templates/view.html"),
@@ -527,6 +528,7 @@ mod tests {
             explanation: "Add the missing exception type.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_new".into(),
                 file: PathBuf::from("src/Exception/NewException.php"),
@@ -560,6 +562,7 @@ mod tests {
             explanation: "Insert without an anchor.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_insert".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -593,6 +596,7 @@ mod tests {
             explanation: "Rename the value.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -628,6 +632,7 @@ mod tests {
             explanation: "Rename the value.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -662,6 +667,7 @@ mod tests {
             explanation: "Rename the value.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -718,6 +724,7 @@ mod tests {
             explanation: "Fix.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![raw],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
@@ -742,6 +749,7 @@ mod tests {
             explanation: "Fix the guard.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -784,6 +792,7 @@ mod tests {
             explanation: "Rename the value.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.ts"),
@@ -818,6 +827,7 @@ mod tests {
             explanation: "Rename response to rpc_response.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.rs"),
@@ -846,6 +856,7 @@ mod tests {
             explanation: "Rename response to rpc_response.".into(),
             warnings: vec![],
             goal_complete: false,
+            plan: None,
             patches: vec![FilePatch {
                 id: "p_1".into(),
                 file: PathBuf::from("src/work.rs"),

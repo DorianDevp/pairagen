@@ -110,7 +110,34 @@ fn goal_loop_schema(contract: &crate::CardContract) -> Value {
     let mut patches = patch_schema(contract)["properties"]["patches"].clone();
     patches["type"] = json!(["array", "null"]);
     schema["properties"]["patches"] = patches;
+    // Sliced goal turns return one file's patch plus the plan of remaining
+    // slices; null keeps legacy full-batch responses and non-patch ops legal.
+    schema["properties"]["plan"] = json!({
+        "anyOf": [plan_schema(), {"type": "null"}]
+    });
+    if let Some(required) = schema["required"].as_array_mut() {
+        required.push(json!("plan"));
+    }
     schema
+}
+
+fn plan_schema() -> Value {
+    object_schema(
+        &["remaining", "complete"],
+        json!({
+            "remaining": {
+                "type": "array",
+                "items": object_schema(
+                    &["file", "summary"],
+                    json!({
+                        "file": {"type": "string"},
+                        "summary": {"type": "string"}
+                    })
+                )
+            },
+            "complete": {"type": "boolean"}
+        }),
+    )
 }
 
 fn object_schema(required: &[&str], properties: Value) -> Value {
@@ -325,6 +352,39 @@ mod tests {
             loopbiotic_protocol::MAX_GOAL_HUNKS_PER_PATCH
         );
         assert!(schema["properties"]["goal_complete"].is_object());
+    }
+
+    #[test]
+    fn goal_loop_schema_carries_the_slice_plan() {
+        let schema = goal_loop_schema(&crate::CardContract::default());
+
+        let plan = &schema["properties"]["plan"]["anyOf"][0];
+        assert_eq!(plan["properties"]["complete"]["type"], "boolean");
+        assert_eq!(
+            plan["properties"]["remaining"]["items"]["properties"]["file"]["type"],
+            "string"
+        );
+        assert_eq!(
+            plan["properties"]["remaining"]["items"]["properties"]["summary"]["type"],
+            "string"
+        );
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("plan"))
+        );
+        // Legacy responses may omit the plan by sending null.
+        assert_eq!(schema["properties"]["plan"]["anyOf"][1]["type"], "null");
+    }
+
+    #[test]
+    fn non_goal_schemas_omit_the_plan_field() {
+        let patch = patch_schema(&crate::CardContract::default());
+        assert!(patch["properties"].get("plan").is_none());
+
+        let any = any_op_schema();
+        assert!(any["properties"].get("plan").is_none());
     }
 
     #[test]

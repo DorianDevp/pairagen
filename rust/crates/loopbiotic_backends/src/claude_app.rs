@@ -25,7 +25,7 @@ Every user message is a JSON Loopbiotic request. Reply with exactly one JSON Loo
 The discriminator field is named "op". Allowed ops, with exact shapes:
 - {"op":"hypothesis","title":string,"claim":string,"evidence":LOC|null,"next":LOC|null}
 - {"op":"finding","title":string,"finding":string,"location":LOC|null,"annotation":string|null}
-- {"op":"patch","title":string,"explanation":string,"goal_complete":bool,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}]}
+- {"op":"patch","title":string,"explanation":string,"goal_complete":bool,"plan":{"remaining":[{"file":string,"summary":string}],"complete":bool}|null,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}]}
 - {"op":"choice","title":string,"question":string,"options":[{"id":string,"label":string,"action":string}]}
 - {"op":"deny","title":string,"reason":string,"location":LOC|null}
 - {"op":"open_location","reason":string,"location":LOC}
@@ -37,9 +37,9 @@ Use deny when you cannot or should not proceed (ambiguous prompt, missing inform
 If you can only proceed from a different file or location — for example the change belongs in another file than the supplied buffer — return open_location IMMEDIATELY with that exact place instead of attempting a patch. The editor asks the user for permission, opens the file, and the next message continues this same turn with a.kind "location_granted" and fresh ctx for that buffer; then produce the real op. Never draft a patch against a file that is not the supplied buffer. Use deny only for refusals that navigation cannot solve.
 limits.expected, when set, names the op you must return (deny is always allowed instead; a clarifying choice is also accepted for hypothesis and finding). When limits.expected is null, choose whichever op fits best and ask via choice when the request is ambiguous.
 Patch only for fix actions or when limits.goal_completion is true. patch.diff must be unified diff hunks starting with @@ against the corresponding project source.
-When limits.goal_completion is true, drive the original goal from start to finish in one work turn. Inspect every required file with read-only tools and return the complete multi-file patch batch within limits.patch_files, limits.hunks_per_patch, and limits.changed_lines. Tool reads are valid patch source because Loopbiotic verifies every hunk against the live editor buffer before review. Loopbiotic reviews the batch locally without another model turn. Create missing files directly in the same batch. Set goal_complete=true when accepting the complete batch finishes the original goal. Use open_location only when a required source cannot be inspected. Return summary only when every stated requirement was already satisfied. Continue automatically from completed_steps and never repeat accepted work.
+When limits.goal_completion is true, drive the original goal one file slice per work turn: return exactly ONE file's complete patch — the most foundational unresolved file first — plus plan listing the remaining files (file + one-line summary each) and complete. Set plan.complete=true only on the final slice; remaining is then empty. Inspect the file with read-only tools; tool reads are valid patch source because Loopbiotic verifies every hunk against the live editor buffer before review. Loopbiotic reviews the slice locally, then asks for the next planned slice. Stay within limits.hunks_per_patch and limits.changed_lines for that one file. Create a missing file as its own slice before slices that reference it. Set goal_complete=true only together with plan.complete=true. Use open_location only when a required source cannot be inspected. Return summary only when every stated requirement was already satisfied. Continue automatically from completed_steps and never repeat accepted work.
 When limits.goal_completion is true and limits.expected is finding because the user asked why, explain the currently pending hunk without replacing it or advancing the goal. The same draft remains pending after the answer.
-A non-goal patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. A goal patch contains the complete change for the current buffer and may contain multiple hunks within the supplied limits.
+A non-goal patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit; its plan is null. A goal patch contains the complete change for one file and may contain multiple hunks within the supplied limits.
 Prefer the supplied context; you may use at most two targeted read-only searches when it is insufficient. Never edit files or run commands."#;
 
 /// Keeps `claude` CLI processes alive across turns using its stream-json
@@ -755,6 +755,8 @@ impl BackendAdapter for ClaudeAppBackend {
 }
 
 fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
+    let goal_turn = req.card_contract.allow_goal_completion
+        && req.card_contract.expected_kind != Some(loopbiotic_protocol::CardKind::Finding);
     let mut value = json!({
         "s": {
             "id": req.session.id,
@@ -776,6 +778,17 @@ fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
             "expected": req.card_contract.expected_kind
         }
     });
+
+    if goal_turn {
+        value["slice"] = json!(if matches!(
+            req.action,
+            crate::BackendAction::User(loopbiotic_protocol::Action::Next)
+        ) {
+            "Continue with the next planned file slice: one file's complete patch plus the refreshed plan."
+        } else {
+            "Return exactly one file's complete patch (the most foundational unresolved file first) plus plan {remaining:[{file,summary}],complete}."
+        });
+    }
 
     if include_context {
         value["ctx"] = crate::backend_context(&req.context);
@@ -1174,6 +1187,27 @@ mod tests {
             read_init_model(&mut slot).await.as_deref(),
             Some("claude-fable-5")
         );
+    }
+
+    #[test]
+    fn turn_prompt_adds_the_slice_instruction_only_on_goal_turns() {
+        let mut req = crate::test_request();
+        assert!(!turn_prompt(&req, true).contains("\"slice\""));
+
+        req.card_contract.allow_goal_completion = true;
+        req.card_contract.expected_kind = None;
+        let goal = turn_prompt(&req, true);
+        assert!(goal.contains("exactly one file's complete patch"));
+        assert!(!goal.contains("next planned file slice"));
+
+        req.action = crate::BackendAction::User(loopbiotic_protocol::Action::Next);
+        let continuation = turn_prompt(&req, true);
+        assert!(continuation.contains("Continue with the next planned file slice"));
+
+        // The goal "why" turn explains the pending hunk; it must not be asked
+        // to produce another slice.
+        req.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Finding);
+        assert!(!turn_prompt(&req, true).contains("\"slice\""));
     }
 
     #[test]
