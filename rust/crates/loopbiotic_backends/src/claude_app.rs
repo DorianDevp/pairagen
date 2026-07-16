@@ -1,19 +1,23 @@
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{Action, BackendInfo, Card, ErrorCard, TokenUsage};
+use loopbiotic_protocol::{BackendInfo, Card, TokenUsage};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
+use crate::support::{
+    Phase, TurnTimedOut, action_value, args_from_env, await_turn, context_fingerprint, error_card,
+    optional_env, report_progress, turn_phase, turn_timeout_from_env,
+};
 use crate::{
-    BackendAction, BackendAdapter, BackendMetadata, BackendProgress, BackendRequest,
-    BackendResponse, ProgressReporter, enforce_card_contract, estimate_tokens,
+    BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, ProgressReporter,
+    enforce_card_contract, estimate_tokens,
 };
 
 const SYSTEM_PROMPT: &str = r#"You are a local Loopbiotic pair-programming partner inside the user's editor.
@@ -51,13 +55,8 @@ pub struct ClaudeAppBackend {
     model: Option<String>,
     discovery_model: Option<String>,
     discovery_thinking: Option<String>,
+    turn_timeout: Option<Duration>,
     state: Mutex<ClaudeAppState>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum Phase {
-    Discovery,
-    Patch,
 }
 
 #[derive(Default)]
@@ -77,6 +76,19 @@ struct ClaudeSlot {
     reported_model: Option<String>,
 }
 
+impl ClaudeSlot {
+    /// Kills a wedged CLI and forgets its conversation so the next turn
+    /// spawns a fresh process with full context.
+    fn kill_process(&mut self) {
+        if let Some(process) = self.process.as_mut() {
+            let _ = process.child.start_kill();
+        }
+        self.process = None;
+        self.context_fingerprint = None;
+        self.reported_model = None;
+    }
+}
+
 struct ClaudeAppProcess {
     child: Child,
     stdin: ChildStdin,
@@ -89,6 +101,7 @@ impl Drop for ClaudeAppProcess {
     }
 }
 
+#[derive(Debug)]
 struct TurnOutput {
     text: String,
     token_usage: Option<TokenUsage>,
@@ -206,7 +219,7 @@ impl ClaudeAppBackend {
     pub fn from_env() -> Result<Self> {
         let command =
             std::env::var("LOOPBIOTIC_CLAUDE_COMMAND").unwrap_or_else(|_| "claude".into());
-        let args = args_from_env("LOOPBIOTIC_CLAUDE_ARGS_JSON", "LOOPBIOTIC_CLAUDE_ARGS")?;
+        let args = args_from_env("LOOPBIOTIC_CLAUDE_ARGS_JSON", "LOOPBIOTIC_CLAUDE_ARGS", "")?;
         let model = optional_env("LOOPBIOTIC_CLAUDE_MODEL");
         let discovery_model = optional_env("LOOPBIOTIC_CLAUDE_DISCOVERY_MODEL");
         let discovery_thinking = optional_env("LOOPBIOTIC_CLAUDE_DISCOVERY_THINKING");
@@ -227,12 +240,33 @@ impl ClaudeAppBackend {
         discovery_model: Option<String>,
         discovery_thinking: Option<String>,
     ) -> Self {
+        Self::with_turn_timeout(
+            command,
+            args,
+            model,
+            discovery_model,
+            discovery_thinking,
+            turn_timeout_from_env(),
+        )
+    }
+
+    /// Internal constructor that fixes the per-turn deadline instead of
+    /// reading it from the environment; tests use it to avoid env races.
+    pub(crate) fn with_turn_timeout(
+        command: impl Into<String>,
+        args: Vec<String>,
+        model: Option<String>,
+        discovery_model: Option<String>,
+        discovery_thinking: Option<String>,
+        turn_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             command: command.into(),
             args,
             model,
             discovery_model,
             discovery_thinking,
+            turn_timeout,
             state: Mutex::new(ClaudeAppState::default()),
         }
     }
@@ -397,6 +431,42 @@ impl ClaudeAppBackend {
         let slot = self.slot(&req.session.id, phase).await;
         let mut slot = slot.lock().await;
 
+        self.guarded_turn(&mut slot, req, phase, progress).await
+    }
+
+    /// Runs one turn under the per-turn deadline. On expiry the wedged CLI is
+    /// killed and its slot cleared so the next turn spawns a fresh process.
+    async fn guarded_turn(
+        &self,
+        slot: &mut ClaudeSlot,
+        req: &BackendRequest,
+        phase: Phase,
+        progress: Option<&ProgressReporter>,
+    ) -> Result<TurnOutput> {
+        let result = await_turn(
+            "Claude",
+            self.turn_timeout,
+            self.run_turn(slot, req, phase, progress),
+        )
+        .await;
+
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is::<TurnTimedOut>())
+        {
+            slot.kill_process();
+        }
+
+        result
+    }
+
+    async fn run_turn(
+        &self,
+        slot: &mut ClaudeSlot,
+        req: &BackendRequest,
+        phase: Phase,
+        progress: Option<&ProgressReporter>,
+    ) -> Result<TurnOutput> {
         report_progress(
             progress,
             &req.session.id,
@@ -417,12 +487,12 @@ impl ClaudeAppBackend {
         let include_context = slot.context_fingerprint != Some(fingerprint);
         slot.context_fingerprint = Some(fingerprint);
 
-        if let Err(error) = send_turn(&mut slot, &turn_prompt(req, include_context)).await {
+        if let Err(error) = send_turn(slot, &turn_prompt(req, include_context)).await {
             // The process may have died between turns; retry once on a fresh
             // process with full context before giving up.
             slot.process = Some(self.spawn_process(&slot.model, &self.phase_thinking(phase))?);
             slot.context_fingerprint = Some(fingerprint);
-            send_turn(&mut slot, &turn_prompt(req, true))
+            send_turn(slot, &turn_prompt(req, true))
                 .await
                 .map_err(|retry| anyhow!("could not reach claude: {error}; retry: {retry}"))?;
         }
@@ -489,12 +559,7 @@ impl ClaudeAppBackend {
     }
 
     fn error_card(message: impl Into<String>) -> Card {
-        Card::Error(ErrorCard {
-            id: "c_claude_error".into(),
-            title: "Claude error".into(),
-            message: message.into(),
-            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
-        })
+        error_card("c_claude_error", "Claude error", message)
     }
 }
 
@@ -571,16 +636,6 @@ impl BackendAdapter for ClaudeAppBackend {
     }
 }
 
-fn turn_phase(req: &BackendRequest) -> Phase {
-    if req.card_contract.expected_kind == Some(loopbiotic_protocol::CardKind::Patch)
-        || req.card_contract.allow_goal_completion
-    {
-        Phase::Patch
-    } else {
-        Phase::Discovery
-    }
-}
-
 fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
     let mut value = json!({
         "s": {
@@ -611,40 +666,6 @@ fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
     }
 
     serde_json::to_string(&value).unwrap_or_default()
-}
-
-fn context_fingerprint(req: &BackendRequest) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    req.context.file.hash(&mut hasher);
-    req.context.cursor.line.hash(&mut hasher);
-    req.context.cursor.column.hash(&mut hasher);
-    req.context.buffer_start_line.hash(&mut hasher);
-    req.context.buffer_text.hash(&mut hasher);
-    for diagnostic in &req.context.diagnostics {
-        diagnostic.file.hash(&mut hasher);
-        diagnostic.line.hash(&mut hasher);
-        diagnostic.message.hash(&mut hasher);
-    }
-    for artifact in &req.context.artifacts {
-        artifact.file.hash(&mut hasher);
-        artifact.start_line.hash(&mut hasher);
-        artifact.text.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn action_value(action: &BackendAction) -> Value {
-    match action {
-        BackendAction::Start => json!({"kind": "start"}),
-        BackendAction::User(action) => {
-            json!({"kind": "user", "action": serde_json::to_value(action).unwrap_or_default()})
-        }
-        BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
-        BackendAction::ContractRetry(reason) => {
-            json!({"kind": "contract_retry", "reason": reason})
-        }
-        BackendAction::LocationGranted => json!({"kind": "location_granted"}),
-    }
 }
 
 fn parse_stream_event(value: &Value) -> StreamEvent {
@@ -743,41 +764,6 @@ fn parse_usage(value: Option<&Value>) -> Option<TokenUsage> {
         total_tokens: input + output,
         estimated: false,
     })
-}
-
-fn optional_env(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-}
-
-fn args_from_env(json_name: &str, plain_name: &str) -> Result<Vec<String>> {
-    if let Ok(value) = std::env::var(json_name)
-        && !value.trim().is_empty()
-    {
-        return Ok(serde_json::from_str(&value)?);
-    }
-
-    Ok(std::env::var(plain_name)
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(str::to_string)
-        .collect())
-}
-
-fn report_progress(
-    progress: Option<&ProgressReporter>,
-    session_id: &str,
-    phase: &str,
-    message: &str,
-) {
-    if let Some(progress) = progress {
-        progress(BackendProgress {
-            session_id: session_id.into(),
-            phase: phase.into(),
-            message: message.into(),
-        });
-    }
 }
 
 #[cfg(test)]
@@ -916,17 +902,46 @@ mod tests {
         assert_eq!(extract_string_field(r#"{"titl"#, "title"), None);
     }
 
-    #[test]
-    fn routes_patch_turns_to_the_patch_phase() {
-        let mut req = crate::test_request();
-        assert!(matches!(turn_phase(&req), Phase::Discovery));
+    #[tokio::test]
+    async fn wedged_claude_process_times_out_and_clears_the_slot() {
+        // A `sleep` child stands in for a wedged CLI: it accepts the turn on
+        // stdin but never writes a stream event to stdout.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut slot = ClaudeSlot {
+            process: Some(ClaudeAppProcess {
+                child,
+                stdin,
+                stdout: BufReader::new(stdout).lines(),
+            }),
+            ..ClaudeSlot::default()
+        };
+        let backend = ClaudeAppBackend::with_turn_timeout(
+            "claude-unused",
+            vec![],
+            None,
+            None,
+            None,
+            Some(Duration::from_millis(100)),
+        );
 
-        req.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Patch);
-        assert!(matches!(turn_phase(&req), Phase::Patch));
+        let error = backend
+            .guarded_turn(&mut slot, &crate::test_request(), Phase::Discovery, None)
+            .await
+            .unwrap_err();
 
-        req.card_contract.expected_kind = None;
-        req.card_contract.allow_goal_completion = true;
-        assert!(matches!(turn_phase(&req), Phase::Patch));
+        assert!(error.is::<TurnTimedOut>(), "unexpected error: {error}");
+        assert!(
+            slot.process.is_none(),
+            "timed-out process must be cleared so the next turn spawns fresh"
+        );
     }
 
     #[test]

@@ -1,12 +1,13 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{Action, BackendInfo, Card, ErrorCard, TokenUsage};
+use loopbiotic_protocol::{BackendInfo, Card, TokenUsage};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::support::{error_card, optional_env, report_progress};
 use crate::{
-    BackendAdapter, BackendMetadata, BackendProgress, BackendRequest, BackendResponse,
-    ProgressReporter, enforce_card_contract, estimate_tokens,
+    BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, ProgressReporter,
+    enforce_card_contract, estimate_tokens,
 };
 
 /// Talks to a local Ollama server over its HTTP API instead of spawning
@@ -37,14 +38,10 @@ impl OllamaBackend {
     pub fn from_env() -> Result<Self> {
         let model = std::env::var("LOOPBIOTIC_OLLAMA_MODEL")
             .map_err(|_| anyhow!("LOOPBIOTIC_OLLAMA_MODEL is required"))?;
-        let host = std::env::var("LOOPBIOTIC_OLLAMA_HOST")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
+        let host = optional_env("LOOPBIOTIC_OLLAMA_HOST")
             .unwrap_or_else(|| "http://127.0.0.1:11434".into());
-        let keep_alive = std::env::var("LOOPBIOTIC_OLLAMA_KEEP_ALIVE")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "30m".into());
+        let keep_alive =
+            optional_env("LOOPBIOTIC_OLLAMA_KEEP_ALIVE").unwrap_or_else(|| "30m".into());
 
         Ok(Self::new(host, model, keep_alive))
     }
@@ -89,12 +86,7 @@ impl OllamaBackend {
     }
 
     fn error_card(message: impl Into<String>) -> Card {
-        Card::Error(ErrorCard {
-            id: "c_ollama_error".into(),
-            title: "Ollama error".into(),
-            message: message.into(),
-            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
-        })
+        error_card("c_ollama_error", "Ollama error", message)
     }
 }
 
@@ -151,20 +143,5 @@ impl BackendAdapter for OllamaBackend {
             can_read_project: false,
             can_use_tools: false,
         }
-    }
-}
-
-fn report_progress(
-    progress: Option<&ProgressReporter>,
-    session_id: &str,
-    phase: &str,
-    message: &str,
-) {
-    if let Some(progress) = progress {
-        progress(BackendProgress {
-            session_id: session_id.into(),
-            phase: phase.into(),
-            message: message.into(),
-        });
     }
 }

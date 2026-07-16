@@ -5,6 +5,7 @@ pub mod mock;
 pub mod ollama;
 pub mod stdio_agent;
 pub mod stream;
+pub(crate) mod support;
 
 use std::sync::Arc;
 

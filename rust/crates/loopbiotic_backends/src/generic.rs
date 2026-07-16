@@ -1,35 +1,57 @@
+use std::time::Duration;
+
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard, TokenUsage};
+use loopbiotic_protocol::{AgentOp, BackendInfo, Card, TokenUsage};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+use crate::support::{
+    TurnTimedOut, action_value, args_from_env, await_turn, error_card, report_progress,
+    turn_timeout_from_env,
+};
 use crate::{
-    BackendAdapter, BackendMetadata, BackendProgress, BackendRequest, BackendResponse,
-    LoopbioticStreamEvent, ProgressReporter, enforce_card_contract, estimate_tokens,
-    parse_loopbiotic_stream_event, result_text,
+    BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, LoopbioticStreamEvent,
+    ProgressReporter, enforce_card_contract, estimate_tokens, parse_loopbiotic_stream_event,
+    result_text,
 };
 
 pub struct GenericCliBackend {
     command: String,
     args: Vec<String>,
+    turn_timeout: Option<Duration>,
 }
 
 impl GenericCliBackend {
     pub fn new(command: impl Into<String>, args: Vec<String>) -> Self {
+        Self::with_turn_timeout(command, args, turn_timeout_from_env())
+    }
+
+    /// Internal constructor that fixes the per-turn deadline instead of
+    /// reading it from the environment; tests use it to avoid env races.
+    pub(crate) fn with_turn_timeout(
+        command: impl Into<String>,
+        args: Vec<String>,
+        turn_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             command: command.into(),
             args,
+            turn_timeout,
         }
     }
 
     pub fn from_env() -> Result<Self> {
         let command = std::env::var("LOOPBIOTIC_GENERIC_COMMAND")
             .map_err(|_| anyhow!("LOOPBIOTIC_GENERIC_COMMAND is required"))?;
-        let args = args_from_env("LOOPBIOTIC_GENERIC_ARGS_JSON", "LOOPBIOTIC_GENERIC_ARGS")?;
+        let args = args_from_env(
+            "LOOPBIOTIC_GENERIC_ARGS_JSON",
+            "LOOPBIOTIC_GENERIC_ARGS",
+            "",
+        )?;
 
-        Ok(Self { command, args })
+        Ok(Self::new(command, args))
     }
 
     fn prompt(&self, req: &BackendRequest) -> String {
@@ -37,12 +59,7 @@ impl GenericCliBackend {
     }
 
     fn error_card(message: impl Into<String>) -> Card {
-        Card::Error(ErrorCard {
-            id: "c_backend_error".into(),
-            title: "Backend error".into(),
-            message: message.into(),
-            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
-        })
+        error_card("c_backend_error", "Backend error", message)
     }
 }
 
@@ -91,34 +108,6 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     });
 
     serde_json::to_string(&value).unwrap_or_default()
-}
-
-fn action_value(action: &crate::BackendAction) -> serde_json::Value {
-    match action {
-        crate::BackendAction::Start => json!({"kind": "start"}),
-        crate::BackendAction::User(action) => {
-            json!({"kind": "user", "action": serde_json::to_value(action).unwrap_or_default()})
-        }
-        crate::BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
-        crate::BackendAction::ContractRetry(reason) => {
-            json!({"kind": "contract_retry", "reason": reason})
-        }
-        crate::BackendAction::LocationGranted => json!({"kind": "location_granted"}),
-    }
-}
-
-fn args_from_env(json_name: &str, plain_name: &str) -> Result<Vec<String>> {
-    if let Ok(value) = std::env::var(json_name)
-        && !value.trim().is_empty()
-    {
-        return Ok(serde_json::from_str(&value)?);
-    }
-
-    Ok(std::env::var(plain_name)
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(str::to_string)
-        .collect())
 }
 
 #[async_trait]
@@ -180,17 +169,31 @@ impl BackendAdapter for GenericCliBackend {
             &format!("Sending the task to {backend_name}"),
         );
 
-        while let Some(line) = stdout.next_line().await? {
-            match parse_loopbiotic_stream_event(&line) {
-                Some(LoopbioticStreamEvent::Progress { phase, message }) => {
-                    report_progress(progress.as_ref(), &req.session.id, &phase, &message);
+        let stream = async {
+            while let Some(line) = stdout.next_line().await? {
+                match parse_loopbiotic_stream_event(&line) {
+                    Some(LoopbioticStreamEvent::Progress { phase, message }) => {
+                        report_progress(progress.as_ref(), &req.session.id, &phase, &message);
+                    }
+                    Some(LoopbioticStreamEvent::Result(result)) => output.push(result_text(result)),
+                    None => output.push(line),
                 }
-                Some(LoopbioticStreamEvent::Result(result)) => output.push(result_text(result)),
-                None => output.push(line),
             }
-        }
 
-        child.wait().await?;
+            child.wait().await?;
+
+            Ok(())
+        };
+        let stream_result = await_turn("The backend CLI", self.turn_timeout, stream).await;
+        if stream_result
+            .as_ref()
+            .is_err_and(|error| error.is::<TurnTimedOut>())
+        {
+            // A one-shot process: kill the wedged CLI and surface the timeout
+            // as a normal backend error.
+            let _ = child.start_kill();
+        }
+        stream_result?;
         let stderr = stderr_task.await??;
         let stdout = output.join("\n");
         let raw_output = format!("{stdout}{stderr}");
@@ -224,21 +227,6 @@ impl BackendAdapter for GenericCliBackend {
             can_read_project: false,
             can_use_tools: false,
         }
-    }
-}
-
-fn report_progress(
-    progress: Option<&ProgressReporter>,
-    session_id: &str,
-    phase: &str,
-    message: &str,
-) {
-    if let Some(progress) = progress {
-        progress(BackendProgress {
-            session_id: session_id.into(),
-            phase: phase.into(),
-            message: message.into(),
-        });
     }
 }
 
@@ -302,13 +290,7 @@ fn excerpt(output: &str) -> String {
         return "Raw output was empty.".into();
     }
 
-    let mut text = output.chars().take(800).collect::<String>();
-
-    if output.chars().count() > 800 {
-        text.push_str("\n...");
-    }
-
-    format!("Raw output:\n{text}")
+    format!("Raw output:\n{}", crate::excerpt(output, 800))
 }
 
 fn first_json_object(output: &str) -> Option<&str> {
@@ -420,10 +402,21 @@ mod tests {
         assert!(matches!(card, Card::Hypothesis(_)));
     }
 
-    #[test]
-    fn serializes_user_action_as_protocol_value() {
-        let value = action_value(&crate::BackendAction::User(Action::Fix));
+    #[tokio::test]
+    async fn wedged_cli_times_out_and_is_killed() {
+        // `sleep` swallows the prompt on stdin and never answers: a stand-in
+        // for a CLI stuck on an auth prompt or deadlock.
+        let backend = GenericCliBackend::with_turn_timeout(
+            "sleep",
+            vec!["30".into()],
+            Some(std::time::Duration::from_millis(100)),
+        );
 
-        assert_eq!(value["action"], "fix");
+        let error = backend.next_card(crate::test_request()).await.unwrap_err();
+
+        assert!(
+            error.is::<crate::support::TurnTimedOut>(),
+            "unexpected error: {error}"
+        );
     }
 }

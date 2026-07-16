@@ -1,22 +1,28 @@
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{Action, AgentOp, BackendInfo, Card, ErrorCard, TokenUsage};
+use loopbiotic_protocol::{AgentOp, BackendInfo, Card, TokenUsage};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
+use crate::support::{
+    TurnTimedOut, action_value, args_from_env, await_turn, error_card, report_progress,
+    turn_timeout_from_env,
+};
 use crate::{
-    BackendAction, BackendAdapter, BackendMetadata, BackendProgress, BackendRequest,
-    BackendResponse, LoopbioticStreamEvent, ProgressReporter, enforce_card_contract,
-    estimate_tokens, parse_loopbiotic_stream_event, result_text,
+    BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, LoopbioticStreamEvent,
+    ProgressReporter, enforce_card_contract, estimate_tokens, parse_loopbiotic_stream_event,
+    result_text,
 };
 
 pub struct StdioAgentBackend {
     command: String,
     args: Vec<String>,
+    turn_timeout: Option<Duration>,
     process: Mutex<Option<AgentProcess>>,
 }
 
@@ -30,15 +36,26 @@ impl StdioAgentBackend {
     pub fn from_env() -> Result<Self> {
         let command = std::env::var("LOOPBIOTIC_AGENT_COMMAND")
             .map_err(|_| anyhow!("LOOPBIOTIC_AGENT_COMMAND is required"))?;
-        let args = args_from_env("LOOPBIOTIC_AGENT_ARGS_JSON", "LOOPBIOTIC_AGENT_ARGS")?;
+        let args = args_from_env("LOOPBIOTIC_AGENT_ARGS_JSON", "LOOPBIOTIC_AGENT_ARGS", "")?;
 
         Ok(Self::new(command, args))
     }
 
     pub fn new(command: impl Into<String>, args: Vec<String>) -> Self {
+        Self::with_turn_timeout(command, args, turn_timeout_from_env())
+    }
+
+    /// Internal constructor that fixes the per-turn deadline instead of
+    /// reading it from the environment; tests use it to avoid env races.
+    pub(crate) fn with_turn_timeout(
+        command: impl Into<String>,
+        args: Vec<String>,
+        turn_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             command: command.into(),
             args,
+            turn_timeout,
             process: Mutex::new(None),
         }
     }
@@ -88,52 +105,75 @@ impl StdioAgentBackend {
         );
         self.ensure().await?;
 
-        let mut process = self.process.lock().await;
-        let process = process
+        let mut guard = self.process.lock().await;
+        let process = guard
             .as_mut()
             .ok_or_else(|| anyhow!("agent process unavailable"))?;
-        let event = agent_event(req);
-        let line = serde_json::to_string(&event)?;
-        let input_tokens = estimate_tokens(&line);
 
-        process.stdin.write_all(line.as_bytes()).await?;
-        process.stdin.write_all(b"\n").await?;
-        process.stdin.flush().await?;
+        let result = await_turn(
+            "The agent",
+            self.turn_timeout,
+            exchange(process, req, progress),
+        )
+        .await;
 
-        report_progress(
-            progress,
-            &req.session.id,
-            "working",
-            "Agent is processing the request",
-        );
-
-        loop {
-            let Some(line) = process.stdout.next_line().await? else {
-                return Err(anyhow!("agent closed stdout"));
-            };
-
-            match parse_loopbiotic_stream_event(&line) {
-                Some(LoopbioticStreamEvent::Progress { phase, message }) => {
-                    report_progress(progress, &req.session.id, &phase, &message);
-                }
-                Some(LoopbioticStreamEvent::Result(result)) => {
-                    return Ok(AgentAnswer {
-                        line: result_text(result),
-                        input_tokens,
-                    });
-                }
-                None => return Ok(AgentAnswer { line, input_tokens }),
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is::<TurnTimedOut>())
+        {
+            // Kill the wedged agent and forget it so the next turn respawns.
+            if let Some(process) = guard.as_mut() {
+                let _ = process.child.start_kill();
             }
+            *guard = None;
         }
+
+        result
     }
 
     fn error_card(message: impl Into<String>) -> Card {
-        Card::Error(ErrorCard {
-            id: "c_agent_error".into(),
-            title: "Agent error".into(),
-            message: message.into(),
-            actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
-        })
+        error_card("c_agent_error", "Agent error", message)
+    }
+}
+
+/// Sends one turn to the agent and reads its stream until the result line.
+async fn exchange(
+    process: &mut AgentProcess,
+    req: &BackendRequest,
+    progress: Option<&ProgressReporter>,
+) -> Result<AgentAnswer> {
+    let event = agent_event(req);
+    let line = serde_json::to_string(&event)?;
+    let input_tokens = estimate_tokens(&line);
+
+    process.stdin.write_all(line.as_bytes()).await?;
+    process.stdin.write_all(b"\n").await?;
+    process.stdin.flush().await?;
+
+    report_progress(
+        progress,
+        &req.session.id,
+        "working",
+        "Agent is processing the request",
+    );
+
+    loop {
+        let Some(line) = process.stdout.next_line().await? else {
+            return Err(anyhow!("agent closed stdout"));
+        };
+
+        match parse_loopbiotic_stream_event(&line) {
+            Some(LoopbioticStreamEvent::Progress { phase, message }) => {
+                report_progress(progress, &req.session.id, &phase, &message);
+            }
+            Some(LoopbioticStreamEvent::Result(result)) => {
+                return Ok(AgentAnswer {
+                    line: result_text(result),
+                    input_tokens,
+                });
+            }
+            None => return Ok(AgentAnswer { line, input_tokens }),
+        }
     }
 }
 
@@ -186,21 +226,7 @@ impl BackendAdapter for StdioAgentBackend {
     }
 }
 
-fn report_progress(
-    progress: Option<&ProgressReporter>,
-    session_id: &str,
-    phase: &str,
-    message: &str,
-) {
-    if let Some(progress) = progress {
-        progress(BackendProgress {
-            session_id: session_id.into(),
-            phase: phase.into(),
-            message: message.into(),
-        });
-    }
-}
-
+#[derive(Debug)]
 struct AgentAnswer {
     line: String,
     input_tokens: usize,
@@ -225,38 +251,10 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
     })
 }
 
-fn action_value(action: &BackendAction) -> serde_json::Value {
-    match action {
-        BackendAction::Start => json!({"kind": "start"}),
-        BackendAction::User(action) => {
-            json!({"kind": "user", "action": serde_json::to_value(action).unwrap_or_default()})
-        }
-        BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
-        BackendAction::ContractRetry(reason) => {
-            json!({"kind": "contract_retry", "reason": reason})
-        }
-        BackendAction::LocationGranted => json!({"kind": "location_granted"}),
-    }
-}
-
 fn agent_api() -> serde_json::Value {
     json!(
         "Return one JSON Loopbiotic op only. Ops: hypothesis, finding, patch, choice, deny, open_location, summary, error. Use deny(title,reason) when you cannot or should not proceed, such as an ambiguous prompt or missing information; the reason is shown to the user. error is only for technical failures. Behave as an equal pair-programming partner. Return patch for user action fix or start mode fix unless impossible. When limits.allow_goal_completion is true, inspect every required file and return the complete multi-file patch batch in one turn within the supplied file, hunk, and changed-line limits; Loopbiotic verifies and reviews its hunks locally. Set patch.goal_complete true when accepting the batch finishes the original goal. When goal completion is true and the expected card is finding because the user asked why, explain the pending hunk without replacing it or advancing the goal. A non-goal patch is one local step: exactly one file and one hunk within the supplied changed-line limit. patch.diff must be unified diff hunks starting with @@. You may first emit newline-delimited {\"t\":\"loopbiotic_progress\",\"phase\":string,\"message\":string} records with concise user-visible activity summaries. Never emit hidden reasoning or private chain-of-thought. End with either a raw Loopbiotic op or {\"t\":\"loopbiotic_result\",\"result\":<Loopbiotic op>}."
     )
-}
-
-fn args_from_env(json_name: &str, plain_name: &str) -> Result<Vec<String>> {
-    if let Ok(value) = std::env::var(json_name)
-        && !value.trim().is_empty()
-    {
-        return Ok(serde_json::from_str(&value)?);
-    }
-
-    Ok(std::env::var(plain_name)
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(str::to_string)
-        .collect())
 }
 
 fn parse_agent_output(output: &str) -> Result<Card> {
@@ -276,10 +274,22 @@ mod tests {
         assert!(matches!(card, Card::Hypothesis(_)));
     }
 
-    #[test]
-    fn serializes_user_action_as_protocol_value() {
-        let value = action_value(&BackendAction::User(Action::Fix));
+    #[tokio::test]
+    async fn wedged_agent_times_out_and_respawns_next_turn() {
+        // `sleep` swallows the event on stdin and never answers: a stand-in
+        // for an agent stuck on an auth prompt or deadlock.
+        let backend = StdioAgentBackend::with_turn_timeout(
+            "sleep",
+            vec!["30".into()],
+            Some(Duration::from_millis(100)),
+        );
 
-        assert_eq!(value["action"], "fix");
+        let error = backend.ask(&crate::test_request(), None).await.unwrap_err();
+
+        assert!(error.is::<TurnTimedOut>(), "unexpected error: {error}");
+        assert!(
+            backend.process.lock().await.is_none(),
+            "timed-out process must be cleared so the next turn respawns"
+        );
     }
 }
