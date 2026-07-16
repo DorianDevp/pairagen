@@ -24,6 +24,12 @@ The project follows [Semantic Versioning](https://semver.org/).
   and only the expected binary is extracted from the release archive.
 - Retry exhaustion and goal-batch shape mismatches in the session harness
   degrade to error cards instead of panicking the daemon.
+- Queued goal slices that no longer apply after the buffer changes now offer
+  a one-keypress retry that regenerates only the stale file slice.
+- Mechanical model diff wrappers are normalized before validation: CRLF line
+  endings, markdown fences, matching git headers, and unambiguous `./`, `a/`,
+  or `b/` path prefixes. Prose, rename/copy metadata, unmatched fences, and
+  headers naming another file are rejected instead of being silently dropped.
 - Push CI runs again: the workflow triggered on a nonexistent `main` branch.
 
 ### Changed
@@ -32,6 +38,9 @@ The project follows [Semantic Versioning](https://semver.org/).
   returns a structured error (`-32001`) on mismatch instead of failing later
   with cryptic errors.
 - The project context scan no longer blocks async worker threads.
+- Backend prompts put static contracts and append-only session history before
+  volatile action and editor context data, preserving the longest reusable
+  provider-cache prefix across turns and sliced goal continuations.
 - Internal restructuring: `engine.rs`, `codex_app.rs`, and the context crate
   are split into focused modules; duplicated backend and Lua helpers are
   shared; Lua state reset is defined next to the state it resets.
@@ -69,6 +78,10 @@ The project follows [Semantic Versioning](https://semver.org/).
   unit tests for the patch engine and session state, `loopbioticd` JSON-RPC
   integration tests, session state-machine transition tests, and a real
   daemon round-trip smoke test.
+- Agent-attempt telemetry includes a closed `violation_class` for contract
+  retries and rejected cards, allowing context mismatches, malformed diffs,
+  wrong files, missing fields, kind mismatches, duplicate steps, and
+  incoherent goal batches to be aggregated without logging patch content.
 
 ## [0.3.2] - 2026-07-14
 
