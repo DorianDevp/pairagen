@@ -291,6 +291,7 @@ impl PatchValidator {
         }
 
         for hunk in diff.hunks {
+            validate_single_change_run(&hunk)?;
             validate_hunk_counts(&hunk, max_changed_lines)?;
         }
 
@@ -358,6 +359,34 @@ impl PatchValidator {
 
         Ok(())
     }
+}
+
+/// A unified-diff `@@` header may legally merge multiple edits separated by
+/// context lines. For Loopbiotic those are still multiple review steps: each
+/// accepted card must contain one contiguous change block so dependency-first
+/// work can be reviewed and compiled between steps.
+fn validate_single_change_run(hunk: &crate::Hunk) -> Result<()> {
+    let mut runs = 0;
+    let mut changing = false;
+
+    for line in &hunk.lines {
+        let changed = matches!(line, DiffLine::Remove(_) | DiffLine::Add(_));
+        if changed && !changing {
+            runs += 1;
+        }
+        changing = changed;
+    }
+
+    if runs > 1 {
+        return Err(violation(
+            ViolationClass::MultiHunk,
+            format!(
+                "patch contains {runs} separate change blocks inside one @@ hunk; maximum is 1. Split them into sequential compiler-safe patches"
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_hunk_counts(hunk: &crate::Hunk, max_changed_lines: usize) -> Result<()> {
@@ -684,6 +713,38 @@ mod tests {
         let error = PatchValidator::validate_file_patch(&patch).unwrap_err();
 
         assert!(error.to_string().contains("maximum is 1"));
+    }
+
+    #[test]
+    fn rejects_two_change_blocks_hidden_inside_one_hunk_header() {
+        let patch = FilePatch {
+            id: "p_1".into(),
+            file: PathBuf::from("src/work.ts"),
+            diff: "@@ -1,4 +1,5 @@\n+interface Work {}\n context one\n context two\n-old_type\n+Work\n context three\n"
+                .into(),
+            explanation: String::new(),
+        };
+
+        let error = PatchValidator::validate_file_patch(&patch).unwrap_err();
+
+        assert_eq!(
+            crate::violation_class(&error),
+            Some(ViolationClass::MultiHunk)
+        );
+        assert!(error.to_string().contains("2 separate change blocks"));
+        assert!(error.to_string().contains("compiler-safe patches"));
+    }
+
+    #[test]
+    fn accepts_one_replacement_change_run() {
+        let patch = FilePatch {
+            id: "p_1".into(),
+            file: PathBuf::from("src/work.ts"),
+            diff: "@@ -1,3 +1,3 @@\n before\n-old_type\n+NewType\n after\n".into(),
+            explanation: String::new(),
+        };
+
+        PatchValidator::validate_file_patch(&patch).unwrap();
     }
 
     #[test]

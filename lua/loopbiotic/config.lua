@@ -42,8 +42,8 @@ M.values = {
     args = {},
     mode = "auto",
     agent = "mock",
-    -- Ordinary speculation never drafts code: it prepares only the
-    -- conversational card shown after an accepted local patch.
+    -- Ordinary speculation prepares the next goal step while the current
+    -- patch is being reviewed; it can surface only after acceptance.
     prefetch = "read_only",
     -- Ask before starting another model turn after this session total.
     -- Set to 0 to disable the guard.

@@ -11,7 +11,8 @@ use tokio::io::{AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
 use crate::ProgressReporter;
-use crate::support::report_progress;
+use crate::stream::StreamPreview;
+use crate::support::{report_preview, report_progress};
 
 use super::debug;
 
@@ -150,6 +151,8 @@ impl CodexAppState {
         let mut text = String::new();
         let mut token_usage = None;
         let mut activities = Vec::new();
+        let mut preview = StreamPreview::default();
+        let mut streaming_started = false;
 
         loop {
             let message = self.next_message().await?;
@@ -164,6 +167,21 @@ impl CodexAppState {
 
             if let Some((phase, label)) = progress_for_message(&message, turn_id) {
                 report_progress(progress, session_id, phase, label);
+            }
+
+            if let Some(delta) = agent_message_delta(&message, turn_id) {
+                if !streaming_started {
+                    report_progress(
+                        progress,
+                        session_id,
+                        "streaming",
+                        "Codex started streaming the response",
+                    );
+                    streaming_started = true;
+                }
+                if let Some(preview) = preview.push(delta) {
+                    report_preview(progress, session_id, preview);
+                }
             }
 
             if method == Some("item/completed")
@@ -312,6 +330,14 @@ fn message_turn_id(params: &Value) -> Option<&str> {
             .and_then(|turn| turn.get("id"))
             .and_then(Value::as_str)
     })
+}
+
+fn agent_message_delta<'a>(message: &'a Value, turn_id: &str) -> Option<&'a str> {
+    (message.get("method").and_then(Value::as_str) == Some("item/agentMessage/delta"))
+        .then_some(())?;
+    let params = message.get("params")?;
+    (message_turn_id(params) == Some(turn_id)).then_some(())?;
+    params.get("delta").and_then(Value::as_str)
 }
 
 /// Extracts token usage from the app-server's `thread/tokenUsage/updated`
@@ -497,5 +523,23 @@ mod tests {
         });
 
         assert_eq!(progress_for_message(&event, "turn_2"), None);
+    }
+
+    #[test]
+    fn extracts_agent_message_delta_for_the_active_turn_only() {
+        let event = json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "turnId": "turn_1",
+                "itemId": "item_1",
+                "delta": "{\"title\":\"Streaming"
+            }
+        });
+
+        assert_eq!(
+            agent_message_delta(&event, "turn_1"),
+            Some("{\"title\":\"Streaming")
+        );
+        assert_eq!(agent_message_delta(&event, "turn_2"), None);
     }
 }

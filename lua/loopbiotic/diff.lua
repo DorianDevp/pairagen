@@ -475,6 +475,7 @@ end
 
 function M.send(accepted, patch_ids, changed_files, error)
   local session_id = state.session_id
+  state.accept_continuation = accepted == true
   local request_id = thinking.start(accepted and "Continuing" or "Rejecting", session_id)
 
   rpc.request("patch/apply_result", {
@@ -493,11 +494,13 @@ function M.send(accepted, patch_ids, changed_files, error)
     thinking.stop()
 
     if message.error then
+      state.accept_continuation = nil
       log.write("patch apply error", message.error)
       ui.notify(message.error.message, vim.log.levels.ERROR)
       return
     end
     if message.result.session_id ~= state.session_id then
+      state.accept_continuation = nil
       log.write("stale patch result", message.result)
       return
     end

@@ -91,6 +91,7 @@ impl Engine {
                                 "Agent asks to open {}",
                                 request.location.file.display()
                             ),
+                            preview: None,
                         });
                     }
 
@@ -157,6 +158,7 @@ impl Engine {
                             phase: "deduplicating".into(),
                             message: "Retaining repeated context and requesting a distinct step"
                                 .into(),
+                            preview: None,
                         });
                     }
                     action = BackendAction::ContractRetry(format!(
@@ -192,6 +194,7 @@ impl Engine {
                             session_id: session.id.clone(),
                             phase: "deduplicating".into(),
                             message: "Rejecting a repeated patch step".into(),
+                            preview: None,
                         });
                     }
                     action = BackendAction::ContractRetry(format!(
@@ -239,13 +242,10 @@ impl Engine {
                             phase: "repairing".into(),
                             message: "Patch contract failed; Codex is repairing the local step"
                                 .into(),
+                            preview: None,
                         });
                     }
-                    let instruction = if matches!(expected, NextState::GoalLoop) {
-                        "Re-read the affected block with read-only tools and return the corrected patch with the same small one-hunk scope plus its refreshed plan. Context/remove lines must be exact and contiguous. Use open_location only if the required source cannot be inspected."
-                    } else {
-                        "Rebuild the same step. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must remain type-correct without work deferred to a later card. If the change belongs in a different file than the supplied buffer, return an open_location op with that place instead of another patch."
-                    };
+                    let instruction = repair_instruction(expected, class);
                     action = BackendAction::ContractRetry(format!(
                         "The previous card failed the local patch contract: {detail}. {instruction}"
                     ));
@@ -316,10 +316,14 @@ impl Engine {
 
         for index in 0..card.patches.len() {
             let file = card.patches[index].file.clone();
-            let source = if let Some(provider) = &self.source_context_provider {
-                provider(file.clone(), session_id.to_string()).await
-            } else if context_targets(current, &file) {
+            // The action context is already the editor's fresh snapshot. Use
+            // it directly for the active file instead of paying another RPC
+            // round-trip (and risking a read timeout) for identical source.
+            // The provider remains necessary for a goal step in another file.
+            let source = if context_targets(current, &file) {
                 Some(current.clone())
+            } else if let Some(provider) = &self.source_context_provider {
+                provider(file.clone(), session_id.to_string()).await
             } else {
                 None
             }
@@ -376,6 +380,30 @@ impl Engine {
         }
 
         NextState::GoalLoop.validate(candidate)
+    }
+}
+
+fn repair_instruction(expected: &NextState, class: ViolationClass) -> &'static str {
+    if class == ViolationClass::MultiHunk {
+        if matches!(expected, NextState::GoalLoop) {
+            return "DO NOT repeat or reformat the batch. Return ONLY one of its separated change blocks. If one block declares an interface, type, function, field, import, or compatibility shim and another block uses it, return ONLY the dependency-producing declaration block now and leave every consumer byte-for-byte unchanged. Mark goal_complete=false and put the consumer change in plan.remaining. In structured hunk lines, after the first add/remove record, context ends the change block: no later add/remove record is allowed. This patch alone must compile and type-check. If no isolated block is compiler-valid, return choice or deny instead of a patch.";
+        }
+
+        return "DO NOT repeat or reformat the batch. Return ONLY one of its separated change blocks. If one block declares an interface, type, function, field, import, or compatibility shim and another block uses it, return ONLY the dependency-producing declaration block now and leave every consumer byte-for-byte unchanged. In structured hunk lines, after the first add/remove record, context ends the change block: no later add/remove record is allowed. This patch alone must compile and type-check. If no isolated block is compiler-valid, return choice or deny instead of a patch.";
+    }
+
+    if class == ViolationClass::ContextMismatch {
+        if matches!(expected, NextState::GoalLoop) {
+            return "DO NOT repeat the malformed hunk and do not widen the corrected step. Re-read the supplied buffer and rebuild the same single change block plus its refreshed plan. Between the first and last context/remove record, include every existing source line exactly once and in order, including existing blank lines. An added blank line never replaces an omitted blank context line. Keep dependency ordering, compiler acceptance, goal_complete, and plan.remaining consistent with the same isolated step.";
+        }
+
+        return "DO NOT repeat the malformed hunk and do not widen the corrected step. Re-read the supplied buffer and rebuild the same single change block. Between the first and last context/remove record, include every existing source line exactly once and in order, including existing blank lines. An added blank line never replaces an omitted blank context line. Keep the patch independently compiling and type-checking.";
+    }
+
+    if matches!(expected, NextState::GoalLoop) {
+        "Re-read the affected block with read-only tools and return the corrected patch with the same small scope plus its refreshed plan. It must contain exactly one uninterrupted change block. Preserve compiler acceptance after this patch alone and order declarations or interfaces before every later use or implementation. Context/remove lines must be exact and contiguous. Use open_location only if the required source cannot be inspected."
+    } else {
+        "Rebuild the same step as exactly one uninterrupted change block. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must compile and type-check by itself without work deferred to a later card. Introduce declarations or interfaces in an independently valid patch before any later use or implementation. If the change belongs in a different file than the supplied buffer, return an open_location op with that place instead of another patch."
     }
 }
 
@@ -545,5 +573,26 @@ mod tests {
         });
 
         assert!(duplicate_completed_step(&session, &card).is_some());
+    }
+
+    #[test]
+    fn multi_hunk_repair_demands_dependency_only_before_consumer() {
+        let instruction = repair_instruction(&NextState::GoalLoop, ViolationClass::MultiHunk);
+
+        assert!(instruction.contains("Return ONLY one of its separated change blocks"));
+        assert!(instruction.contains("ONLY the dependency-producing declaration block"));
+        assert!(instruction.contains("leave every consumer byte-for-byte unchanged"));
+        assert!(instruction.contains("goal_complete=false"));
+        assert!(instruction.contains("no later add/remove record is allowed"));
+    }
+
+    #[test]
+    fn context_repair_preserves_blank_source_lines_and_corrected_scope() {
+        let instruction = repair_instruction(&NextState::GoalLoop, ViolationClass::ContextMismatch);
+
+        assert!(instruction.contains("do not widen the corrected step"));
+        assert!(instruction.contains("include every existing source line exactly once"));
+        assert!(instruction.contains("including existing blank lines"));
+        assert!(instruction.contains("never replaces an omitted blank context line"));
     }
 }

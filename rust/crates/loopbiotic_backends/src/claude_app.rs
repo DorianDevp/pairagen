@@ -11,13 +11,17 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 
+use crate::stream::StreamPreview;
+#[cfg(test)]
+use crate::stream::extract_string_field;
 use crate::support::{
     Phase, TurnTimedOut, action_value, args_from_env, await_turn, context_fingerprint, error_card,
-    optional_env, report_progress, turn_phase, turn_timeout_from_env,
+    optional_env, report_preview, report_progress, turn_phase, turn_timeout_from_env,
 };
 use crate::{
     BackendAdapter, BackendIdentity, BackendMetadata, BackendPhaseModels, BackendRequest,
-    BackendResponse, ProgressReporter, enforce_card_contract, estimate_tokens,
+    BackendResponse, IMPLEMENTATION_GUIDELINES, ProgressReporter, enforce_card_contract,
+    estimate_tokens,
 };
 
 const SYSTEM_PROMPT: &str = r#"You are a local Loopbiotic pair-programming partner inside the user's editor.
@@ -37,7 +41,7 @@ Use deny when you cannot or should not proceed (ambiguous prompt, missing inform
 If you can only proceed from a different file or location — for example the change belongs in another file than the supplied buffer — return open_location IMMEDIATELY with that exact place instead of attempting a patch. The editor asks the user for permission, opens the file, and the next message continues this same turn with a.kind "location_granted" and fresh ctx for that buffer; then produce the real op. Never draft a patch against a file that is not the supplied buffer. Use deny only for refusals that navigation cannot solve.
 limits.expected, when set, names the op you must return (deny is always allowed instead; a clarifying choice is also accepted for hypothesis and finding). When limits.expected is null, choose whichever op fits best and ask via choice when the request is ambiguous.
 Patch only for fix actions or when limits.goal_completion is true. When limits.conversation_only is true, never return patch or summary. patch.diff must be unified diff hunks starting with @@ against the corresponding project source.
-When limits.goal_completion is true, advance the explicitly authorized goal one small, compilable hunk per work turn. Return at most one file and exactly one hunk within limits.changed_lines plus plan listing remaining coherent steps; a file may repeat. Set plan.complete=true only on the final step. A concise finding or choice is allowed when programmer attention is needed. Inspect only enough source for the next step, preserve completed_steps, and never repeat accepted work.
+When limits.goal_completion is true, advance the explicitly authorized goal one small, compilable hunk per work turn. Return at most one file and exactly one hunk within limits.changed_lines plus plan listing remaining coherent steps; a file may repeat. Set plan.complete=true only on the final step. Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary. Inspect only enough source for the next step, preserve completed_steps, and never repeat accepted work.
 When limits.goal_completion is true and limits.expected is finding because the user asked why, explain the currently pending hunk without replacing it or advancing the goal. The same draft remains pending after the answer.
 A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Non-goal patches have a null plan.
 Prefer the supplied context; you may use at most two targeted read-only searches when it is insufficient. Never edit files or run commands."#;
@@ -124,101 +128,6 @@ enum StreamEvent {
     Other,
 }
 
-/// Extracts card fields from the partially streamed op JSON so the editor can
-/// show what is being drafted before the turn completes.
-#[derive(Default)]
-struct StreamPreview {
-    buffer: String,
-    title_reported: bool,
-    body_reported: bool,
-}
-
-const PREVIEW_BODY_FIELDS: &[&str] = &[
-    "claim",
-    "finding",
-    "question",
-    "explanation",
-    "reason",
-    "summary",
-    "message",
-];
-const PREVIEW_BUFFER_LIMIT: usize = 4096;
-const PREVIEW_BODY_MIN_CHARS: usize = 40;
-const PREVIEW_BODY_MAX_CHARS: usize = 72;
-
-impl StreamPreview {
-    fn push(&mut self, delta: &str) -> Option<String> {
-        if self.body_reported || self.buffer.len() > PREVIEW_BUFFER_LIMIT {
-            return None;
-        }
-
-        self.buffer.push_str(delta);
-
-        if !self.title_reported {
-            let (title, complete) = extract_string_field(&self.buffer, "title")?;
-            if !complete || title.trim().is_empty() {
-                return None;
-            }
-            self.title_reported = true;
-            return Some(format!("Drafting: {title}"));
-        }
-
-        let (title, _) = extract_string_field(&self.buffer, "title")?;
-        let (body, complete) = PREVIEW_BODY_FIELDS
-            .iter()
-            .find_map(|field| extract_string_field(&self.buffer, field))?;
-        if !complete && body.chars().count() < PREVIEW_BODY_MIN_CHARS {
-            return None;
-        }
-        self.body_reported = true;
-        let snippet = body
-            .chars()
-            .take(PREVIEW_BODY_MAX_CHARS)
-            .collect::<String>();
-        let ellipsis = if body.chars().count() > PREVIEW_BODY_MAX_CHARS || !complete {
-            "…"
-        } else {
-            ""
-        };
-
-        Some(format!("{title}: {snippet}{ellipsis}"))
-    }
-}
-
-/// Returns the (possibly still streaming) value of `"field":"..."` in `json`,
-/// plus whether its closing quote has arrived.
-fn extract_string_field(json: &str, field: &str) -> Option<(String, bool)> {
-    let needle = format!("\"{field}\"");
-    let start = json.find(&needle)? + needle.len();
-    let rest = json[start..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-
-    let mut value = String::new();
-    let mut chars = rest.chars();
-    while let Some(next) = chars.next() {
-        match next {
-            '"' => return Some((value, true)),
-            '\\' => match chars.next() {
-                Some('n') => value.push('\n'),
-                Some('t') => value.push('\t'),
-                Some('u') => {
-                    // Good enough for a preview: skip the escape digits.
-                    for _ in 0..4 {
-                        chars.next();
-                    }
-                    value.push('?');
-                }
-                Some(escaped) => value.push(escaped),
-                None => return Some((value, false)),
-            },
-            _ => value.push(next),
-        }
-    }
-
-    Some((value, false))
-}
-
 impl ClaudeAppBackend {
     pub fn from_env() -> Result<Self> {
         let command =
@@ -303,7 +212,7 @@ impl ClaudeAppBackend {
             "--disallowedTools".into(),
             "Edit,Write,NotebookEdit,Bash".into(),
             "--append-system-prompt".into(),
-            SYSTEM_PROMPT.into(),
+            format!("{SYSTEM_PROMPT}\n\nImplementation guidelines:\n{IMPLEMENTATION_GUIDELINES}"),
         ];
 
         if let Some(model) = model {
@@ -591,8 +500,8 @@ impl ClaudeAppBackend {
                     report_progress(progress, &req.session.id, "working", &activity);
                 }
                 StreamEvent::Delta(text) => {
-                    if let Some(message) = preview.push(&text) {
-                        report_progress(progress, &req.session.id, "drafting", &message);
+                    if let Some(preview) = preview.push(&text) {
+                        report_preview(progress, &req.session.id, preview);
                     }
                 }
                 StreamEvent::Result { text, token_usage } => {
@@ -1054,19 +963,24 @@ mod tests {
     }
 
     #[test]
-    fn preview_reports_title_then_body_once() {
+    fn preview_reports_title_then_body_incrementally() {
         let mut preview = StreamPreview::default();
 
         assert_eq!(preview.push("{\"op\":\"hypothesis\",\"ti"), None);
-        assert_eq!(
-            preview.push("tle\":\"Falsy guard\","),
-            Some("Drafting: Falsy guard".into())
-        );
-        assert_eq!(preview.push("\"claim\":\"The guard rejects"), None);
+        let title = preview
+            .push("tle\":\"Falsy guard\",")
+            .expect("title preview");
+        assert_eq!(title.title, "Falsy guard");
+        assert_eq!(title.body, None);
+        let early_body = preview
+            .push("\"claim\":\"The guard rejects")
+            .expect("early body preview");
+        assert_eq!(early_body.body.as_deref(), Some("The guard rejects"));
         let body = preview
             .push(" 0, empty strings and false, so callers lose data\"")
             .expect("body preview");
-        assert!(body.starts_with("Falsy guard: The guard rejects 0"));
+        assert_eq!(body.title, "Falsy guard");
+        assert!(body.body.unwrap().starts_with("The guard rejects 0"));
         assert_eq!(preview.push("\"more\":\"noise\""), None);
     }
 
@@ -1361,6 +1275,11 @@ mod tests {
         // prompt included); they must be identical for every spawn of the
         // same configuration so the provider cache keys stay byte-stable.
         assert_eq!(first, second);
-        assert!(first.contains(&SYSTEM_PROMPT.to_string()));
+        assert!(first.iter().any(|arg| arg.starts_with(SYSTEM_PROMPT)));
+        assert!(
+            first
+                .iter()
+                .any(|arg| arg.contains(IMPLEMENTATION_GUIDELINES))
+        );
     }
 }

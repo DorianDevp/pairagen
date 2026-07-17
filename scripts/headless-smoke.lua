@@ -309,6 +309,27 @@ if smoke_bin and smoke_bin ~= "" then
   assert(followed, "smoke round-trip timed out waiting for the follow card")
   assert(state.card.kind == "finding", "unexpected follow card kind: " .. tostring(state.card.kind))
 
+  -- Finishing is local lifecycle work: it must close immediately without
+  -- entering Thinking or rendering a redundant Stopped card.
+  loopbiotic.stop()
+  assert(state.session_id == nil, "stop left the session active")
+  assert(state.card == nil, "stop rendered a receipt card")
+  assert(not state.thinking_request_id, "stop entered Thinking")
+
+  -- A new session after stop also proves the daemon processed session/stop
+  -- without shutting down the reusable backend process.
+  loopbiotic.start("/hypothesis Smoke cancellation after local stop", "auto")
+  local restarted = vim.wait(15000, function()
+    return state.session_id ~= nil and state.card ~= nil
+  end, 50)
+  assert(restarted, "smoke round-trip timed out after local stop")
+  local restarted_card_id = state.card.id
+  loopbiotic.action("follow")
+  local refollowed = vim.wait(15000, function()
+    return state.card ~= nil and state.card.id ~= restarted_card_id and not state.thinking_request_id
+  end, 50)
+  assert(refollowed, "smoke round-trip timed out waiting for the restarted follow card")
+
   -- Stopping the backend mid-request must fail the in-flight callback and
   -- clear the thinking spinner instead of leaving it stuck.
   assert(loopbiotic.action_available(state.card, "why"), "follow card offers no why action")

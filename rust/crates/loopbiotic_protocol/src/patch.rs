@@ -7,6 +7,8 @@ use crate::context::ContextBundle;
 pub type PatchId = String;
 
 pub const MAX_PATCH_FILES: usize = 1;
+/// Maximum unified-diff headers per patch. The patch validator additionally
+/// requires one contiguous change run inside that header.
 pub const MAX_HUNKS_PER_PATCH: usize = 1;
 pub const MAX_CHANGED_LINES: usize = 32;
 

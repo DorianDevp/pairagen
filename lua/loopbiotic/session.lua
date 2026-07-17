@@ -68,6 +68,9 @@ end
 --- update_model=false keeps state.backend_model untouched; track_backend_error=false marks a local result
 function M.apply_turn_result(result, opts)
   opts = opts or {}
+  local suppress_accept_summary = state.accept_continuation == true
+    and type(result.card) == "table"
+    and result.card.kind == "summary"
 
   state.token_usage = type(result.token_usage) == "table" and result.token_usage or nil
   state.turn_token_usage = type(result.turn_token_usage) == "table" and result.turn_token_usage or nil
@@ -88,6 +91,14 @@ function M.apply_turn_result(result, opts)
   end
   if result.card and result.card.kind ~= "working" then
     state.cancelled_turn_id = nil
+    state.accept_continuation = nil
+  end
+  if suppress_accept_summary then
+    state.last_card = result.card
+    state.card = nil
+    require("loopbiotic.ui").close(state.card_win)
+    state.card_win = nil
+    return
   end
   if type(result.card) == "table" then
     require("loopbiotic.card").show(result.card)

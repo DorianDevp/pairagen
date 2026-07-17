@@ -23,6 +23,11 @@ rpc.on("agent/progress", function(progress)
   then
     state.card.phase = progress.phase or state.card.phase
     state.card.message = progress.message or state.card.message
+    if type(progress.preview) == "table" then
+      state.card.preview = progress.preview
+    elseif progress.phase == "repairing" or progress.phase == "restarting" then
+      state.card.preview = nil
+    end
     card.show(state.card)
     return
   end
@@ -37,6 +42,7 @@ rpc.on("agent/turn_ready", function(params)
     return
   end
   if params.error then
+    state.accept_continuation = nil
     ui.notify(params.error, vim.log.levels.ERROR)
     return
   end
@@ -118,6 +124,7 @@ function M.start(text, mode, source)
     return
   end
 
+  state.accept_continuation = nil
   status.hide()
   local request_id = thinking.start("Thinking", nil)
   local params, captured = context.current(text, mode)
@@ -178,8 +185,14 @@ function M.action(action, opts)
     return
   end
 
+  if action == "stop" then
+    M.stop()
+    return
+  end
+
   if state.card and state.card.kind == "working" then
     state.cancelled_turn_id = state.card.turn_id
+    state.accept_continuation = nil
   end
 
   if action == "why" then
@@ -340,6 +353,7 @@ function M.reply(text)
 
   if state.card and state.card.kind == "working" then
     state.cancelled_turn_id = state.card.turn_id
+    state.accept_continuation = nil
   end
 
   local diff = require("loopbiotic.diff")
@@ -411,11 +425,46 @@ function M.confirm_agent_turn(action)
 end
 
 function M.stop()
-  if not state.session_id then
+  local session_id = state.session_id
+  if not session_id then
     return
   end
 
-  M.action("stop")
+  -- Finishing a session is a local lifecycle action, not an agent turn.
+  -- Tear down the UI immediately and notify the daemon in the background;
+  -- never show Thinking or a redundant "Stopped" receipt.
+  require("loopbiotic.diff").restore_source()
+  thinking.stop(true)
+  ui.close(state.card_win)
+  status.hide()
+
+  state.session_id = nil
+  state.source_buf = nil
+  state.source_cursor = nil
+  state.card = nil
+  state.last_card = nil
+  state.card_win = nil
+  state.goal = nil
+  state.token_usage = nil
+  state.turn_token_usage = nil
+  state.context_report = nil
+  state.workspace_hints = nil
+  state.completion_notified_card = nil
+  state.completion_checked_card = nil
+  state.details_card = nil
+  state.details_expanded = false
+  state.navigated_card = nil
+  state.cancelled_turn_id = nil
+  state.accept_continuation = nil
+
+  rpc.request("session/stop", {
+    session_id = session_id,
+    action = "stop",
+  }, function(message)
+    if message.error then
+      log.write("session stop error", message.error)
+    end
+  end)
 end
 
 function M.resume()

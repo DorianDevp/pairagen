@@ -26,6 +26,7 @@ local util = require("loopbiotic.util")
 ---@field reason? string deny cards
 ---@field question? string choice cards
 ---@field options? { id?: string, label?: string }[] choice cards
+---@field preview? table non-actionable streamed { title, body? } for working cards
 
 local M = {}
 
@@ -44,7 +45,6 @@ local labels = {
   edit_prompt = { "e", "Edit", nil },
   open = { "o", "Open", "go_to" },
   run_check = { "t", "Check", nil },
-  next = { "n", "Assess goal", nil },
   stop = { "q", "Stop", "stop" },
 }
 
@@ -101,10 +101,6 @@ function M.show(card, opts)
   M.bind(buf, card)
   M.highlight(buf, lines, card)
 
-  if card.kind == "summary" and M.has_action(card, "next") and state.completion_notified_card ~= card.id then
-    state.completion_notified_card = card.id
-    ui.notify("Local step applied. Assess the goal, run checks, or stop.")
-  end
   if card.kind == "summary" and card.title == "Goal complete" and state.completion_checked_card ~= card.id then
     state.completion_checked_card = card.id
     vim.defer_fn(function()
@@ -137,7 +133,17 @@ function M.lines(card)
     table.insert(lines, "")
     table.insert(lines, tostring(#(card.patches or {})) .. " file patch pending")
   elseif card.kind == "working" then
-    table.insert(lines, card.message or card.title or "Agent is still working")
+    if type(card.preview) == "table" and type(card.preview.title) == "string" then
+      table.insert(lines, "Draft · validating before actions")
+      table.insert(lines, "")
+      M.add(lines, card.preview.title)
+      if type(card.preview.body) == "string" and card.preview.body ~= "" then
+        table.insert(lines, "")
+        M.add(lines, card.preview.body)
+      end
+    else
+      table.insert(lines, card.message or card.title or "Agent is still working")
+    end
     table.insert(lines, "")
     table.insert(lines, string.format("Phase  %s", card.phase or "working"))
     table.insert(
@@ -149,11 +155,7 @@ function M.lines(card)
       )
     )
   elseif card.kind == "summary" then
-    if M.has_action(card, "next") then
-      table.insert(lines, "Status  Local step applied")
-      table.insert(lines, "Assess  Check the whole goal before drafting again")
-      table.insert(lines, "")
-    elseif card.title ~= "Stopped" then
+    if card.title ~= "Stopped" then
       table.insert(lines, "Status  Goal complete")
       table.insert(lines, "Next    Run checks, send a message, or stop")
       table.insert(lines, "")
@@ -210,9 +212,7 @@ function M.goal(lines)
   if completed > 0 then
     table.insert(lines, string.format("Done  %d local step%s", completed, completed == 1 and "" or "s"))
   end
-  if goal.status == "needs_review" then
-    table.insert(lines, "State Needs goal assessment")
-  elseif goal.status == "complete" then
+  if goal.status == "complete" then
     table.insert(lines, "State Goal complete")
   elseif goal.status == "paused" then
     table.insert(lines, "State Goal paused")

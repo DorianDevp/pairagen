@@ -223,7 +223,7 @@ impl Engine {
             // These actions abandon the pending slice, so a speculated
             // continuation built on top of it can only be wasted work.
             self.cancel_goal_continuation(&mut session).await;
-            self.cancel_post_accept_prefetch(&mut session).await;
+            self.cancel_accept_continuation(&mut session).await;
         }
         let result = self
             .action_taken(session_id, &mut session, action, progress, None)
@@ -264,7 +264,7 @@ impl Engine {
         // A reply reworks or replaces whatever is pending, so a speculated
         // continuation of the current slice is stale.
         self.cancel_goal_continuation(&mut session).await;
-        self.cancel_post_accept_prefetch(&mut session).await;
+        self.cancel_accept_continuation(&mut session).await;
         let result = self
             .reply_taken(session_id, &mut session, text, progress)
             .await;
@@ -500,6 +500,7 @@ impl Engine {
                 session.cards.last(),
                 Some(Card::Patch(card)) if card.goal_complete
             );
+            let was_goal_active = session.goal_active;
             let completed_steps = completed_patch_steps(session);
             let completed_step_signatures = completed_patch_signatures(session);
             session.completed_steps.extend(completed_steps);
@@ -507,91 +508,70 @@ impl Engine {
                 .completed_step_signatures
                 .extend(completed_step_signatures);
             session.accepted_patches.extend(result.patch_ids.clone());
-            session.state = SessionState::Summary;
-            session.goal_status = if session.goal_active {
-                loopbiotic_protocol::GoalStatus::NeedsReview
-            } else {
-                loopbiotic_protocol::GoalStatus::Idle
-            };
+            // Accept means “continue solving”, not “show me a receipt”. The
+            // patch card already explained the reviewed change, so every
+            // accepted patch enters the goal loop and either surfaces the next
+            // proposal or completes silently in the editor.
+            session.goal_active = true;
+            session.goal_paused = false;
+            session.goal_status = loopbiotic_protocol::GoalStatus::Active;
             session.next_step = None;
-            if session.goal_active {
-                if let Some(next) = session.pending_patch_cards.pop_front() {
-                    session.state = SessionState::PatchShown;
-                    session.goal_status = loopbiotic_protocol::GoalStatus::Active;
-                    session.next_step = Some(next.explanation.clone());
-                    let card = Card::Patch(next);
-                    session.cards.push(card.clone());
+            if let Some(next) = session.pending_patch_cards.pop_front() {
+                session.state = SessionState::PatchShown;
+                session.next_step = Some(next.explanation.clone());
+                let card = Card::Patch(next);
+                session.cards.push(card.clone());
 
-                    return Ok(ActionResult {
-                        session_id,
-                        card,
-                        goal: goal_progress(session),
-                        token_usage: session.token_usage.clone(),
-                        turn_token_usage: TokenUsage::default(),
-                        context_report: session.context.report.clone(),
-                        model: None,
-                        attempts: vec![],
-                    });
-                }
-                if completes_goal {
-                    return Ok(complete_goal_locally(&session_id, session));
-                }
-                // The last queued hunk was accepted: consume the slice that
-                // was speculated while the user reviewed (awaiting it if it is
-                // still generating); without one, run the turn for real.
-                let speculated = self.take_goal_continuation(&session_id).await;
-                return self
-                    .goal_turn_taken(
-                        &session_id,
-                        session,
-                        BackendAction::User(Action::Goal),
-                        progress,
-                        speculated,
-                    )
-                    .await;
+                return Ok(ActionResult {
+                    session_id,
+                    card,
+                    goal: goal_progress(session),
+                    token_usage: session.token_usage.clone(),
+                    turn_token_usage: TokenUsage::default(),
+                    context_report: session.context.report.clone(),
+                    model: None,
+                    attempts: vec![],
+                });
             }
-            let expected = NextState::Conversation;
-            // Applying the local patch is already complete and must survive a
-            // cancelled/overridden post-accept model turn. Commit that fact
-            // before awaiting the read-only continuation, then reserve a new
-            // generation for the background conversation.
+            if completes_goal {
+                if !was_goal_active {
+                    self.cancel_accept_continuation(session).await;
+                }
+                return Ok(complete_goal_locally(&session_id, session));
+            }
+
+            // Persist the accepted patch before awaiting any speculative or
+            // live continuation. The daemon may return a Working card and
+            // later cancel that task; cancellation must never make an
+            // already-applied patch look pending again.
             session.state = SessionState::CardShown;
             self.commit_session(session.clone(), *generation)?;
             *generation = self.begin_turn(&session_id)?;
             session.turn_generation = *generation;
             session.state = SessionState::Thinking;
-            let prefetched = self.take_post_accept_prefetch(session).await;
-            let response = self
-                .next_distinct_response(
+
+            // Explicit goal slices use their planned continuation. An
+            // ordinary patch consumes the acceptance continuation prepared
+            // while the user reviewed it. Either path is revalidated against
+            // the freshly applied editor context before it can surface.
+            let speculated = if was_goal_active {
+                self.take_goal_continuation(&session_id).await
+            } else {
+                self.take_accept_continuation(session).await
+            };
+            return self
+                .goal_turn_taken(
+                    &session_id,
                     session,
-                    BackendAction::PostAccept,
-                    session.context.clone(),
-                    &expected,
+                    BackendAction::User(Action::Goal),
                     progress,
-                    prefetched,
+                    speculated,
                 )
                 .await;
-            session.interaction_feedback.clear();
-            let turn_token_usage = response.metadata.token_usage.clone().unwrap_or_default();
-            let attempts = response.metadata.attempts.clone();
-            let model = response.metadata.model.clone();
-            self.add_usage(session, &response.metadata.token_usage);
-            let card = self.accept_response(session, response, expected)?;
-
-            return Ok(ActionResult {
-                session_id,
-                card,
-                goal: goal_progress(session),
-                token_usage: session.token_usage.clone(),
-                turn_token_usage,
-                context_report: session.context.report.clone(),
-                model,
-                attempts,
-            });
         }
 
         session.rejected_patches.extend(result.patch_ids.clone());
-        self.cancel_post_accept_prefetch(session).await;
+        self.cancel_accept_continuation(session).await;
         session.pending_patch_cards.clear();
         session.goal_slice_continues = false;
         session.next_step = None;
@@ -895,7 +875,7 @@ impl Engine {
             .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
         session.turn_generation += 1;
         self.cancel_goal_continuation(&mut session).await;
-        self.cancel_post_accept_prefetch(&mut session).await;
+        self.cancel_accept_continuation(&mut session).await;
         if session.goal_active {
             session.goal_active = false;
             session.goal_paused = true;
@@ -919,8 +899,8 @@ impl Engine {
             session.state = SessionState::CardShown;
             let card = Card::Finding(FindingCard {
                 id: session.next_card_id("accepted_cancelled"),
-                title: "Local step accepted".into(),
-                finding: "The patch remains applied. The automatic follow-up was cancelled; send a message or explicitly choose the next step.".into(),
+                title: "Continuation cancelled".into(),
+                finding: "The automatic continuation was cancelled. The reviewed change remains applied; send a message or explicitly choose the next step.".into(),
                 location: None,
                 annotation: None,
                 actions: vec![
@@ -1002,7 +982,6 @@ fn expected_card_kind(
             Mode::Auto => None,
         }),
         BackendAction::Reply(_) => None,
-        BackendAction::PostAccept => None,
         BackendAction::ContractRetry(_) => None,
         BackendAction::LocationGranted => None,
         BackendAction::User(action) => match action {

@@ -78,6 +78,119 @@ return function(t)
     cleanup()
   end)
 
+  t.test("stop finishes locally without starting Thinking or showing a receipt", function()
+    state.reset()
+    local loopbiotic = require("loopbiotic")
+    local rpc = require("loopbiotic.rpc")
+    local source = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_win_set_buf(0, source)
+    state.session_id = "s_stop"
+    state.source_buf = source
+    state.source_cursor = { 1, 0 }
+
+    card.show({
+      id = "c_stop",
+      kind = "finding",
+      title = "Ready",
+      finding = "There is no reason to ask the model to stop.",
+      actions = { "stop" },
+    })
+
+    local original_request = rpc.request
+    local sent
+    rpc.request = function(method, params)
+      sent = { method = method, params = params }
+      return 1
+    end
+
+    local ok, err = pcall(function()
+      loopbiotic.action("stop")
+      t.eq(sent.method, "session/stop", "local stop endpoint")
+      t.eq(sent.params.session_id, "s_stop", "stopped session")
+      t.eq(state.thinking_request_id, nil, "stop must not start Thinking")
+      t.eq(state.session_id, nil, "session finishes immediately")
+      t.eq(state.card, nil, "Stopped receipt stays hidden")
+      t.eq(state.card_win, nil, "card closes immediately")
+    end)
+
+    rpc.request = original_request
+    if vim.api.nvim_buf_is_valid(source) then
+      vim.api.nvim_buf_delete(source, { force = true })
+    end
+    state.reset()
+    if not ok then
+      error(err, 0)
+    end
+  end)
+
+  t.test("working card renders streamed preview without final-card actions", function()
+    state.reset()
+    local source = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_win_set_buf(0, source)
+    state.session_id = "s_preview"
+    state.source_buf = source
+    state.source_cursor = { 1, 0 }
+
+    card.show({
+      id = "c_preview",
+      kind = "working",
+      turn_id = "t_preview",
+      title = "Agent still working",
+      phase = "drafting",
+      message = "Drafting a response",
+      preview = {
+        title = "Avoid the stale cache",
+        body = "The current key survives a source change and reuses outdated context.",
+      },
+      deadline_ms = 10000,
+      elapsed_ms = 12000,
+      actions = { "cancel_turn", "stop" },
+    })
+
+    local rendered = table.concat(vim.api.nvim_buf_get_lines(state.card_buf, 0, -1, false), "\n")
+    t.eq(rendered:find("Avoid the stale cache", 1, true) ~= nil, true, "preview title")
+    t.eq(rendered:find("reuses outdated context", 1, true) ~= nil, true, "preview body")
+    t.eq(mapped(state.card_buf, "c"), true, "cancel remains available")
+    t.eq(mapped(state.card_buf, "a"), false, "apply stays unavailable")
+    cleanup()
+  end)
+
+  t.test("thinking view updates repeated streaming previews", function()
+    state.reset()
+    local thinking = require("loopbiotic.thinking")
+    local source = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_win_set_buf(0, source)
+    state.session_id = "s_thinking_preview"
+    state.source_buf = source
+    state.source_cursor = { 1, 0 }
+    state.thinking_request_id = "request"
+    state.thinking_session_id = state.session_id
+    state.thinking_started_at = (vim.uv or vim.loop).hrtime()
+    state.thinking_steps = {
+      { phase = "drafting", message = "Drafting a response", current = true },
+    }
+
+    thinking.progress({
+      session_id = state.session_id,
+      phase = "drafting",
+      message = "Drafting a response",
+      preview = { title = "First title", body = "The first partial body." },
+    })
+    thinking.progress({
+      session_id = state.session_id,
+      phase = "drafting",
+      message = "Drafting a response",
+      preview = { title = "First title", body = "The first partial body now contains more evidence." },
+    })
+
+    local rendered = table.concat(vim.api.nvim_buf_get_lines(state.card_buf, 0, -1, false), "\n")
+    t.eq(state.thinking_preview.body, "The first partial body now contains more evidence.", "latest preview state")
+    t.eq(rendered:find("evidence", 1, true) ~= nil, true, "updated body rendered")
+    t.eq(rendered:find("validating before actions", 1, true) ~= nil, true, "safety label")
+    thinking.stop(true)
+    cleanup()
+  end)
+
   t.test("draft control card binds every configured shortcut it prints", function()
     state.reset()
     local draft = vim.api.nvim_create_buf(false, true)

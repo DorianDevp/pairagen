@@ -263,9 +263,10 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
 }
 
 fn agent_api() -> serde_json::Value {
-    json!(
-        "Return one JSON Loopbiotic op only. Ops: hypothesis, finding, patch, choice, deny, open_location, summary, error. When limits.conversation_only is true, never return patch or summary. Return patch for user action fix or start mode fix unless impossible. Goal execution is explicit and advances one small, compilable hunk per turn with a plan of remaining coherent steps. A patch is exactly one file and one hunk within the supplied changed-line limit. You may emit loopbiotic_progress records before the result. Never emit hidden reasoning. End with either a raw Loopbiotic op or a loopbiotic_result record."
-    )
+    json!(format!(
+        "Return one JSON Loopbiotic op only. Ops: hypothesis, finding, patch, choice, deny, open_location, summary, error. When limits.conversation_only is true, never return patch or summary. Return patch for user action fix or start mode fix unless impossible. Goal execution is explicit and advances one small, compilable hunk per turn with a plan of remaining coherent steps. A patch is exactly one file and one hunk within the supplied changed-line limit. You may emit loopbiotic_progress records before the result. Never emit hidden reasoning. End with either a raw Loopbiotic op or a loopbiotic_result record. Implementation guidelines: {}",
+        crate::IMPLEMENTATION_GUIDELINES
+    ))
 }
 
 fn parse_agent_output(output: &str) -> Result<Card> {
@@ -283,6 +284,15 @@ mod tests {
         let card = parse_agent_output(r#"{"op":"hypothesis","title":"T","claim":"C"}"#).unwrap();
 
         assert!(matches!(card, Card::Hypothesis(_)));
+    }
+
+    #[test]
+    fn agent_api_requires_dependency_first_compiler_safe_patches() {
+        let api = agent_api().as_str().unwrap().to_string();
+
+        assert!(api.contains("Compiler acceptance is a hard invariant"));
+        assert!(api.contains("before any later patch first references, implements"));
+        assert!(api.contains("exactly one uninterrupted change block"));
     }
 
     #[tokio::test]

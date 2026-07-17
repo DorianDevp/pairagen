@@ -310,7 +310,7 @@ impl TurnCommand {
                 ..
             } => "work",
             Self::Action { .. } => "conversation",
-            Self::Apply { .. } => "post_accept",
+            Self::Apply { .. } => "continuation",
         }
     }
 }

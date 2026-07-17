@@ -1,6 +1,6 @@
-//! Speculative work while the user is still reading the current card:
-//! read-only post-accept conversation for ordinary drafts, and the next small
-//! patch only inside an explicitly authorized goal.
+//! Speculative work while the user is still reading the current card. The
+//! current patch is never mutated here: the backend only prepares the next
+//! goal assessment or small patch that may surface after acceptance.
 
 use anyhow::Result;
 use loopbiotic_backends::{BackendAction, BackendResponse};
@@ -9,10 +9,10 @@ use loopbiotic_protocol::Action;
 use crate::session::Session;
 use crate::state::{NextState, SessionState};
 
-use super::Engine;
+use super::{Engine, completed_patch_steps};
 
-/// Ordinary speculation is read-only. While a non-goal patch is reviewed,
-/// prepare the conversational follow-up that should appear if it is accepted.
+/// Speculation is read-only. While an ordinary patch is reviewed, prepare the
+/// same goal-continuation turn acceptance would otherwise start from scratch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrefetchMode {
     Off,
@@ -37,8 +37,8 @@ impl Continuation {
 }
 
 impl Engine {
-    /// Prepares the read-only card that follows acceptance of an ordinary
-    /// draft. Patch speculation is reserved for explicit goals below.
+    /// Prepares the next goal card after acceptance of an ordinary draft.
+    /// Any patch it returns remains a proposal requiring explicit review.
     pub(super) async fn schedule_prefetch(&mut self, session_id: &str) {
         if self.prefetch_mode != PrefetchMode::ReadOnly {
             return;
@@ -73,11 +73,19 @@ impl Engine {
             return;
         }
 
+        // Speculation happens before the editor reports acceptance, but the
+        // continuation prompt must already treat the reviewed patch as done.
+        // The response is only consumed after a successful apply result.
+        let mut assumed_accepted = session.clone();
+        assumed_accepted.goal_active = true;
+        assumed_accepted
+            .completed_steps
+            .extend(completed_patch_steps(session));
         let request = self.request(
-            session,
-            BackendAction::PostAccept,
+            &assumed_accepted,
+            BackendAction::User(Action::Goal),
             session.context.clone(),
-            &NextState::Conversation,
+            &NextState::GoalLoop,
         );
         let backend = self.backend.clone();
         let handle = tokio::spawn(async move { backend.next_card(request).await });
@@ -86,7 +94,7 @@ impl Engine {
             .insert(session_id.to_string(), Prefetch { handle });
     }
 
-    pub(super) async fn take_post_accept_prefetch(
+    pub(super) async fn take_accept_continuation(
         &mut self,
         session: &mut Session,
     ) -> Option<BackendResponse> {
@@ -98,7 +106,7 @@ impl Engine {
         }
     }
 
-    pub(super) async fn cancel_post_accept_prefetch(&mut self, session: &mut Session) {
+    pub(super) async fn cancel_accept_continuation(&mut self, session: &mut Session) {
         let Some(entry) = self.prefetches.remove(&session.id) else {
             return;
         };

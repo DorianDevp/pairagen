@@ -87,6 +87,50 @@ return function(t)
     state.reset()
   end)
 
+  t.test("accepted patch completion stays silent after its proposal", function()
+    state.reset()
+    state.accept_continuation = true
+    state.card = { id = "working", kind = "working" }
+    local result = turn_result()
+    result.goal = { statement = "updated goal", status = "complete" }
+    result.card = {
+      id = "complete",
+      kind = "summary",
+      title = "Goal complete",
+      summary = "The accepted change completed the goal.",
+    }
+
+    with_stubbed_show(function(shown)
+      session.apply_turn_result(result)
+      t.eq(#shown, 0, "redundant completion card must not be shown")
+      t.eq(state.card, nil, "no card remains after silent completion")
+      t.eq(state.last_card.id, "complete", "completion is retained for state and checks")
+      t.eq(state.goal.status, "complete", "goal completion is retained")
+      t.eq(state.accept_continuation, nil, "accept continuation is consumed")
+    end)
+    state.reset()
+  end)
+
+  t.test("accepted patch still surfaces the next unresolved change", function()
+    state.reset()
+    state.accept_continuation = true
+    local result = turn_result()
+    result.card = {
+      id = "next-patch",
+      kind = "patch",
+      explanation = "Continue with the next unresolved part.",
+      patches = {},
+    }
+
+    with_stubbed_show(function(shown)
+      session.apply_turn_result(result)
+      t.eq(#shown, 1, "next patch remains reviewable")
+      t.eq(shown[1].id, "next-patch")
+      t.eq(state.accept_continuation, nil, "accept continuation is consumed")
+    end)
+    state.reset()
+  end)
+
   t.test("local rejection cards do not count as repeated backend errors", function()
     state.reset()
     state.last_backend_error = "old backend failure"

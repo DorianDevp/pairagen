@@ -20,7 +20,8 @@ use crate::support::{
 };
 use crate::{
     BackendAdapter, BackendIdentity, BackendMetadata, BackendPhaseModels, BackendRequest,
-    BackendResponse, ProgressReporter, enforce_card_contract, estimate_tokens,
+    BackendResponse, IMPLEMENTATION_GUIDELINES, ProgressReporter, enforce_card_contract,
+    estimate_tokens,
 };
 
 use transport::{ActiveTurn, CodexAppProcess, CodexAppState, TurnOutput};
@@ -535,9 +536,18 @@ Patch file paths must be relative.
 fn prompt(req: &BackendRequest, include_context: bool) -> String {
     let patch_turn = turn_phase(req) == Phase::Patch;
     let goal_loop = req.card_contract.allow_goal_completion;
+    let goal_action = matches!(
+        req.action,
+        crate::BackendAction::User(loopbiotic_protocol::Action::Goal)
+    );
+    let continuing_goal = !req.session.completed_steps.is_empty()
+        || matches!(
+            req.session.last_card,
+            Some(loopbiotic_protocol::Card::Patch(_))
+        );
+    let first_goal_patch = goal_loop && goal_action && !continuing_goal;
     let goal_question = goal_loop
         && req.card_contract.expected_kind == Some(loopbiotic_protocol::CardKind::Finding);
-    let post_accept = matches!(req.action, crate::BackendAction::PostAccept);
     let turn_rules = if goal_question {
         "- Explain why the currently pending patch is the right next step for the original goal.\n\
          - Address its behavior, tradeoffs, and relevant evidence from the code.\n\
@@ -545,26 +555,25 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
          - The exact pending patch remains awaiting user acceptance after this answer."
             .into()
     } else if goal_loop {
-        let lead = if matches!(
-            req.action,
-            crate::BackendAction::User(loopbiotic_protocol::Action::Goal)
-        ) {
+        let lead = if goal_action && continuing_goal {
             "- Continue with the next planned coherent step; the previous hunk was accepted.\n"
+        } else if goal_action {
+            "- Begin with the earliest dependency-producing, independently compiler-valid step. Return that step only; no consumer or implementation may share its card.\n"
         } else {
             ""
         };
         format!(
             "{lead}\
              - Continue executing the original session goal from the accepted progress; never restart or repeat a completed step.\n\
-             - Return at most one file and exactly one coherent, compilable hunk changing at most {} added/removed lines.\n\
+             - Return at most one file and exactly one uninterrupted, compilable change block changing at most {} added/removed lines. One @@ header is not enough: after context follows the first add/remove record, there must be no later add/remove record.\n\
              - Inspect only enough project context to produce that next step. Tool reads are valid patch source because Loopbiotic verifies the hunk before review.\n\
              - With the patch return plan: list the remaining coherent steps, each with its target file and one-line summary. A file may appear more than once. Set complete=true only when this hunk is the final step.\n\
              - Create a missing file incrementally before steps that reference it.\n\
              - Use open_location only when a required source cannot be inspected with read-only project tools.\n\
              - Set goal_complete=true only together with plan.complete=true.\n\
              - Return summary only when every requirement in the original goal is satisfied; cite the completed result.\n\
-             - Return choice only when a genuine user decision blocks all safe progress.\n\
-             - A concise finding is allowed when the programmer should see evidence before another draft.",
+             - Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary.\n\
+             - Implementation guidelines: {IMPLEMENTATION_GUIDELINES}",
             req.card_contract.max_changed_lines,
         )
     } else if patch_turn {
@@ -577,15 +586,10 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
              - If a safe step needs unseen references or more changed lines, limit this hunk to self-contained preparation such as adding only the new struct definition.\n\
              - Context and remove lines must be exact, contiguous source lines from the supplied buffer; never omit source lines between two context lines.\n\
              - Use the supplied buffer excerpt as the only patch source. Diagnostics and ranked context are evidence only; never patch a different file or unseen block.\n\
-             - Do not inspect the project or use tools.",
+             - Do not inspect the project or use tools.\n\
+             - Implementation guidelines: {IMPLEMENTATION_GUIDELINES}",
             req.card_contract.max_changed_lines
         )
-    } else if post_accept {
-        "- The programmer accepted the previous local draft.\n\
-         - Respond with the most useful immediate observation, verification target, or concise question.\n\
-         - This is read-only conversational follow-up: never return another patch or a completion summary.\n\
-         - Keep the response compact and hand control back immediately."
-            .into()
     } else {
         "- Find only one useful next move, not a plan for the whole solution.\n\
          - Treat an editor diagnostic at or nearest the cursor as the strongest direct signal unless the source disproves it; a distant warning or deprecation must not displace a cursor-local error.\n\
@@ -602,7 +606,6 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
         "- finding: concise explanation of the pending hunk"
     } else if goal_loop {
         "- patch: one small structured hunk for local review; include goal_complete and plan {remaining: [{file, summary}], complete}\n\
-- finding or hypothesis: concise evidence that needs programmer attention before another hunk\n\
 - open_location: when the next hunk belongs in another buffer; put the target in location (not next) and the explanation in reason (not message)\n\
 - choice: only for a blocking user decision\n\
 - summary: only when the complete original goal is satisfied"
@@ -634,6 +637,14 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             .join("\n")
     };
     let diagnostics = editor_diagnostics(req);
+    let immediate_directive = if first_goal_patch {
+        "FIRST GOAL PATCH ONLY: return the earliest dependency-producing standalone change and nothing that consumes it. For interface or named-type extraction, add only the independently compiler-valid declaration now; leave the existing inline type, implementation, and every consumer byte-for-byte unchanged. Set goal_complete=false and put the consumer replacement in plan.remaining."
+            .to_string()
+    } else if let crate::BackendAction::ContractRetry(reason) = &req.action {
+        format!("REPAIR THIS EXACT VIOLATION NOW: {reason}")
+    } else {
+        "Apply the rules above to exactly this turn.".into()
+    };
 
     let source_context = if include_context {
         format!(
@@ -671,7 +682,9 @@ Known findings and signals (do not repeat): {known_observations}
 Interaction feedback: {interaction_feedback}
 Action: {action}
 Last card: {last}
-{source_context}"#,
+{source_context}
+
+Immediate directive (highest priority for this response): {immediate_directive}"#,
         prompt = req.session.prompt,
         completed_steps =
             serde_json::to_string(&req.session.completed_steps).unwrap_or_else(|_| "[]".into()),
@@ -690,6 +703,7 @@ Last card: {last}
         output_contract = output_contract,
         last = req.session.last_summary.as_deref().unwrap_or("none"),
         source_context = source_context,
+        immediate_directive = immediate_directive,
     )
 }
 
@@ -1036,9 +1050,12 @@ mod tests {
         let prompt = prompt(&request, true);
 
         assert!(prompt.contains("Tool reads are valid patch source"));
-        assert!(prompt.contains("exactly one coherent, compilable hunk"));
+        assert!(prompt.contains("exactly one uninterrupted, compilable change block"));
         assert!(prompt.contains("With the patch return plan"));
         assert!(prompt.contains("complete=true only when this hunk is the final step"));
+        assert!(prompt.contains("Compiler acceptance is a hard invariant"));
+        assert!(prompt.contains("first patch contains ONLY the independently valid declaration"));
+        assert!(prompt.contains("after the first add/remove record"));
         assert!(!prompt.contains("Continue with the next planned coherent step"));
     }
 
@@ -1048,10 +1065,30 @@ mod tests {
         request.card_contract.allow_goal_completion = true;
         request.card_contract.expected_kind = None;
         request.action = BackendAction::User(Action::Goal);
+        request
+            .session
+            .completed_steps
+            .push("accepted declaration".into());
         let prompt = prompt(&request, true);
 
         assert!(prompt.contains("Continue with the next planned coherent step"));
-        assert!(prompt.contains("exactly one coherent, compilable hunk"));
+        assert!(prompt.contains("exactly one uninterrupted, compilable change block"));
+    }
+
+    #[test]
+    fn first_goal_prompt_does_not_claim_a_patch_was_already_accepted() {
+        let mut request = request();
+        request.card_contract.allow_goal_completion = true;
+        request.card_contract.expected_kind = None;
+        request.action = BackendAction::User(Action::Goal);
+
+        let prompt = prompt(&request, true);
+
+        assert!(prompt.contains("Begin with the earliest dependency-producing"));
+        assert!(prompt.contains("Return that step only"));
+        assert!(prompt.contains("FIRST GOAL PATCH ONLY"));
+        assert!(prompt.contains("leave the existing inline type"));
+        assert!(!prompt.contains("previous hunk was accepted"));
     }
 
     #[test]
@@ -1061,9 +1098,12 @@ mod tests {
 
         let patch_prompt = prompt(&request, true);
         assert!(!patch_prompt.contains("With the patch return plan"));
+        assert!(patch_prompt.contains("Compiler acceptance is a hard invariant"));
+        assert!(patch_prompt.contains("before any later patch first references, implements"));
 
         request.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Hypothesis);
         let discovery_prompt = prompt(&request, true);
         assert!(!discovery_prompt.contains("With the patch return plan"));
+        assert!(!discovery_prompt.contains("Compiler acceptance is a hard invariant"));
     }
 }

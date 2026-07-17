@@ -36,7 +36,6 @@ impl BackendAdapter for MockBackend {
                 BackendAction::User(Action::Stop) => stop_card(),
                 BackendAction::User(action) => unsupported_card(action),
                 BackendAction::Reply(text) => reply_card(text),
-                BackendAction::PostAccept => post_accept_card(),
                 BackendAction::ContractRetry(_) => finding_card(),
                 BackendAction::LocationGranted => patch_card(&req),
             }
@@ -74,17 +73,6 @@ impl BackendAdapter for MockBackend {
     }
 }
 
-fn post_accept_card() -> Card {
-    Card::Finding(FindingCard {
-        id: "c_post_accept".into(),
-        title: "Local step accepted".into(),
-        finding: "The accepted hunk is in place. Exercise the changed behavior before authorizing more code.".into(),
-        location: None,
-        annotation: None,
-        actions: vec![Action::Follow, Action::Goal, Action::RunCheck, Action::Stop],
-    })
-}
-
 /// Later slices of the mock's three-slice goal. The first slice always
 /// targets the live buffer; these two use fixed single-line sources so tests
 /// (and the daemon's editor/read_file flow) can serve matching buffers.
@@ -119,6 +107,18 @@ fn goal_card(req: &BackendRequest) -> Card {
     }
 
     let Some(plan) = last_plan else {
+        // An ordinary accepted patch enters the goal loop without showing a
+        // post-accept receipt. Its speculative request already carries that
+        // patch in completed_steps, so this tiny mock can finish directly.
+        if !req.session.completed_steps.is_empty() {
+            return Card::Summary(SummaryCard {
+                id: "c_complete".into(),
+                title: "Goal complete".into(),
+                summary: "The accepted change completes the requested local fix.".into(),
+                changed_files: vec!["src/work.ts".into()],
+                next_actions: vec![Action::RunCheck, Action::Stop],
+            });
+        }
         // A fresh goal turn: slice the live buffer first.
         return slice_card(
             "c_slice_1",

@@ -9,6 +9,7 @@ return function(t)
     state.token_usage = { total_tokens = 12 }
     state.details_expanded = true
     state.thinking_frame = 7
+    state.thinking_preview = { title = "Partial" }
     state.workspace_hints = { { file = "a.lua" } }
 
     state.reset()
@@ -20,6 +21,7 @@ return function(t)
     t.eq(state.token_usage, nil, "token_usage")
     t.eq(state.details_expanded, false, "details_expanded")
     t.eq(state.thinking_frame, nil, "thinking_frame")
+    t.eq(state.thinking_preview, nil, "thinking_preview")
     t.eq(state.workspace_hints, nil, "workspace_hints")
   end)
 

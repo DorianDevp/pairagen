@@ -6,7 +6,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
-use loopbiotic_patch::{PatchApply, UnifiedDiff};
+use loopbiotic_patch::{DiffLine, PatchApply, UnifiedDiff};
 use loopbiotic_protocol::PROTOCOL_VERSION;
 use serde_json::{Value, json};
 
@@ -140,6 +140,45 @@ impl Daemon {
         let response = self.response_for(id);
 
         (response, started.elapsed())
+    }
+
+    fn timed_request_with_progress(
+        &mut self,
+        id: &str,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> (Value, Duration, Vec<(Duration, Value)>) {
+        let started = Instant::now();
+        let mut progress = Vec::new();
+        self.send(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }));
+
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            assert!(
+                !remaining.is_zero(),
+                "timed out after {timeout:?} waiting for response {id}"
+            );
+            let message = self.next_message_with_timeout(remaining);
+            if message.get("method").and_then(Value::as_str) == Some("agent/progress") {
+                progress.push((started.elapsed(), message["params"].clone()));
+                continue;
+            }
+            if message.get("method").is_some() {
+                continue;
+            }
+            assert_eq!(
+                message.get("id").and_then(Value::as_str),
+                Some(id),
+                "expected a response to {id}, got: {message}"
+            );
+            return (message, started.elapsed(), progress);
+        }
     }
 
     /// Reads messages until the response with the given id arrives, skipping
@@ -519,6 +558,72 @@ fn real_codex_auto_proposal_is_fast_and_non_mutating() {
     );
 }
 
+/// Real transport gate for the programmer-flow fast path. The long visible
+/// deadline keeps the request in the foreground so this test can observe the
+/// complete progress stream before the final response.
+#[test]
+#[ignore = "requires an authenticated real Codex CLI"]
+fn real_codex_streams_a_preview_before_the_validated_card() {
+    let cwd = std::env::temp_dir().join(format!(
+        "loopbiotic-real-codex-stream-{}",
+        std::process::id()
+    ));
+    let source = cwd.join("src/work.ts");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("create fixture");
+    let buffer = "export function displayName(first, last) {\n  return `${first} ${last}`;\n}\n";
+    std::fs::write(&source, buffer).expect("write fixture");
+
+    let mut daemon = Daemon::spawn_codex_with_deadlines(120_000, 120_000);
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+
+    let (response, complete, progress) = daemon.timed_request_with_progress(
+        "2",
+        "session/start",
+        start_session_params_with(
+            cwd,
+            "Explain the smallest safe way to handle an empty last name.",
+            "auto",
+            buffer,
+        ),
+        Duration::from_secs(120),
+    );
+    assert!(
+        response.get("error").is_none(),
+        "unexpected error: {response}"
+    );
+    assert_ne!(
+        response["result"]["card"]["kind"],
+        json!("working"),
+        "long foreground deadline should return the validated card"
+    );
+
+    let first_delta = progress
+        .iter()
+        .find(|(_, params)| params["phase"] == json!("streaming"))
+        .map(|(elapsed, _)| *elapsed)
+        .expect("Codex should expose its first agent-message delta");
+    let (first_preview, preview) = progress
+        .iter()
+        .find(|(_, params)| params["preview"]["title"].as_str().is_some())
+        .expect("Codex should expose a non-actionable structured preview");
+    assert!(
+        first_delta <= *first_preview,
+        "preview cannot precede the first delta"
+    );
+    assert!(
+        *first_preview < complete,
+        "preview must arrive before the final card"
+    );
+    assert!(
+        preview["preview"].get("actions").is_none(),
+        "streaming preview must not expose final-card actions"
+    );
+    eprintln!(
+        "real Codex stream: first_delta={first_delta:?} first_preview={first_preview:?} complete={complete:?}"
+    );
+}
+
 /// Real-agent regression for cursor intent: an error at the cursor must beat a
 /// distant deprecation in the same file, even though the error's source line is
 /// already present in the primary editor excerpt.
@@ -688,9 +793,136 @@ fn real_codex_prioritizes_cursor_local_error_over_distant_deprecation() {
     );
 }
 
+/// Real-agent regression for dependency ordering and review granularity.
+/// Extracting a named interface needs two accepted compiler-safe patches: the
+/// declaration first, then the later use. The first card must never hide both
+/// edits inside one broad `@@` hunk.
+///
+/// cargo test -p loopbioticd --test rpc \
+///   real_codex_interface_extraction_declares_before_use -- --ignored --nocapture
+#[test]
+#[ignore = "requires an authenticated real Codex CLI"]
+fn real_codex_interface_extraction_declares_before_use() {
+    let cwd = std::env::temp_dir().join(format!(
+        "loopbiotic-real-codex-interface-order-{}",
+        std::process::id()
+    ));
+    let source = cwd.join("src/work.ts");
+    let original = "type Tone = \"info\" | \"warning\";\n\nexport class HomePageComponent {\n  readonly cards: {\n    header: string;\n    tone: Tone;\n  }[] = [];\n}\n";
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("create fixture");
+    std::fs::write(&source, original).expect("write fixture");
+
+    let context = json!({
+        "cwd": cwd,
+        "file": "src/work.ts",
+        "cursor": {"line": 4, "column": 12},
+        "selection": null,
+        "buffer_text": original,
+        "buffer_start_line": 1,
+        "diagnostics": [],
+        "hints": [],
+        "artifacts": []
+    });
+
+    let mut daemon = Daemon::spawn_codex();
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+
+    daemon.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "2",
+        "method": "session/start",
+        "params": start_session_params_with(
+            cwd,
+            "Extract the inline cards item type into a named interface in this file.",
+            "auto",
+            original,
+        ),
+    }));
+    let discovery_response =
+        daemon.response_for_with_editor_context("2", Duration::from_secs(120), &context);
+    let discovery =
+        daemon.finish_turn(discovery_response, Duration::from_secs(120), Some(&context));
+    let session_id = discovery["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    daemon.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "3",
+        "method": "session/action",
+        "params": {
+            "session_id": session_id,
+            "action": "goal",
+            "context": context,
+        },
+    }));
+    let patch_response =
+        daemon.response_for_with_editor_context("3", Duration::from_secs(120), &context);
+    let result = daemon.finish_turn(patch_response, Duration::from_secs(120), Some(&context));
+    assert_eq!(
+        result["card"]["kind"],
+        json!("patch"),
+        "interface extraction did not produce its first patch: {result}"
+    );
+    assert_eq!(
+        result["card"]["patches"].as_array().map(Vec::len),
+        Some(1),
+        "first interface step must touch one file: {result}"
+    );
+    assert_eq!(
+        result["attempts"].as_array().map(Vec::len),
+        Some(1),
+        "dependency-first prompt must not burn a hidden repair turn: {result}"
+    );
+
+    let diff = result["card"]["patches"][0]["diff"]
+        .as_str()
+        .expect("interface patch diff");
+    let parsed = UnifiedDiff::parse(diff).expect("real Codex returned parseable diff");
+    assert_eq!(
+        parsed.hunks.len(),
+        1,
+        "first step must have one hunk: {diff}"
+    );
+    let change_runs = parsed.hunks[0]
+        .lines
+        .iter()
+        .fold((0, false), |(runs, changing), line| {
+            let changed = matches!(line, DiffLine::Remove(_) | DiffLine::Add(_));
+            (runs + usize::from(changed && !changing), changed)
+        })
+        .0;
+    assert_eq!(
+        change_runs, 1,
+        "one @@ header concealed multiple review steps: {diff}"
+    );
+
+    let updated = PatchApply::apply_to_text(original, &parsed).expect("apply interface patch");
+    let interface_offset = updated.find("interface ").unwrap_or_else(|| {
+        panic!("first patch did not introduce the interface declaration: {diff}")
+    });
+    let component_offset = updated
+        .find("export class HomePageComponent")
+        .expect("component remains present");
+    assert!(
+        interface_offset < component_offset,
+        "interface must be declared before the component that will use it: {diff}"
+    );
+    assert!(
+        updated.contains("readonly cards: {\n    header: string;\n    tone: Tone;\n  }[]"),
+        "first patch used the interface before its declaration-only step was accepted: {diff}"
+    );
+    assert!(
+        !result["card"]["goal_complete"].as_bool().unwrap_or(false),
+        "declaration-only first step cannot claim the extraction is complete: {result}"
+    );
+}
+
 /// Full real-agent product gate: a question and reply stay conversational,
-/// Fix returns one small draft, and accepting it automatically yields a
-/// conversational next card without an intermediate summary.
+/// Fix returns one small draft, and accepting it automatically advances to
+/// the next patch or resolves the goal without an acceptance receipt.
 ///
 /// cargo test -p loopbioticd --test rpc \
 ///   real_codex_interactive_question_fix_accept_workflow -- --ignored --nocapture
@@ -853,11 +1085,18 @@ fn real_codex_interactive_question_fix_accept_workflow() {
         "real Codex accept: first_visible={accept_visible:?} final_kind={}",
         after_accept["card"]["kind"].as_str().unwrap_or("<missing>")
     );
-    assert_conversational(&after_accept, "post-accept continuation");
+    let continuation_kind = after_accept["card"]["kind"].as_str().unwrap_or("<missing>");
+    assert!(
+        matches!(
+            continuation_kind,
+            "patch" | "summary" | "choice" | "deny" | "error"
+        ),
+        "accept did not continue or resolve the goal: {after_accept}"
+    );
     assert_ne!(
-        after_accept["card"]["kind"],
-        json!("summary"),
-        "accept must not insert an intermediate summary"
+        after_accept["card"]["title"],
+        json!("Local step accepted"),
+        "accept inserted a redundant receipt"
     );
 }
 

@@ -26,6 +26,12 @@ pub use ollama::*;
 pub use stdio_agent::*;
 pub use stream::*;
 
+/// Shared implementation policy injected into every patch-capable backend.
+/// Prompt guidance is backed by the patch validator's one-change-run gate;
+/// the dependency-order clauses cover compiler errors that cannot be inferred
+/// reliably from language-agnostic diff syntax alone.
+pub const IMPLEMENTATION_GUIDELINES: &str = "Compiler acceptance is a hard invariant for every patch. Applying this one proposed patch by itself to the currently accepted source must leave the project compiling and type-checking; never rely on a later patch to repair undefined symbols, missing declarations or imports, incompatible signatures, producer/consumer mismatches, schema drift, or an incomplete refactor. Order work by dependencies: introduce each declaration, type, interface, function, import, field, and compatibility shim in an independently compiler-valid patch before any later patch first references, implements, or depends on it. For interface or named-type extraction, the first patch contains ONLY the independently valid declaration and leaves every existing use byte-for-byte unchanged; only after that declaration patch is accepted may a later patch replace the inline type or implement the interface. A declaration-only preparation must also satisfy the project's unused-declaration compiler and lint rules; use the project's appropriate exported/public/annotation mechanism, or return choice/deny when no clean standalone declaration is valid. Never combine a declaration and its separated consumer change on one card, even when both fit inside one @@ header. Emit exactly one uninterrupted change block. In structured hunk lines, after the first add/remove record, a context record ends the change block and no later add/remove record is allowed. Prefer backward-compatible preparation such as declarations, adapters, overloads, defaults, or optional fields before changing consumers. If no compiler-valid intermediate state fits one uninterrupted block, return a blocking choice or deny instead of broken code or a batch.";
+
 #[async_trait]
 pub trait BackendAdapter: Send + Sync {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse>;
@@ -85,11 +91,23 @@ pub struct BackendPhaseModels {
 
 pub type ProgressReporter = Arc<dyn Fn(BackendProgress) + Send + Sync>;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BackendPreview {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct BackendProgress {
     pub session_id: String,
     pub phase: String,
     pub message: String,
+    /// Non-actionable content extracted from an incomplete structured
+    /// response. The editor may display it while the full card is still being
+    /// parsed and validated, but must not expose final-card actions yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<BackendPreview>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -133,9 +151,6 @@ pub enum BackendAction {
     Start,
     User(Action),
     Reply(String),
-    /// Continue after an accepted non-goal patch with a read-only,
-    /// conversational response.
-    PostAccept,
     ContractRetry(String),
     // The editor granted an open_location request mid-turn; the request's
     // context carries the freshly opened buffer.

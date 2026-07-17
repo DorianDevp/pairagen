@@ -2,7 +2,7 @@
 ---@field statement string
 ---@field completed_steps string[]
 ---@field known_observations table[]
----@field status string "idle" | "active" | "paused" | "needs_review" | "complete"
+---@field status string "idle" | "active" | "paused" | "complete"
 ---@field next_step? string
 
 ---@class LoopbioticTokenUsage
@@ -42,6 +42,7 @@
 ---@field thinking_started_at integer|nil
 ---@field thinking_label string|nil
 ---@field thinking_steps table[]|nil
+---@field thinking_preview table|nil non-actionable streamed { title, body? }
 ---@field last_card LoopbioticCard|nil
 ---@field token_usage LoopbioticTokenUsage|nil
 ---@field turn_token_usage LoopbioticTokenUsage|nil
@@ -58,6 +59,7 @@
 ---@field details_expanded boolean
 ---@field navigated_card LoopbioticCard|nil
 ---@field cancelled_turn_id string|nil
+---@field accept_continuation boolean|nil true until an accepted patch yields its next card
 ---@field reset fun()
 
 -- Every mutable field with its initial value. Fields that start as nil list
@@ -92,6 +94,7 @@ local defaults = {
   thinking_started_at = vim.NIL,
   thinking_label = vim.NIL,
   thinking_steps = vim.NIL,
+  thinking_preview = vim.NIL,
   last_card = vim.NIL,
   token_usage = vim.NIL,
   turn_token_usage = vim.NIL,
@@ -108,6 +111,7 @@ local defaults = {
   details_expanded = false,
   navigated_card = vim.NIL,
   cancelled_turn_id = vim.NIL,
+  accept_continuation = vim.NIL,
 }
 
 ---@type LoopbioticState

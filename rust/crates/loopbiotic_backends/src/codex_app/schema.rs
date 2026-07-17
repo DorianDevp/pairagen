@@ -151,8 +151,6 @@ fn goal_loop_schema(contract: &crate::CardContract) -> Value {
     let mut schema = any_op_schema();
     schema["properties"]["op"]["enum"] = json!([
         "patch",
-        "hypothesis",
-        "finding",
         "choice",
         "deny",
         "open_location",
@@ -413,7 +411,9 @@ mod tests {
 
         assert!(ops.contains(&json!("patch")));
         assert!(ops.contains(&json!("summary")));
-        assert!(ops.contains(&json!("finding")));
+        assert!(ops.contains(&json!("choice")));
+        assert!(!ops.contains(&json!("finding")));
+        assert!(!ops.contains(&json!("hypothesis")));
         assert_eq!(
             schema["properties"]["patches"]["maxItems"],
             loopbiotic_protocol::MAX_PATCH_FILES

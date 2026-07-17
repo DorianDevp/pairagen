@@ -9,7 +9,7 @@ use anyhow::Result;
 use loopbiotic_protocol::{Action, Card, ErrorCard};
 use serde_json::{Value, json};
 
-use crate::{BackendAction, BackendProgress, BackendRequest, ProgressReporter};
+use crate::{BackendAction, BackendPreview, BackendProgress, BackendRequest, ProgressReporter};
 
 pub(crate) const TURN_TIMEOUT_ENV: &str = "LOOPBIOTIC_TURN_TIMEOUT_SECS";
 const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(600);
@@ -145,7 +145,6 @@ pub(crate) fn action_value(action: &BackendAction) -> Value {
             json!({"kind": "user", "action": action})
         }
         BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
-        BackendAction::PostAccept => json!({"kind": "post_accept"}),
         BackendAction::ContractRetry(reason) => {
             json!({"kind": "contract_retry", "reason": reason})
         }
@@ -164,6 +163,22 @@ pub(crate) fn report_progress(
             session_id: session_id.into(),
             phase: phase.into(),
             message: message.into(),
+            preview: None,
+        });
+    }
+}
+
+pub(crate) fn report_preview(
+    progress: Option<&ProgressReporter>,
+    session_id: &str,
+    preview: BackendPreview,
+) {
+    if let Some(progress) = progress {
+        progress(BackendProgress {
+            session_id: session_id.into(),
+            phase: "drafting".into(),
+            message: "Drafting a response".into(),
+            preview: Some(preview),
         });
     }
 }

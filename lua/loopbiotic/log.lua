@@ -12,6 +12,7 @@ local sensitive_keys = {
   finding = true,
   message = true,
   prompt = true,
+  preview = true,
   raw_output = true,
   selection = true,
   summary = true,

@@ -81,6 +81,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
         json!(
             "A non-goal patch is one small local pair-programming step: one file, one hunk, and no more changed lines than the supplied limit; its plan is null."
         ),
+        json!(crate::IMPLEMENTATION_GUIDELINES),
         json!(
             "Explain why the next coherent block matters and return control to the user after that step."
         ),
@@ -89,7 +90,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     // the rules array survives across goal and non-goal turns.
     if req.card_contract.allow_goal_completion {
         rules.push(json!(
-            "Goal turn: return one small, compilable hunk within limits.changed_lines plus plan {remaining:[{file,summary}],complete}. Remaining entries are coherent steps and may repeat a file. A finding or choice is allowed when programmer attention is needed."
+            "Goal turn: return one small, compilable hunk within limits.changed_lines plus plan {remaining:[{file,summary}],complete}. Remaining entries are coherent steps and may repeat a file. Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary."
         ));
         rules.push(json!(
             "On a goal continuation (a.action is goal), continue with the next planned coherent step."
@@ -400,6 +401,8 @@ mod tests {
     fn generic_prompt_adds_the_slice_rule_only_on_goal_turns() {
         let mut req = crate::test_request();
         assert!(!generic_prompt(&req).contains("one small, compilable hunk"));
+        assert!(generic_prompt(&req).contains("Compiler acceptance is a hard invariant"));
+        assert!(generic_prompt(&req).contains("exactly one uninterrupted change block"));
 
         req.card_contract.allow_goal_completion = true;
         let goal = generic_prompt(&req);

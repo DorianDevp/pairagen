@@ -92,6 +92,20 @@ return function(t)
     t.eq(sanitized.candidate_card.redacted, true, "candidate redacted")
   end)
 
+  t.test("streaming previews are redacted as one sensitive payload", function()
+    local sanitized = require("loopbiotic.log").sanitize({
+      phase = "drafting",
+      preview = {
+        title = "Private symbol",
+        body = "Private source explanation",
+      },
+    })
+
+    t.eq(sanitized.phase, "drafting", "timing phase remains measurable")
+    t.eq(sanitized.preview.redacted, true, "preview redacted")
+    t.eq(sanitized.preview.title, nil, "title not leaked")
+  end)
+
   t.test("repeated_error escalates only on identical consecutive messages", function()
     t.eq(session.repeated_error(nil, "boom"), false, "first error")
     t.eq(session.repeated_error("boom", "boom"), true, "same error twice")
