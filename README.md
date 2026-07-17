@@ -199,11 +199,11 @@ Prompt
 Conversational answer, finding, or question — never an implicit patch
 Follow up or reply back-to-back
 Draft → one local editable hunk
-Accept → automatic read-only next card, without an intermediate summary
+Accept → next unresolved patch, or silent completion when the goal is done
 Reject → stop locally; Retry only when explicitly requested
 Goal → explicitly authorize a sequence of small reviewed hunks
 While a goal hunk is reviewed, only its next small hunk may be prepared
-Repeat until one final goal summary and local diagnostics check
+Repeat until the goal is resolved
 ```
 
 Cards stay anchored clear of the source line and do not take focus. Use `<leader>pg`
@@ -222,11 +222,25 @@ compact, content-free instruction is injected into the next turn so the agent
 prioritizes an earlier useful response.
 
 For an explicit goal, each backend turn may return at most one file, one
-coherent hunk, and 32 changed lines, plus a plan of the remaining coherent
-steps. The next hunk may be prepared while the current one is reviewed.
+uninterrupted change block, and 32 changed lines, plus a plan of the remaining
+coherent steps. A single `@@` containing changed lines separated by unchanged
+context is still a batch and is rejected as multiple hunks. The next hunk may
+be prepared while the current one is reviewed.
 Accepting normally surfaces it immediately; rejecting cancels it and never
 generates a replacement without `Retry`. Automatic navigation stays inside the
 workspace, and every edit remains an inert draft until accepted.
+
+Compiler acceptance is an invariant at every review boundary. Applying one
+proposed patch to the currently accepted source must leave the project compiling
+and type-checking without relying on a later patch. Dependency-producing work is
+ordered first: declarations, interfaces, types, imports, fields, functions, and
+compatibility shims must exist in an independently valid patch before a later
+patch references or implements them. For interface extraction this means one
+patch introduces the valid interface declaration; only after it is accepted may
+another patch replace the inline type or implement that interface. If no valid
+intermediate state fits one uninterrupted block, including the project's unused
+declaration checks, the agent must stop for a real decision instead of returning
+broken code or a batch.
 
 Loopbiotic moves directly to the evidence for a location-bearing card and to the
 first non-blank character of the first added line for a draft, including drafts
@@ -249,15 +263,12 @@ persistent execution, and send a normal message at any time to pause it and get
 a conversational answer. Asking `Why` explains the pending hunk and returns to
 that exact draft without advancing or replacing it.
 
-When the goal completes, Loopbiotic automatically checks error-level diagnostics in
-the changed, loaded buffers after a short delay. `Check` repeats the same local
-operation without spending model tokens, saving buffers, or running shell test
-commands.
+`Check` inspects error-level diagnostics in changed, loaded buffers without
+spending model tokens, saving buffers, or running shell test commands.
 
-Ordinary speculation is read-only: by default
-`backend.prefetch = "read_only"` prepares only the conversational card that
-follows an accepted non-goal draft. Set it to `"off"` to disable this. Patch
-speculation is allowed only inside an explicitly active goal.
+By default `backend.prefetch = "read_only"` prepares the next goal step while an
+ordinary draft is reviewed. It remains inert and can surface only after that
+draft is accepted. Set it to `"off"` to disable this.
 
 Cards show raw, cached, and non-cached turn and session usage against
 `backend.token_budget` (50,000 raw tokens by default).

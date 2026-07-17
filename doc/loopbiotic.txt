@@ -19,17 +19,28 @@ open-ended chat session.
 The default auto mode is conversational. Its first turn returns an answer,
 finding, hypothesis, or question, never an implicit patch. Use `Fix` for one
 local editable hunk or `Goal` to explicitly authorize a persistent sequence.
-Goal turns remain small: one file, one coherent hunk, at most 32 changed
-lines, plus a plan of the remaining coherent steps. Only an active goal may
-prepare the next patch while the current hunk is reviewed.
+Goal turns remain small: one file, one uninterrupted change block, at most 32
+changed lines, plus a plan of the remaining coherent steps. Changed lines
+separated by unchanged context count as multiple hunks even under one `@@`
+header and are rejected. Only an active goal may prepare the next patch while
+the current hunk is reviewed.
+
+Every proposed patch must compile and type-check when applied by itself to the
+currently accepted source. Dependencies come first: declarations, interfaces,
+types, imports, fields, functions, and compatibility shims must be introduced
+in an independently valid patch before a later patch references or implements
+them. Interface extraction therefore introduces the interface first and uses
+or implements it only in a later accepted patch. Declaration-only preparation
+must also satisfy unused-declaration compiler and lint rules. The agent must
+return a real blocking decision instead of code that depends on a future patch.
 
 Conversation turns yield after 10 seconds and work turns after 20 seconds.
 The focusable `Working` card leaves Neovim usable while the real agent
 continues in the background; `Cancel` interrupts that backend turn. Accepting
-a non-goal draft automatically shows a read-only conversational next card
-without an intermediate summary. Rejecting stays local and never regenerates
-code until `Retry`. Use `keymaps.why` (`<leader>pw`) on a draft to explain the
-same pending hunk and return to it.
+a draft automatically surfaces the next unresolved patch, or finishes silently
+when the goal is resolved. Rejecting stays local and never regenerates code
+until `Retry`. Use `keymaps.why` (`<leader>pw`) on a draft to explain the same
+pending hunk and return to it.
 
 Navigation stays inside the current workspace. A location-bearing card moves
 the cursor to its evidence, while a draft moves it to the first non-blank
