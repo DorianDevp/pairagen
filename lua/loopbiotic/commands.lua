@@ -19,35 +19,11 @@ function M.setup()
   end)
 
   command("LoopbioticFix", function()
-    M.action_or_prompt("fix", "fix")
-  end)
-
-  command("LoopbioticGoal", function()
-    require("loopbiotic").action("goal")
-  end)
-
-  command("LoopbioticCancel", function()
-    require("loopbiotic").action("cancel_turn")
+    require("loopbiotic").prompt("fix")
   end)
 
   command("LoopbioticWhy", function()
-    M.action_or_prompt("why", "explain")
-  end)
-
-  command("LoopbioticFollow", function()
-    require("loopbiotic").action("follow")
-  end)
-
-  command("LoopbioticOther", function()
-    require("loopbiotic").action("other_lead")
-  end)
-
-  command("LoopbioticAssess", function()
-    require("loopbiotic").action("goal")
-  end)
-
-  command("LoopbioticNext", function()
-    require("loopbiotic").action("goal")
+    require("loopbiotic").prompt("explain")
   end)
 
   command("LoopbioticStop", function()
@@ -101,16 +77,6 @@ function M.setup()
       return require("loopbiotic").models()
     end,
   })
-end
-
-function M.action_or_prompt(action, mode)
-  if require("loopbiotic.state").session_id then
-    require("loopbiotic").action(action)
-
-    return
-  end
-
-  require("loopbiotic").prompt(mode)
 end
 
 return M

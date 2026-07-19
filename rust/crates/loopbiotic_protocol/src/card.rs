@@ -116,6 +116,9 @@ pub struct HypothesisCard {
     pub claim: String,
     pub evidence: Option<LocationEvidence>,
     pub next_move: Option<NextMove>,
+    /// Ordered node ids from the editor-supplied static Flow graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flow_path: Vec<String>,
     pub actions: Vec<Action>,
 }
 
@@ -126,6 +129,9 @@ pub struct FindingCard {
     pub finding: String,
     pub location: Option<Location>,
     pub annotation: Option<String>,
+    /// Ordered node ids from the editor-supplied static Flow graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flow_path: Vec<String>,
     pub actions: Vec<Action>,
 }
 
@@ -265,6 +271,7 @@ mod tests {
             claim: "The branch returns early.".into(),
             evidence: None,
             next_move: None,
+            flow_path: vec![],
             actions: vec![Action::Follow, Action::Fix, Action::Stop],
         });
 
@@ -272,6 +279,45 @@ mod tests {
 
         assert_eq!(json["kind"], "hypothesis");
         assert_eq!(json["actions"][0], "follow");
+        assert!(json.get("flow_path").is_none());
+    }
+
+    #[test]
+    fn deserializes_legacy_finding_without_flow_path() {
+        let card: Card = serde_json::from_value(serde_json::json!({
+            "kind": "finding",
+            "id": "c_legacy",
+            "title": "Legacy",
+            "finding": "Still valid",
+            "location": null,
+            "annotation": null,
+            "actions": ["stop"]
+        }))
+        .unwrap();
+
+        let Card::Finding(card) = card else {
+            panic!("expected finding");
+        };
+        assert!(card.flow_path.is_empty());
+    }
+
+    #[test]
+    fn serializes_selected_flow_path_on_answer_cards() {
+        let card = Card::Finding(FindingCard {
+            id: "c_flow".into(),
+            title: "Call path".into(),
+            finding: "The command opens the prompt window.".into(),
+            location: None,
+            annotation: None,
+            flow_path: vec!["command".into(), "prompt.open".into()],
+            actions: vec![Action::Stop],
+        });
+
+        let json = serde_json::to_value(card).unwrap();
+        assert_eq!(
+            json["flow_path"],
+            serde_json::json!(["command", "prompt.open"])
+        );
     }
 
     fn patch_card(plan: Option<GoalPlan>) -> Card {

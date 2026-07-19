@@ -27,8 +27,8 @@ use crate::{
 const SYSTEM_PROMPT: &str = r#"You are a local Loopbiotic pair-programming partner inside the user's editor.
 Every user message is a JSON Loopbiotic request. Reply with exactly one JSON Loopbiotic op and nothing else: no prose, no markdown fences.
 The discriminator field is named "op". Allowed ops, with exact shapes:
-- {"op":"hypothesis","title":string,"claim":string,"evidence":LOC|null,"next":LOC|null}
-- {"op":"finding","title":string,"finding":string,"location":LOC|null,"annotation":string|null}
+- {"op":"hypothesis","title":string,"claim":string,"evidence":LOC|null,"next":LOC|null,"flow_path":[string]}
+- {"op":"finding","title":string,"finding":string,"location":LOC|null,"annotation":string|null,"flow_path":[string]}
 - {"op":"patch","title":string,"explanation":string,"goal_complete":bool,"plan":{"remaining":[{"file":string,"summary":string}],"complete":bool}|null,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}]}
 - {"op":"choice","title":string,"question":string,"options":[{"id":string,"label":string,"action":string}]}
 - {"op":"deny","title":string,"reason":string,"location":LOC|null}
@@ -40,7 +40,7 @@ choice option action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|
 Use deny when you cannot or should not proceed (ambiguous prompt, missing information, out-of-scope request); reason is shown to the user. error is only for technical failures.
 If you can only proceed from a different file or location — for example the change belongs in another file than the supplied buffer — return open_location IMMEDIATELY with that exact place instead of attempting a patch. The editor asks the user for permission, opens the file, and the next message continues this same turn with a.kind "location_granted" and fresh ctx for that buffer; then produce the real op. Never draft a patch against a file that is not the supplied buffer. Use deny only for refusals that navigation cannot solve.
 limits.expected, when set, names the op you must return (deny is always allowed instead; a clarifying choice is also accepted for hypothesis and finding). When limits.expected is null, choose whichever op fits best and ask via choice when the request is ambiguous.
-Patch only for fix actions or when limits.goal_completion is true. When limits.conversation_only is true, never return patch or summary. patch.diff must be unified diff hunks starting with @@ against the corresponding project source.
+Patch for fix/propose mode, fix actions, or when limits.goal_completion is true. The user-selected mode and limits.expected define the response contract; never infer or replace the mode. When limits.conversation_only is true, never return patch or summary. patch.diff must be unified diff hunks starting with @@ against the corresponding project source.
 When limits.goal_completion is true, advance the explicitly authorized goal one small, compilable hunk per work turn. Return at most one file and exactly one hunk within limits.changed_lines plus plan listing remaining coherent steps; a file may repeat. Set plan.complete=true only on the final step. Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary. Inspect only enough source for the next step, preserve completed_steps, and never repeat accepted work.
 When limits.goal_completion is true and limits.expected is finding because the user asked why, explain the currently pending hunk without replacing it or advancing the goal. The same draft remains pending after the answer.
 A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Non-goal patches have a null plan.
@@ -212,7 +212,10 @@ impl ClaudeAppBackend {
             "--disallowedTools".into(),
             "Edit,Write,NotebookEdit,Bash".into(),
             "--append-system-prompt".into(),
-            format!("{SYSTEM_PROMPT}\n\nImplementation guidelines:\n{IMPLEMENTATION_GUIDELINES}"),
+            format!(
+                "{SYSTEM_PROMPT}\n\nImplementation guidelines:\n{IMPLEMENTATION_GUIDELINES}\n\nFlow guidelines:\n{}",
+                crate::FLOW_GUIDELINES
+            ),
         ];
 
         if let Some(model) = model {
@@ -1281,5 +1284,6 @@ mod tests {
                 .iter()
                 .any(|arg| arg.contains(IMPLEMENTATION_GUIDELINES))
         );
+        assert!(first.iter().any(|arg| arg.contains(crate::FLOW_GUIDELINES)));
     }
 }

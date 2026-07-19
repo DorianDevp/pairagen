@@ -8,6 +8,9 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The Codex model picker now reads the authenticated app-server `model/list`
+  catalog and its default model. A discovery-only model is no longer presented
+  as the entire set of selectable patch models.
 - Navigating to a card or draft no longer throws "Cursor position outside
   buffer" when the target line does not exist yet — for example a patch hunk
   that appends to the end of a short file, or an agent-supplied location past
@@ -49,10 +52,11 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Auto sessions are conversational-first. Their first response and normal
-  replies cannot return patches or completion summaries; persistent goal
-  execution starts only from the explicit `Goal` action. Sending a message
-  pauses an active goal and answers conversationally.
+- Every Prompt and Reply carries a visible user-selected mode. Automatic intent
+  routing was removed: fix/propose require Patch, explain/review require Finding,
+  and investigate requires Hypothesis. Slash-prefixed text no longer overrides
+  that visible mode. Persistent multi-step goal execution remains explicit, and
+  every patch stays behind local Accept/Reject review.
 - Goal work is limited to one file, one coherent hunk, and 32 changed lines
   per turn. Only explicit goals may speculate on the next patch; ordinary
   speculation is read-only post-accept conversation.
@@ -69,6 +73,12 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Prompts resolve a session-pinned static Flow graph through LSP call hierarchy
+  without opening UI or changing geometry. The explorer is an explicit `F`
+  toggle with lazy caller/callee expansion, exact call-site/reference
+  navigation and responsive split/single-pane layouts. Callstack answers carry
+  a structured `flow_path` and render it directly in the card UI. The bounded
+  normalized graph is sent to every backend without agent-side rediscovery.
 - Conversation turns have a 10-second visible-response budget and work turns
   a 20-second budget. Slow turns yield a focusable `Working` card, continue in
   the background, and can be interrupted through the real Codex

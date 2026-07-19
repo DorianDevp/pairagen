@@ -269,6 +269,7 @@ mod tests {
             claim: "c".into(),
             evidence: None,
             next_move: None,
+            flow_path: vec![],
             actions: vec![Action::Stop],
         })
     }
@@ -280,6 +281,7 @@ mod tests {
             finding: "f".into(),
             location: None,
             annotation: None,
+            flow_path: vec![],
             actions: vec![Action::Stop],
         })
     }

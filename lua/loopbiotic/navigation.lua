@@ -50,6 +50,10 @@ function M.open_location(location)
   local file = location.file
   local open = config.values.navigation.open
   local target = vim.fn.fnamemodify(file, ":p")
+  if not util.in_workspace(target) then
+    require("loopbiotic.ui").notify("Location is outside the workspace: " .. tostring(file), vim.log.levels.WARN)
+    return false
+  end
   local target_buf
   local target_win
 

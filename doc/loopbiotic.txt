@@ -12,13 +12,15 @@ CONTENTS                                                     *loopbiotic-content
 ===============================================================================
 INTRODUCTION                                                     *loopbiotic*
 
-Loopbiotic presents one hypothesis, finding, or editable patch at a time. It is
-designed for explicit user-controlled pair-programming steps rather than an
-open-ended chat session.
+Loopbiotic has exactly two product surfaces. PromptWindow owns user intent;
+AgentWindow owns progress, responses, Widgets, and patch review. Technical
+floats, editor splits, and Netrw are Frames or editor context, not additional
+Loopbiotic windows.
 
-The default auto mode is conversational. Its first turn returns an answer,
-finding, hypothesis, or question, never an implicit patch. Use `Fix` for one
-local editable hunk or `Goal` to explicitly authorize a persistent sequence.
+There is no automatic intent-routing mode. Every Prompt and Reply visibly owns
+one user-selected mode. Fix and propose require a reviewed patch; explain,
+investigate, and review require their non-mutating response kinds. The safe
+configured default is investigate. A patch remains inert until explicit Accept.
 Goal turns remain small: one file, one uninterrupted change block, at most 32
 changed lines, plus a plan of the remaining coherent steps. Changed lines
 separated by unchanged context count as multiple hunks even under one `@@`
@@ -35,23 +37,19 @@ must also satisfy unused-declaration compiler and lint rules. The agent must
 return a real blocking decision instead of code that depends on a future patch.
 
 Conversation turns yield after 10 seconds and work turns after 20 seconds.
-The focusable `Working` card leaves Neovim usable while the real agent
-continues in the background; `Cancel` interrupts that backend turn. Accepting
-a draft automatically surfaces the next unresolved patch, or finishes silently
-when the goal is resolved. Rejecting stays local and never regenerates code
-until `Retry`. Use `keymaps.why` (`<leader>pw`) on a draft to explain the same
-pending hunk and return to it.
+The non-actionable `Working` View leaves Neovim usable while the real agent
+continues in the background. Opening PromptWindow interrupts that backend turn
+before another request may be submitted. Accepting a draft automatically
+surfaces the next unresolved patch or the goal summary. Rejecting restores
+accepted source without a model turn, pauses the goal, keeps AgentWindow open,
+and opens PromptWindow for the user's explanation.
 
-Navigation stays inside the current workspace. A location-bearing card moves
-the cursor to its evidence, while a draft moves it to the first non-blank
-character of the first added line. Its action card sits above or below that
-line with a one-row gap. The action card follows the active tab and does not
-move the cursor back to an older window. Use `keymaps.go_to` (`<leader>pg` by
-default) to return to the active proposal, `keymaps.resume` (`<leader>pr`) to
-reveal its action card, and `keymaps.draft_retry` (`<leader>pt`) to retry.
-Actions cannot be triggered while the card is hidden.
-Actions that are absent from the current card are also ignored, so repeated
-terminal keypresses do not send another request to a finished session.
+Navigation stays inside the current workspace. Responses never move the cursor
+asynchronously; `keymaps.go_to` (`<leader>pg`) opens their evidence locally. A
+draft moves to its proposed hunk. AgentWindow remains attached to its owner tab:
+`keymaps.hide` (`<leader>ph`) wraps it and `keymaps.resume` (`<leader>pr`)
+returns to that tab and restores it. Out-of-scope shortcuts are silent no-ops;
+for example Reply cannot activate while AgentWindow is Working.
 
 Long goals and patch explanations are compact by default. Focus the Loopbiotic card
 and press `z` to expand or collapse the full text. Configure this with
@@ -61,18 +59,56 @@ The session token total is shown against `backend.token_budget` (50000 by
 default). Loopbiotic asks for confirmation before another agent turn after that
 budget is reached. Set it to 0 to disable the guard.
 
-The prompt window title names the active agent and the concrete model the
-next turn will use, falling back to the backend-announced model and then
+The prompt window title names its mode, the active agent, and the concrete model
+the next turn will use. Every Prompt and Reply has one mode. Press
+`keymaps.modes` (`<C-k>` by default) to choose fix, explain, investigate,
+review, or propose without changing typed text or sending a request. The model
+falls back to the backend-announced model and then
 `model?` — it never shows `default`. The title always names the
 patch-drafting model; a differing pinned discovery model (the shipped claude
 agent uses `discovery_model = "haiku"` and Codex uses `gpt-5.4-mini` at low
 effort) is shown separately, e.g.
 `claude-fable-5 · discovery haiku`. Press `keymaps.models` (`<C-l>` by
 default) inside the prompt to pick from the known models: the configured
-model, the models the backend enumerates (claude offers the CLI aliases
-`sonnet`, `opus`, `haiku`), the agent's `models` list in `setup()`, and the
+model, the models the backend enumerates (Codex uses `model/list`; claude
+offers the CLI aliases `sonnet`, `opus`, `haiku`), the agent's `models` list in `setup()`, and the
 model reported by the last turn. Picking sets the patch model and persists
 per agent like |:LoopbioticModel|, keeping the prompt window and text open.
+
+FLOW WIDGET                                                *loopbiotic-flow*
+
+With an LSP callHierarchyProvider, prompts resolve a session-pinned static call
+graph in the background. It never renders inside PromptWindow or changes its
+geometry. Press `F` (|keymaps.flow|) in AgentWindow to toggle the Widget. The
+initial graph resolves callers and callees to depth 2
+and is capped at 40 nodes. Further branches are loaded only when expanded. No
+agent fallback is used when call hierarchy is unavailable.
+
+Flow keys: `j`/`k` select, `h`/`l` collapse or expand, `<CR>` opens a
+definition (or an exact use), `u` toggles the use list, `s` selects or deselects
+pending prompt context, and `R` roots at the current source cursor. Selected
+references are visible in PromptWindow and removable with `<C-x>`.
+
+For callstack and code-flow questions, hypothesis/finding cards may carry an
+ordered `flow_path` of node IDs from the supplied graph. The editor renders
+that path directly in the answer UI; `1` through `9` open displayed symbols,
+and `F` switches to the complete explorer. Unknown IDs are not rendered.
+
+Defaults: >lua
+
+  flow = {
+    enabled = true,
+    initial_depth = 2,
+    max_nodes = 40,
+    snippet_token_budget = 800,
+    responsive_split = 120,
+  }
+<
+
+The default prompt and explorer picker keys are: >lua
+
+  keymaps = { modes = "<C-k>", models = "<C-l>", flow = "F" }
+<
 
 Loopbiotic has been tested primarily with the Codex CLI app-server backend.
 
@@ -94,23 +130,11 @@ COMMANDS                                                 *loopbiotic-commands*
                                                        *:Loopbiotic*
 :Loopbiotic                  Open a new Loopbiotic prompt.
                                                        *:LoopbioticReply*
-:LoopbioticReply             Send a message in the active session.
+:LoopbioticReply             Open PromptWindow for a message in the active session.
                                                        *:LoopbioticFix*
-:LoopbioticFix               Request one local editable patch.
-                                                       *:LoopbioticGoal*
-:LoopbioticGoal              Explicitly start or continue the persistent goal.
-                                                       *:LoopbioticCancel*
-:LoopbioticCancel            Interrupt the current Working turn.
-                                                       *:LoopbioticFollow*
-:LoopbioticFollow            Follow the current observation.
+:LoopbioticFix               Open PromptWindow in fix mode.
                                                        *:LoopbioticWhy*
-:LoopbioticWhy               Ask for the reasoning behind the current observation.
-                                                       *:LoopbioticOther*
-:LoopbioticOther             Request another lead.
-                                                       *:LoopbioticAssess*
-:LoopbioticAssess            Compatibility alias for |:LoopbioticGoal|.
-                                                       *:LoopbioticNext*
-:LoopbioticNext              Compatibility alias for |:LoopbioticGoal|.
+:LoopbioticWhy               Open PromptWindow in explain mode.
                                                        *:LoopbioticStop*
 :LoopbioticStop              Finish the active session.
                                                        *:LoopbioticHide*

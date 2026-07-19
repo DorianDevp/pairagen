@@ -1,7 +1,7 @@
 local config = require("loopbiotic.config")
 local navigation = require("loopbiotic.navigation")
 local state = require("loopbiotic.state")
-local status = require("loopbiotic.status")
+local surfaces = require("loopbiotic.surfaces")
 local ui = require("loopbiotic.ui")
 local util = require("loopbiotic.util")
 
@@ -9,14 +9,13 @@ local util = require("loopbiotic.util")
 ---@field id string
 ---@field kind string "hypothesis" | "finding" | "patch" | "working" | "summary" | "error" | "deny" | "choice"
 ---@field title? string
----@field actions? (string|table)[] available actions; tables carry apply_patch payloads
----@field next_actions? (string|table)[] legacy name for actions
 ---@field location? table { file, line, column, annotation? }
 ---@field evidence? table location-shaped evidence (hypothesis cards)
 ---@field next_move? table { kind = "open_location", file, line, column }
 ---@field claim? string hypothesis cards
 ---@field finding? string finding cards
 ---@field annotation? string finding cards
+---@field flow_path? string[] ordered ids from the editor-resolved Flow graph
 ---@field explanation? string patch cards
 ---@field patches? { id: string, file: string, diff: string }[] patch cards
 ---@field warnings? string[] patch cards
@@ -30,26 +29,11 @@ local util = require("loopbiotic.util")
 
 local M = {}
 
-local labels = {
-  reply = { "m", "Message", "reply" },
-  follow = { "f", "Follow", "follow" },
-  why = { "w", "Why", "why" },
-  resume_draft = { "b", "Back to draft", nil },
-  fix = { "x", "Draft", "fix" },
-  goal = { "G", "Goal", "goal" },
-  cancel_turn = { "c", "Cancel", "cancel" },
-  other_lead = { "n", "Other", "other_lead" },
-  apply = { "a", "Review", "draft_accept" },
-  apply_patch = { "a", "Review", "draft_accept" },
-  retry = { "r", "Retry", nil },
-  edit_prompt = { "e", "Edit", nil },
-  open = { "o", "Open", "go_to" },
-  run_check = { "t", "Check", nil },
-  stop = { "q", "Stop", "stop" },
-}
-
 function M.show(card, opts)
   opts = opts or {}
+  if state.card ~= card then
+    state.card_flow_active = false
+  end
   local diff = require("loopbiotic.diff")
   if card.kind ~= "patch" and diff.valid_preview() then
     diff.restore_source()
@@ -59,16 +43,7 @@ function M.show(card, opts)
     state.details_expanded = false
   end
   state.card = card
-  state.last_card = card
-  status.hide()
-
-  if card.kind ~= "patch" and state.navigated_card ~= card then
-    state.navigated_card = card
-    local location = M.location(card)
-    if location then
-      navigation.open_location(location)
-    end
-  end
+  surfaces.set_agent_working(card.kind == "working")
 
   if card.kind == "patch" then
     if diff.valid_preview() then
@@ -82,32 +57,98 @@ function M.show(card, opts)
 
   local lines = M.lines(card)
   local width = M.width(lines)
-  local height = M.height(lines, width, state.details_expanded)
-  local buf, win = ui.render(state.card_buf, state.card_win, lines, {
-    width = width,
-    height = height,
-    anchor = M.anchor(card),
+  local rendered_lines, rendered_width, flow_visible, flow_nowrap = M.workspace(lines, width, card)
+  local selected_path = flow_visible and not state.card_flow_active and type(card.flow_path) == "table"
+  local height = M.height(rendered_lines, rendered_width, state.details_expanded or selected_path)
+  surfaces.render_agent(rendered_lines, {
+    view = card.kind == "working" and "working" or "response",
+    working = card.kind == "working",
+    wrap = not flow_nowrap,
+    cursorline = state.card_flow_active == true,
     enter = opts.enter == true,
-    title = " Loopbiotic: " .. M.title(card.kind) .. " ",
-    title_pos = "left",
-  })
-
-  state.card_buf = buf
-  state.card_win = win
-  vim.wo[win].wrap = true
-  vim.wo[win].linebreak = true
-  vim.wo[win].cursorline = false
-
-  M.bind(buf, card)
-  M.highlight(buf, lines, card)
-
-  if card.kind == "summary" and card.title == "Goal complete" and state.completion_checked_card ~= card.id then
-    state.completion_checked_card = card.id
-    vim.defer_fn(function()
-      if state.card == card then
-        require("loopbiotic").run_check()
+    window = {
+      width = rendered_width,
+      height = height,
+      anchor = M.anchor(card),
+      title = " Loopbiotic: " .. M.title(card.kind) .. (flow_visible and " · Flow " or " "),
+      title_pos = "left",
+    },
+    bind = function(active_buf, active_win)
+      M.bind(active_buf, card)
+      M.highlight(active_buf, rendered_lines, card)
+      if state.card_flow_active and state.call_hierarchy then
+        local flow_row = math.min(3 + (state.call_hierarchy.view_cursor or 1), math.max(#rendered_lines, 1))
+        pcall(vim.api.nvim_win_set_cursor, active_win, { flow_row, 0 })
       end
-    end, 300)
+    end,
+  })
+end
+
+function M.workspace(lines, content_width, card)
+  local graph = state.call_hierarchy
+  local flow_options = config.values.flow or {}
+  if flow_options.enabled == false or not graph then
+    return lines, content_width, false, false
+  end
+  local widget = require("loopbiotic.widgets").validate({
+    id = "flow:" .. tostring(card and card.id or "response"),
+    kind = "flow",
+    version = 1,
+    title = "Flow",
+    data = { graph = graph },
+    provenance = "lsp",
+    intents = { "navigate", "expand", "select_context", "inspect" },
+  })
+  if not widget then
+    return lines, content_width, false, false
+  end
+  local has_path = type(card) == "table" and type(card.flow_path) == "table" and #card.flow_path > 0
+  if not has_path and not state.card_flow_active then
+    return lines, content_width, false, false
+  end
+  local viewport = ui.viewport()
+  local wide = viewport.width >= (flow_options.responsive_split or 120)
+  local flow_width = math.min(flow_options.panel_width or 52, math.max(viewport.width - content_width - 5, 24))
+  local flow = require("loopbiotic.flow")
+  local flow_lines
+  if state.card_flow_active then
+    flow_lines = flow.lines(graph, flow_width - 2)
+  else
+    local resolved_ids
+    flow_lines, resolved_ids = flow.path_lines(graph, card.flow_path, flow_width - 2)
+    if #resolved_ids == 0 then
+      return lines, content_width, false, false
+    end
+  end
+
+  if not wide then
+    if state.card_flow_active then
+      return flow_lines, math.min(flow_width, math.max(viewport.width - 2, 1)), true, true
+    end
+    local stacked = vim.deepcopy(lines)
+    table.insert(stacked, "")
+    table.insert(stacked, string.rep("─", math.min(math.max(content_width, 8), 32)))
+    vim.list_extend(stacked, flow_lines)
+    return stacked, math.max(content_width, math.min(flow_width, math.max(viewport.width - 2, 1))), true, false
+  end
+
+  local width = math.min(content_width + flow_width + 1, math.max(viewport.width - 2, 1))
+  local left_width = math.max(width - flow_width - 1, 16)
+  local combined = {}
+  for index = 1, math.max(#lines, #flow_lines) do
+    local left = M.short(lines[index] or "", left_width)
+    local padding = string.rep(" ", math.max(left_width - vim.fn.strdisplaywidth(left), 0))
+    table.insert(combined, left .. padding .. "│" .. (flow_lines[index] or ""))
+  end
+  return combined, width, true, true
+end
+
+function M.refresh_flow(graph)
+  if graph ~= state.call_hierarchy or not state.card then
+    return
+  end
+  if surfaces.agent_mode() ~= "closed" then
+    M.show(state.card, { enter = false, flow_refresh = true })
   end
 end
 
@@ -157,7 +198,7 @@ function M.lines(card)
   elseif card.kind == "summary" then
     if card.title ~= "Stopped" then
       table.insert(lines, "Status  Goal complete")
-      table.insert(lines, "Next    Run checks, send a message, or stop")
+      table.insert(lines, "Next    Reply or quit")
       table.insert(lines, "")
     end
     M.add(lines, card.summary or card.title)
@@ -189,15 +230,6 @@ function M.lines(card)
   vim.list_extend(lines, M.actions(card))
 
   return lines
-end
-
-function M.has_action(card, expected)
-  for _, action in ipairs(card.actions or card.next_actions or {}) do
-    if action == expected then
-      return true
-    end
-  end
-  return false
 end
 
 function M.goal(lines)
@@ -372,33 +404,29 @@ function M.signal(lines, text)
 end
 
 function M.actions(card)
-  local actions = card.actions or card.next_actions or {}
-  local parts = {
-    M.action_hint("reply", labels.reply),
-    M.hint(config.values.keymaps.resume, "Focus"),
-    M.hint(config.values.keymaps.hide, "Hide"),
-  }
+  local parts = { M.hint(config.values.keymaps.hide, "Wrap"), M.hint("q", "Quit") }
+  if card.kind ~= "working" then
+    table.insert(parts, 1, M.hint("m", "Reply"))
+  end
+
+  if card.kind ~= "working" and state.call_hierarchy and (config.values.flow or {}).enabled ~= false then
+    table.insert(parts, M.hint(config.values.keymaps.flow or "F", state.card_flow_active and "Context" or "Flow"))
+  end
+
+  if type(card.flow_path) == "table" and state.call_hierarchy then
+    local _, path_ids = require("loopbiotic.flow").path_lines(state.call_hierarchy, card.flow_path, 80)
+    if #path_ids > 0 then
+      table.insert(parts, M.hint("1-" .. math.min(#path_ids, 9), "Open path node"))
+    end
+  end
 
   if M.location(card) then
     table.insert(parts, M.hint(config.values.keymaps.go_to, "Go to line"))
   end
 
-  if card.kind == "deny" and type(card.location) == "table" then
-    table.insert(parts, M.hint("o", "Open & retry"))
-  end
-
   if M.details_available(card) then
     local text = state.details_expanded and "Collapse details" or "Expand details"
     table.insert(parts, M.hint(config.values.keymaps.details or "z", text))
-  end
-
-  for _, action in ipairs(actions) do
-    local name = type(action) == "table" and "apply_patch" or action
-    local label = labels[name]
-
-    if label and not (name == "open" and M.location(card)) then
-      table.insert(parts, M.action_hint(name, label))
-    end
   end
 
   local lines = { "" }
@@ -414,35 +442,80 @@ function M.actions(card)
   return lines
 end
 
-function M.action_hint(_, label)
-  local key = label[3] and config.values.keymaps[label[3]] or label[1]
-  return M.hint(key, label[2])
-end
-
 function M.hint(key, text)
   return string.format("[%s] %s", key or "?", text)
 end
 
 function M.bind(buf, card)
-  local actions = card.actions or card.next_actions or {}
+  if card.kind == "working" then
+    vim.keymap.set("n", "q", require("loopbiotic").stop, { buffer = buf, nowait = true, silent = true })
+    return
+  end
 
-  vim.keymap.set("n", "h", function()
-    require("loopbiotic").hide()
-  end, { buffer = buf, nowait = true, silent = true })
+  if state.call_hierarchy and (config.values.flow or {}).enabled ~= false then
+    local flow_key = config.values.keymaps.flow or "F"
+    if flow_key ~= "" then
+      vim.keymap.set("n", flow_key, function()
+        state.card_flow_active = not state.card_flow_active
+        M.show(card, { enter = true })
+      end, { buffer = buf, nowait = true, silent = true })
+    end
+  end
+
+  if state.card_flow_active and state.call_hierarchy and (config.values.flow or {}).enabled ~= false then
+    local flow = require("loopbiotic.flow")
+    vim.keymap.set("n", "j", function()
+      flow.move(state.call_hierarchy, 1)
+    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set("n", "k", function()
+      flow.move(state.call_hierarchy, -1)
+    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set("n", "h", function()
+      flow.collapse(state.call_hierarchy)
+    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set("n", "l", function()
+      flow.expand_current(state.call_hierarchy)
+    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set("n", "u", function()
+      flow.toggle_uses(state.call_hierarchy)
+    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set("n", "<CR>", function()
+      flow.open_current(state.call_hierarchy)
+    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set("n", "s", function()
+      local ref = require("loopbiotic.widgets").flow_ref(state.call_hierarchy)
+      if ref then
+        require("loopbiotic.widgets").toggle(ref)
+        M.show(card, { enter = true })
+      end
+    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set("n", "R", function()
+      state.call_hierarchy = flow.root_here(state.call_hierarchy)
+      M.refresh_flow(state.call_hierarchy)
+    end, { buffer = buf, nowait = true, silent = true })
+    return
+  end
+
+  if type(card.flow_path) == "table" and state.call_hierarchy then
+    local flow = require("loopbiotic.flow")
+    local _, path_ids = flow.path_lines(state.call_hierarchy, card.flow_path, 80)
+    for index, node_id in ipairs(path_ids) do
+      if index > 9 then
+        break
+      end
+      vim.keymap.set("n", tostring(index), function()
+        flow.open_node(state.call_hierarchy, node_id)
+      end, { buffer = buf, nowait = true, silent = true })
+    end
+  end
 
   vim.keymap.set("n", "m", function()
-    require("loopbiotic").reply_prompt()
+    require("loopbiotic.scope").run("reply", require("loopbiotic").reply_prompt)
   end, { buffer = buf, nowait = true, silent = true })
 
-  vim.keymap.set("n", "g", function()
-    require("loopbiotic").go_to()
+  vim.keymap.set("n", "q", function()
+    require("loopbiotic").stop()
   end, { buffer = buf, nowait = true, silent = true })
-
-  if card.kind == "deny" and type(card.location) == "table" then
-    vim.keymap.set("n", "o", function()
-      require("loopbiotic").open_and_retry()
-    end, { buffer = buf, nowait = true, silent = true })
-  end
   local details_key = config.values.keymaps.details or "z"
   pcall(vim.keymap.del, "n", details_key, { buffer = buf })
   if M.details_available(card) then
@@ -451,16 +524,6 @@ function M.bind(buf, card)
     end, { buffer = buf, nowait = true, silent = true })
   end
 
-  for _, action in ipairs(actions) do
-    local name = type(action) == "table" and "apply" or action
-    local label = labels[name]
-
-    if label then
-      vim.keymap.set("n", label[1], function()
-        require("loopbiotic").action(name)
-      end, { buffer = buf, nowait = true, silent = true })
-    end
-  end
 end
 
 function M.anchor(card)

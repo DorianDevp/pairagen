@@ -290,6 +290,7 @@ enum TurnCommand {
         session_id: String,
         generation: u64,
         text: String,
+        mode: loopbiotic_protocol::Mode,
     },
     Apply {
         result: Box<PatchApplyResult>,
@@ -300,6 +301,10 @@ enum TurnCommand {
 impl TurnCommand {
     fn kind(&self) -> &'static str {
         match self {
+            Self::Reply {
+                mode: loopbiotic_protocol::Mode::Fix | loopbiotic_protocol::Mode::Propose,
+                ..
+            } => "work",
             Self::Start { .. } | Self::Reply { .. } => "conversation",
             Self::Action {
                 action:
@@ -457,6 +462,7 @@ impl Server {
             }
             "session/reply" => {
                 let params = parse::<ReplyParams>(&id, request.params)?;
+                let deadline = reply_deadline(&params.mode);
                 self.abort_pending(&params.session_id).await;
                 self.apply_interaction_feedback(&params.session_id)
                     .await
@@ -475,11 +481,7 @@ impl Server {
                         .map_err(server_error(&id))?;
                     let turn_id = next_turn_id();
                     let working = engine
-                        .working_result(
-                            &params.session_id,
-                            &turn_id,
-                            conversation_deadline().as_millis() as u64,
-                        )
+                        .working_result(&params.session_id, &turn_id, deadline.as_millis() as u64)
                         .map_err(server_error(&id))?;
                     (generation, (turn_id, working))
                 };
@@ -488,11 +490,12 @@ impl Server {
                         session_id: params.session_id.clone(),
                         generation,
                         text: params.text,
+                        mode: params.mode,
                     },
                     params.session_id,
                     generation,
                     working,
-                    conversation_deadline(),
+                    deadline,
                 )
                 .await
                 .map_err(server_error(&id))?
@@ -716,8 +719,9 @@ async fn execute_turn(
             session_id,
             generation,
             text,
+            mode,
         } => engine
-            .reply_with_progress_generation(&session_id, generation, text, Some(progress))
+            .reply_with_progress_generation(&session_id, generation, text, mode, Some(progress))
             .await
             .map(|result| json!(result)),
         TurnCommand::Apply { result, generation } => engine
@@ -732,16 +736,10 @@ fn next_turn_id() -> String {
 }
 
 fn start_deadline(params: &StartSessionParams) -> Duration {
-    let forced_patch = matches!(
-        loopbiotic_harness::session::parse_kind_prefix(&params.prompt).0,
-        Some(loopbiotic_protocol::CardKind::Patch)
-    );
-    if forced_patch
-        || matches!(
-            params.mode,
-            loopbiotic_protocol::Mode::Fix | loopbiotic_protocol::Mode::Propose
-        )
-    {
+    if matches!(
+        params.mode,
+        loopbiotic_protocol::Mode::Fix | loopbiotic_protocol::Mode::Propose
+    ) {
         work_deadline()
     } else {
         conversation_deadline()
@@ -755,6 +753,17 @@ fn action_deadline(action: &loopbiotic_protocol::Action) -> Duration {
             | loopbiotic_protocol::Action::Goal
             | loopbiotic_protocol::Action::Retry
             | loopbiotic_protocol::Action::EditPrompt
+    ) {
+        work_deadline()
+    } else {
+        conversation_deadline()
+    }
+}
+
+fn reply_deadline(mode: &loopbiotic_protocol::Mode) -> Duration {
+    if matches!(
+        mode,
+        loopbiotic_protocol::Mode::Fix | loopbiotic_protocol::Mode::Propose
     ) {
         work_deadline()
     } else {
@@ -861,11 +870,12 @@ async fn print_mock_session() -> Result<()> {
         cursor: loopbiotic_protocol::Cursor { line: 1, column: 1 },
         selection: None,
         prompt: "payload is empty".into(),
-        mode: loopbiotic_protocol::Mode::Auto,
+        mode: loopbiotic_protocol::Mode::Investigate,
         buffer_text: String::new(),
         buffer_start_line: 1,
         diagnostics: vec![],
         hints: vec![],
+        call_hierarchy: None,
         context_policy: Default::default(),
     };
     let start = engine.start(params).await?;

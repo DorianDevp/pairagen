@@ -1,9 +1,15 @@
 local M = {}
 
+local mode_order = { "fix", "explain", "investigate", "review", "propose" }
+local valid_modes = {}
+for _, mode in ipairs(mode_order) do
+  valid_modes[mode] = true
+end
+
 ---@class LoopbioticBackendConfig
 ---@field command string|nil explicit loopbioticd path; nil resolves/installs one
 ---@field args string[]
----@field mode string default prompt mode ("auto", "fix", "explain", ...)
+---@field mode string default prompt mode ("investigate", "fix", "explain", ...)
 ---@field agent string key into LoopbioticConfig.agents
 ---@field prefetch "off"|"read_only" read-only post-accept prefetch
 ---@field token_budget integer ask before another turn past this session total; 0 disables
@@ -32,6 +38,7 @@ local M = {}
 ---@field card { border: string, max_width: integer, max_height: integer }
 ---@field thinking { enabled: boolean, interval: integer }
 ---@field context table context capture limits, optimization policy, and LSP hint options
+---@field flow table static LSP call hierarchy limits and responsive layout
 ---@field navigation { open: "current"|"tab"|"split"|"vsplit", annotate: boolean }
 ---@field diff { layout: string, apply_to_buffer: boolean, max_changed_lines: integer }
 
@@ -40,7 +47,7 @@ M.values = {
   backend = {
     command = nil,
     args = {},
-    mode = "auto",
+    mode = "investigate",
     agent = "mock",
     -- Ordinary speculation prepares the next goal step while the current
     -- patch is being reviewed; it can surface only after acceptance.
@@ -101,14 +108,8 @@ M.values = {
     },
   },
   keymaps = {
-    prompt = "<leader>a",
+    prompt = "<leader>pp",
     reply = "<leader>pm",
-    follow = "<leader>pf",
-    why = "<leader>pw",
-    fix = "<leader>px",
-    goal = "<leader>pG",
-    cancel = "<leader>pc",
-    other_lead = "<leader>pn",
     stop = "<leader>pq",
     hide = "<leader>ph",
     resume = "<leader>pr",
@@ -117,9 +118,12 @@ M.values = {
     details = "z",
     draft_accept = "<leader>pa",
     draft_reject = "<leader>pd",
-    draft_retry = "<leader>pt",
     -- Model picker inside the prompt window (buffer-local, insert and normal).
     models = "<C-l>",
+    -- Turn-mode picker inside every PromptWindow.
+    modes = "<C-k>",
+    -- Toggle the session-pinned Flow explorer from prompt and cards.
+    flow = "F",
   },
   prompt = {
     border = "rounded",
@@ -170,6 +174,17 @@ M.values = {
       workspace_symbols = true,
     },
   },
+  flow = {
+    enabled = true,
+    initial_depth = 2,
+    max_nodes = 40,
+    snippet_token_budget = 800,
+    responsive_split = 120,
+    panel_width = 52,
+    request_timeout_ms = 1200,
+    submit_wait_ms = 160,
+    render_batch_ms = 24,
+  },
   navigation = {
     open = "current",
     annotate = true,
@@ -184,6 +199,18 @@ M.values = {
 M.explicit_models = {}
 
 function M.setup(opts)
+  local requested_mode = opts and opts.backend and opts.backend.mode
+  if requested_mode ~= nil and not valid_modes[requested_mode] then
+    error(
+      "Unsupported Loopbiotic mode: "
+        .. tostring(requested_mode)
+        .. ". Configure one of: "
+        .. table.concat(mode_order, ", ")
+        .. ". The mode can be changed in PromptWindow with "
+        .. M.values.keymaps.modes
+        .. "."
+    )
+  end
   M.explicit_models = {}
   for name, agent in pairs((opts and opts.agents) or {}) do
     if agent.model ~= nil then
@@ -195,6 +222,14 @@ function M.setup(opts)
   M.load_models()
 
   return M.values
+end
+
+function M.mode_names()
+  return vim.deepcopy(mode_order)
+end
+
+function M.valid_mode(mode)
+  return valid_modes[mode] == true
 end
 
 function M.preferences_path()

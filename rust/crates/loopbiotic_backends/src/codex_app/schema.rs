@@ -27,7 +27,9 @@ pub(super) fn output_schema(req: &BackendRequest) -> Value {
         Some(loopbiotic_protocol::CardKind::Summary) => summary_schema(),
         Some(loopbiotic_protocol::CardKind::Error) => error_schema(),
         Some(loopbiotic_protocol::CardKind::Working) => error_schema(),
-        Some(loopbiotic_protocol::CardKind::OpenLocation) | None => any_op_schema(),
+        Some(loopbiotic_protocol::CardKind::OpenLocation) | None => {
+            any_op_schema(&req.card_contract)
+        }
     }
 }
 
@@ -42,6 +44,7 @@ fn conversation_schema() -> Value {
             "finding",
             "location",
             "annotation",
+            "flow_path",
             "question",
             "options",
             "reason",
@@ -56,6 +59,7 @@ fn conversation_schema() -> Value {
             "finding": {"type": ["string", "null"]},
             "location": nullable_location_schema(),
             "annotation": {"type": ["string", "null"]},
+            "flow_path": {"type": ["array", "null"], "items": {"type": "string"}},
             "question": {"type": ["string", "null"]},
             "options": {
                 "type": ["array", "null"],
@@ -80,8 +84,8 @@ fn conversation_schema() -> Value {
 /// Schema for turns without a demanded kind: the agent picks whichever op
 /// fits, including a clarifying choice or a deny. Mirrors
 /// schemas/loopbiotic-agent-op.schema.json (every field present, unused ones null).
-fn any_op_schema() -> Value {
-    object_schema(
+fn any_op_schema(contract: &crate::CardContract) -> Value {
+    let mut schema = object_schema(
         &[
             "op",
             "title",
@@ -91,6 +95,7 @@ fn any_op_schema() -> Value {
             "finding",
             "location",
             "annotation",
+            "flow_path",
             "explanation",
             "goal_complete",
             "patches",
@@ -110,20 +115,10 @@ fn any_op_schema() -> Value {
             "finding": {"type": ["string", "null"]},
             "location": nullable_location_schema(),
             "annotation": {"type": ["string", "null"]},
+            "flow_path": {"type": ["array", "null"], "items": {"type": "string"}},
             "explanation": {"type": ["string", "null"]},
             "goal_complete": {"type": ["boolean", "null"]},
-            "patches": {
-                "type": ["array", "null"],
-                "items": object_schema(
-                    &["id", "file", "diff", "explanation"],
-                    json!({
-                        "id": {"type": ["string", "null"]},
-                        "file": {"type": "string"},
-                        "diff": {"type": "string"},
-                        "explanation": {"type": "string"}
-                    })
-                )
-            },
+            "patches": {"type": ["array", "null"]},
             "question": {"type": ["string", "null"]},
             "options": {
                 "type": ["array", "null"],
@@ -144,11 +139,18 @@ fn any_op_schema() -> Value {
             "changed_files": {"type": ["array", "null"], "items": {"type": "string"}},
             "message": {"type": ["string", "null"]}
         }),
-    )
+    );
+    // An unconstrained turn may still choose patch, so it must use the same
+    // typed hunk representation as an explicitly forced patch. A raw diff
+    // field here would contradict the Codex parser.
+    let mut patches = patch_schema(contract)["properties"]["patches"].clone();
+    patches["type"] = json!(["array", "null"]);
+    schema["properties"]["patches"] = patches;
+    schema
 }
 
 fn goal_loop_schema(contract: &crate::CardContract) -> Value {
-    let mut schema = any_op_schema();
+    let mut schema = any_op_schema(contract);
     schema["properties"]["op"]["enum"] = json!([
         "patch",
         "choice",
@@ -230,26 +232,35 @@ fn location_schema() -> Value {
 
 fn hypothesis_schema() -> Value {
     object_schema(
-        &["op", "title", "claim", "evidence", "next"],
+        &["op", "title", "claim", "evidence", "next", "flow_path"],
         json!({
             "op": {"type": "string", "enum": ["hypothesis"]},
             "title": {"type": "string"},
             "claim": {"type": "string"},
             "evidence": nullable_location_schema(),
-            "next": location_schema()
+            "next": location_schema(),
+            "flow_path": {"type": "array", "items": {"type": "string"}}
         }),
     )
 }
 
 fn finding_schema() -> Value {
     object_schema(
-        &["op", "title", "finding", "location", "annotation"],
+        &[
+            "op",
+            "title",
+            "finding",
+            "location",
+            "annotation",
+            "flow_path",
+        ],
         json!({
             "op": {"type": "string", "enum": ["finding"]},
             "title": {"type": "string"},
             "finding": {"type": "string"},
             "location": location_schema(),
-            "annotation": {"type": ["string", "null"]}
+            "annotation": {"type": ["string", "null"]},
+            "flow_path": {"type": "array", "items": {"type": "string"}}
         }),
     )
 }
@@ -392,10 +403,30 @@ mod tests {
         assert!(schema["properties"].get("patches").is_none());
         assert!(schema["properties"].get("goal_complete").is_none());
         assert!(schema["properties"].get("changed_files").is_none());
+        assert_eq!(schema["properties"]["flow_path"]["items"]["type"], "string");
         assert!(
             serde_json::to_string(&schema).unwrap().len()
-                < serde_json::to_string(&any_op_schema()).unwrap().len()
+                < serde_json::to_string(&any_op_schema(&crate::CardContract::default()))
+                    .unwrap()
+                    .len()
         );
+    }
+
+    #[test]
+    fn unconstrained_schema_allows_a_reviewed_patch() {
+        let mut req = crate::test_request();
+        req.session.mode = loopbiotic_protocol::Mode::Investigate;
+        req.card_contract.expected_kind = None;
+        req.card_contract.conversation_only = false;
+        let schema = output_schema(&req);
+        let ops = schema["properties"]["op"]["enum"].as_array().unwrap();
+
+        assert!(ops.contains(&json!("patch")));
+        assert!(ops.contains(&json!("finding")));
+        assert!(schema["properties"].get("patches").is_some());
+        let patch = &schema["properties"]["patches"]["items"];
+        assert!(patch["properties"].get("diff").is_none());
+        assert_eq!(patch["properties"]["hunks"]["type"], "array");
     }
 
     #[test]
@@ -455,7 +486,7 @@ mod tests {
         let patch = patch_schema(&crate::CardContract::default());
         assert!(patch["properties"].get("plan").is_none());
 
-        let any = any_op_schema();
+        let any = any_op_schema(&crate::CardContract::default());
         assert!(any["properties"].get("plan").is_none());
     }
 

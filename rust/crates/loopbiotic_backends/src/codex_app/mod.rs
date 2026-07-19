@@ -39,6 +39,13 @@ pub struct CodexAppBackend {
     turn_timeout: Option<Duration>,
     discovery: Arc<Mutex<CodexAppState>>,
     patch: Arc<Mutex<CodexAppState>>,
+    model_catalog: Arc<Mutex<ModelCatalog>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ModelCatalog {
+    models: Vec<String>,
+    default: Option<String>,
 }
 
 impl CodexAppBackend {
@@ -133,6 +140,7 @@ impl CodexAppBackend {
             turn_timeout,
             discovery: Arc::new(Mutex::new(CodexAppState::default())),
             patch: Arc::new(Mutex::new(CodexAppState::default())),
+            model_catalog: Arc::new(Mutex::new(ModelCatalog::default())),
         }
     }
 
@@ -403,7 +411,43 @@ impl CodexAppBackend {
         let lane = self.lane(Phase::Discovery);
         let mut state = lane.lock().await;
 
-        Self::ensure(&mut state, &self.command, &self.args).await
+        Self::ensure(&mut state, &self.command, &self.args).await?;
+        if self.model_catalog.lock().await.models.is_empty() {
+            match Self::list_models(&mut state).await {
+                Ok(catalog) => *self.model_catalog.lock().await = catalog,
+                Err(error) => debug(&format!("codex model/list unavailable: {error}")),
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn list_models(state: &mut CodexAppState) -> Result<ModelCatalog> {
+        let mut catalog = ModelCatalog::default();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let response = state
+                .request(json!({
+                    "method": "model/list",
+                    "params": {
+                        "cursor": cursor,
+                        "limit": 100,
+                        "includeHidden": false
+                    }
+                }))
+                .await?;
+            append_model_page(&mut catalog, &response);
+            cursor = response
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(catalog)
     }
 
     fn error_card(message: impl Into<String>) -> Card {
@@ -491,24 +535,30 @@ impl BackendAdapter for CodexAppBackend {
     }
 
     async fn identity(&self) -> BackendIdentity {
-        let patch = self.model.clone();
+        let catalog = self.model_catalog.lock().await.clone();
+        let patch = self.model.clone().or_else(|| catalog.default.clone());
         let discovery = self.discovery_model.clone().or_else(|| patch.clone());
         let phases = (discovery != patch).then(|| BackendPhaseModels {
             discovery: discovery.clone(),
             patch: patch.clone(),
         });
-        let mut models = vec![];
-        for candidate in [&patch, &discovery].into_iter().flatten() {
-            if !models.contains(candidate) {
+        let mut models = catalog.models;
+        if let Some(candidate) = &patch
+            && !models.contains(candidate)
+        {
+            models.insert(0, candidate.clone());
+        }
+        if models.is_empty() {
+            if let Some(candidate) = &patch {
                 models.push(candidate.clone());
             }
         }
 
         BackendIdentity {
             backend: "codex_app".into(),
-            // The app-server initialize handshake reports no default model or
-            // model list, so only the configured model can be named; turns
-            // with model: null use the server's own default.
+            // A configured model wins. Otherwise this is the current default
+            // returned by model/list; turns still pass null and let the
+            // app-server resolve that same default.
             model: patch,
             models,
             phases,
@@ -523,6 +573,29 @@ impl BackendAdapter for CodexAppBackend {
             reasoning: true,
             can_read_project: true,
             can_use_tools: true,
+        }
+    }
+}
+
+fn append_model_page(catalog: &mut ModelCatalog, response: &Value) {
+    let Some(models) = response.get("data").and_then(Value::as_array) else {
+        return;
+    };
+    for entry in models {
+        let Some(model) = entry
+            .get("model")
+            .or_else(|| entry.get("id"))
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+        else {
+            continue;
+        };
+        let model = model.to_string();
+        if entry.get("isDefault").and_then(Value::as_bool) == Some(true) {
+            catalog.default = Some(model.clone());
+        }
+        if !catalog.models.contains(&model) {
+            catalog.models.push(model);
         }
     }
 }
@@ -610,8 +683,8 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
 - choice: only for a blocking user decision\n\
 - summary: only when the complete original goal is satisfied"
     } else {
-        "- hypothesis: {\"op\":\"hypothesis\",\"title\":string,\"claim\":string,\"evidence\":object|null,\"next\":object|null}\n\
-- finding: {\"op\":\"finding\",\"title\":string,\"finding\":string,\"location\":object|null,\"annotation\":string|null}\n\
+        "- hypothesis: {\"op\":\"hypothesis\",\"title\":string,\"claim\":string,\"evidence\":object|null,\"next\":object|null,\"flow_path\":[string]}\n\
+- finding: {\"op\":\"finding\",\"title\":string,\"finding\":string,\"location\":object|null,\"annotation\":string|null,\"flow_path\":[string]}\n\
 - patch: use the exact structured patch schema supplied by the API. Each hunk has old_start, new_start, and lines with kind context/remove/add plus line text without a diff prefix.\n\
 - error: {\"op\":\"error\",\"title\":string,\"message\":string}"
     };
@@ -648,7 +721,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
 
     let source_context = if include_context {
         format!(
-            "File: {}\nCursor: {}:{}\nEditor diagnostics (nearest current-file diagnostic first):\n```text\n{}\n```\nBuffer starts at file line: {}\nBuffer excerpt:\n```text\n{}\n```\nRanked project context (read before using tools):\n```text\n{}\n```",
+            "File: {}\nCursor: {}:{}\nEditor diagnostics (nearest current-file diagnostic first):\n```text\n{}\n```\nBuffer starts at file line: {}\nBuffer excerpt:\n```text\n{}\n```\nRanked project context (read before using tools):\n```text\n{}\n```\nEditor-resolved static Flow graph:\n```json\n{}\n```",
             req.context.file.display(),
             req.context.cursor.line,
             req.context.cursor.column,
@@ -656,6 +729,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             req.context.buffer_start_line,
             req.context.buffer_text,
             ranked_context,
+            serde_json::to_string(&req.context.call_hierarchy).unwrap_or_else(|_| "null".into()),
         )
     } else {
         "Source context is unchanged from the preceding turn in this Loopbiotic thread. Reuse those exact diagnostics, buffer, and ranked project context.".into()
@@ -672,6 +746,7 @@ Allowed ops:
 
 Rules:
 {turn_rules}
+{flow_guidelines}
 
 Session prompt: {prompt}
 Mode: {mode}
@@ -686,13 +761,15 @@ Last card: {last}
 
 Immediate directive (highest priority for this response): {immediate_directive}"#,
         prompt = req.session.prompt,
+        flow_guidelines = crate::FLOW_GUIDELINES,
         completed_steps =
             serde_json::to_string(&req.session.completed_steps).unwrap_or_else(|_| "[]".into()),
         known_observations =
             serde_json::to_string(&req.session.known_observations).unwrap_or_else(|_| "[]".into()),
         interaction_feedback = serde_json::to_string(&req.session.interaction_feedback)
             .unwrap_or_else(|_| "[]".into()),
-        mode = serde_json::to_string(&req.session.mode).unwrap_or_else(|_| "\"auto\"".into()),
+        mode =
+            serde_json::to_string(&req.session.mode).unwrap_or_else(|_| "\"investigate\"".into()),
         action = action_value(&req.action),
         expected_kind = req
             .card_contract
@@ -768,7 +845,7 @@ mod tests {
                 interaction_feedback: vec![],
                 completed_steps: vec![],
                 known_observations: vec![],
-                mode: loopbiotic_protocol::Mode::Auto,
+                mode: loopbiotic_protocol::Mode::Investigate,
                 card_count: 0,
                 last_card: None,
                 last_summary: None,
@@ -785,6 +862,7 @@ mod tests {
                 hints: vec![],
                 artifacts: vec![],
                 report: None,
+                call_hierarchy: None,
             },
             card_contract: crate::CardContract {
                 expected_kind: Some(loopbiotic_protocol::CardKind::Hypothesis),
@@ -873,7 +951,53 @@ mod tests {
         let phases = identity.phases.expect("phase identity");
         assert_eq!(phases.patch.as_deref(), Some("gpt-patch"));
         assert_eq!(phases.discovery.as_deref(), Some("gpt-fast"));
-        assert_eq!(identity.models, vec!["gpt-patch", "gpt-fast"]);
+        assert_eq!(identity.models, vec!["gpt-patch"]);
+    }
+
+    #[tokio::test]
+    async fn identity_uses_the_app_server_catalog_and_default_model() {
+        let backend = CodexAppBackend::with_phase_models(
+            "codex-unused",
+            vec![],
+            None,
+            Some("medium".into()),
+            Some("gpt-discovery".into()),
+            Some("low".into()),
+        );
+        *backend.model_catalog.lock().await = ModelCatalog {
+            models: vec!["gpt-frontier".into(), "gpt-balanced".into()],
+            default: Some("gpt-frontier".into()),
+        };
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.model.as_deref(), Some("gpt-frontier"));
+        assert_eq!(identity.models, vec!["gpt-frontier", "gpt-balanced"]);
+        let phases = identity.phases.expect("phase identity");
+        assert_eq!(phases.patch.as_deref(), Some("gpt-frontier"));
+        assert_eq!(phases.discovery.as_deref(), Some("gpt-discovery"));
+    }
+
+    #[test]
+    fn model_catalog_uses_model_ids_dedupes_and_tracks_the_default() {
+        let mut catalog = ModelCatalog::default();
+        append_model_page(
+            &mut catalog,
+            &json!({
+                "data": [
+                    {"id": "frontier-id", "model": "gpt-frontier", "isDefault": true},
+                    {"id": "balanced-id", "model": "gpt-balanced", "isDefault": false},
+                    {"id": "duplicate", "model": "gpt-frontier", "isDefault": false},
+                    {"id": "fallback-id", "isDefault": false}
+                ]
+            }),
+        );
+
+        assert_eq!(
+            catalog.models,
+            vec!["gpt-frontier", "gpt-balanced", "fallback-id"]
+        );
+        assert_eq!(catalog.default.as_deref(), Some("gpt-frontier"));
     }
 
     #[test]
@@ -1006,6 +1130,8 @@ mod tests {
         assert!(rendered.contains("local type error"));
         assert!(rendered.contains("unique ranked diagnostic source"));
         assert!(rendered.contains("evidence only"));
+        assert!(rendered.contains("Editor-resolved static Flow graph"));
+        assert!(rendered.contains("Do not use tools or searches to re-enumerate"));
     }
 
     #[test]

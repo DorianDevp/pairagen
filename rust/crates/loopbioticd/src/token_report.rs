@@ -182,11 +182,12 @@ async fn run_case(
         cursor: spec.cursor.clone().unwrap_or(Cursor { line: 1, column: 1 }),
         selection: None,
         prompt: spec.prompt.clone(),
-        mode: spec.mode.clone().unwrap_or(Mode::Auto),
+        mode: spec.mode.clone().unwrap_or(Mode::Investigate),
         buffer_text: entry_text,
         buffer_start_line: 1,
         diagnostics: spec.diagnostics.clone(),
         hints: vec![],
+        call_hierarchy: None,
         context_policy: Default::default(),
     };
 
@@ -245,6 +246,7 @@ async fn run_case(
                     .reply(
                         &session_id,
                         "Use your best judgment and make the fix.".into(),
+                        Mode::Fix,
                     )
                     .await?;
                 turns += 1;
@@ -363,6 +365,7 @@ fn file_context(cwd: &Path, file: &Path) -> Option<ContextBundle> {
         hints: vec![],
         artifacts: vec![],
         report: None,
+        call_hierarchy: None,
     })
 }
 

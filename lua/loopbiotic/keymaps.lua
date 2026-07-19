@@ -14,27 +14,23 @@ function M.setup()
       { "n", "v" },
       key,
       util.guard("keymap prompt", function()
-        require("loopbiotic").prompt()
+        require("loopbiotic.scope").run("prompt", function()
+          require("loopbiotic").prompt()
+        end)
       end),
       { silent = true }
     )
   end
 
-  M.call(keys.reply, "reply_prompt")
-  M.action(keys.follow, "follow")
-  M.action(keys.why, "why")
-  M.action(keys.fix, "fix")
-  M.action(keys.goal, "goal")
-  M.action(keys.cancel, "cancel_turn")
-  M.action(keys.other_lead, "other_lead")
-  M.action(keys.stop, "stop")
-  M.call(keys.hide, "hide")
-  M.call(keys.resume, "resume")
-  M.call(keys.go_to, "go_to")
-  M.call(keys.reset, "reset")
+  M.call(keys.reply, "reply", "reply_prompt")
+  M.call(keys.stop, "stop", "stop")
+  M.call(keys.hide, "hide", "hide")
+  M.call(keys.resume, "resume", "resume")
+  M.call(keys.go_to, "go_to", "go_to")
+  M.call(keys.reset, "reset", "reset")
 end
 
-function M.action(key, action)
+function M.call(key, action, name)
   if not key or key == "" then
     return
   end
@@ -43,22 +39,9 @@ function M.action(key, action)
     "n",
     key,
     util.guard("keymap " .. action, function()
-      require("loopbiotic").action(action)
-    end),
-    { silent = true }
-  )
-end
-
-function M.call(key, name)
-  if not key or key == "" then
-    return
-  end
-
-  vim.keymap.set(
-    "n",
-    key,
-    util.guard("keymap " .. name, function()
-      require("loopbiotic")[name]()
+      require("loopbiotic.scope").run(action, function()
+        require("loopbiotic")[name]()
+      end)
     end),
     { silent = true }
   )

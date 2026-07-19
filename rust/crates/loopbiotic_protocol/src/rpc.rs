@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Action, Card, ContextBundle};
+use crate::{Action, Card, ContextBundle, Mode};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TokenUsage {
@@ -124,6 +124,8 @@ pub struct ActionParams {
 pub struct ReplyParams {
     pub session_id: String,
     pub text: String,
+    /// Required because every PromptWindow owns an explicit user-selected mode.
+    pub mode: Mode,
     #[serde(default)]
     pub context: Option<ContextBundle>,
 }

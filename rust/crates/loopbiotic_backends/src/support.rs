@@ -108,6 +108,11 @@ pub(crate) fn context_fingerprint(req: &BackendRequest) -> u64 {
         artifact.start_line.hash(&mut hasher);
         artifact.text.hash(&mut hasher);
     }
+    if let Some(call_hierarchy) = &req.context.call_hierarchy {
+        serde_json::to_string(call_hierarchy)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -255,6 +260,22 @@ mod tests {
         req.card_contract.expected_kind = None;
         req.card_contract.allow_goal_completion = true;
         assert_eq!(turn_phase(&req), Phase::Patch);
+    }
+
+    #[test]
+    fn flow_graph_participates_in_context_fingerprinting() {
+        let mut req = crate::test_request();
+        let without = context_fingerprint(&req);
+        req.context.call_hierarchy = Some(loopbiotic_protocol::CallHierarchy {
+            root: None,
+            nodes: vec![],
+            edges: vec![],
+            partial: false,
+            truncated: false,
+            unavailable: true,
+        });
+
+        assert_ne!(context_fingerprint(&req), without);
     }
 
     #[test]

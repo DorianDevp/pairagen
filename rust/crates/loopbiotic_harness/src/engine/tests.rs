@@ -30,6 +30,7 @@ pub(super) fn params() -> StartSessionParams {
         buffer_start_line: 1,
         diagnostics: vec![],
         hints: vec![],
+        call_hierarchy: None,
         context_policy: Default::default(),
     }
 }
@@ -46,6 +47,7 @@ fn editor_context(buffer_text: &str) -> ContextBundle {
         hints: vec![],
         artifacts: vec![],
         report: None,
+        call_hierarchy: None,
     }
 }
 
@@ -57,6 +59,7 @@ fn discovery_response(backend: &str) -> BackendResponse {
             claim: "The request is understood; goal execution remains opt-in.".into(),
             evidence: None,
             next_move: None,
+            flow_path: vec![],
             actions: vec![Action::Follow, Action::Fix, Action::Goal, Action::Stop],
         }),
         raw_output: None,
@@ -108,7 +111,7 @@ async fn explicit_goal_repairs_two_change_blocks_to_declaration_first() {
         })
     }));
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     goal.buffer_text = "first\nmiddle\nlast".into();
     let start = engine.start(goal).await.unwrap();
     assert!(matches!(start.card, Card::Hypothesis(_)));
@@ -161,7 +164,7 @@ async fn explicit_goal_rejects_a_multi_file_batch() {
         })
     }));
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     goal.buffer_text = "first".into();
 
     let start = engine.start(goal).await.unwrap();
@@ -185,7 +188,7 @@ async fn explicit_goal_reject_stops_without_another_model_turn() {
     let backend = Arc::new(MockBackend);
     let mut engine = Engine::new(backend);
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     let start = engine.start(goal).await.unwrap();
     let first = engine
         .action(&start.session_id, Action::Goal)
@@ -228,7 +231,7 @@ async fn why_explains_and_restores_the_same_pending_hunk() {
     let backend = Arc::new(MockBackend);
     let mut engine = Engine::new(backend);
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     let start = engine.start(goal).await.unwrap();
     let first = engine
         .action(&start.session_id, Action::Goal)
@@ -615,7 +618,7 @@ async fn replies_inside_session() {
     let mut engine = Engine::new(backend);
     let start = engine.start(params()).await.unwrap();
     let result = engine
-        .reply(&start.session_id, "that is not it".into())
+        .reply(&start.session_id, "that is not it".into(), Mode::Explain)
         .await
         .unwrap();
 
@@ -624,6 +627,30 @@ async fn replies_inside_session() {
     };
 
     assert!(card.finding.contains("that is not it"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reply_prompt_mode_controls_the_backend_contract() {
+    let backend = Arc::new(MockBackend);
+    let mut engine = Engine::new(backend);
+    let mut start_params = params();
+    start_params.mode = Mode::Investigate;
+    let start = engine.start(start_params).await.unwrap();
+    let generation = engine.begin_turn(&start.session_id).unwrap();
+
+    let result = engine
+        .reply_with_progress_generation(
+            &start.session_id,
+            generation,
+            "Napraw to".into(),
+            Mode::Fix,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(result.card, Card::Patch(_)));
+    assert_eq!(engine.get(&start.session_id).unwrap().mode, Mode::Fix);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -645,6 +672,7 @@ async fn action_uses_refreshed_editor_context() {
         hints: vec![],
         artifacts: vec![],
         report: None,
+        call_hierarchy: None,
     };
 
     engine.update_context(&start.session_id, context).unwrap();
@@ -696,7 +724,7 @@ async fn sliced_goal_speculates_and_consumes_each_next_slice_on_accept() {
     let mut engine = Engine::new(backend.clone());
     engine.set_source_context_provider(sliced_goal_provider());
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
 
     let start = engine.start(goal).await.unwrap();
     let first = engine
@@ -801,7 +829,7 @@ async fn rejected_slice_cancels_speculation_and_waits_for_explicit_retry() {
     let mut engine = Engine::new(backend.clone());
     engine.set_source_context_provider(sliced_goal_provider());
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     let discovery = engine.start(goal).await.unwrap();
     let start = engine
         .action(&discovery.session_id, Action::Goal)
@@ -874,7 +902,7 @@ async fn user_retry_on_a_slice_cancels_speculation_and_stops_speculating() {
     let mut engine = Engine::new(backend.clone());
     engine.set_source_context_provider(sliced_goal_provider());
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     let discovery = engine.start(goal).await.unwrap();
     let first = engine
         .action(&discovery.session_id, Action::Goal)
@@ -922,7 +950,7 @@ async fn single_file_goal_without_plan_completes_as_a_batch_of_one() {
     let backend = Arc::new(SingleFileNoPlanBackend::default());
     let mut engine = Engine::new(backend.clone());
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     goal.buffer_text = "first".into();
 
     let discovery = engine.start(goal).await.unwrap();
@@ -1228,6 +1256,7 @@ impl BackendAdapter for RepeatingObservationBackend {
                         annotation: "The preview is skipped here.".into(),
                     }),
                     next_move: None,
+                    flow_path: vec![],
                     actions: vec![Action::Follow, Action::Fix, Action::Stop],
                 })
             }
@@ -1241,6 +1270,7 @@ impl BackendAdapter for RepeatingObservationBackend {
                     column: 1,
                 }),
                 annotation: Some("The preview is skipped here.".into()),
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             _ => panic!("unexpected observation backend request"),
@@ -1305,6 +1335,7 @@ impl BackendAdapter for FlakyBackend {
                 claim: "Initial claim.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Follow, Action::Why, Action::Stop],
             }),
             _ => Card::Finding(FindingCard {
@@ -1313,6 +1344,7 @@ impl BackendAdapter for FlakyBackend {
                 finding: "Session still works.".into(),
                 location: None,
                 annotation: None,
+                flow_path: vec![],
                 actions: vec![Action::Stop],
             }),
         };
@@ -1352,6 +1384,7 @@ impl BackendAdapter for BadPatchBackend {
                 claim: "Initial claim.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             _ => Card::Patch(PatchCard {
@@ -1406,6 +1439,7 @@ impl BackendAdapter for RepairingPatchBackend {
                 claim: "The local representation needs one change.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             BackendAction::User(Action::Fix) if !self.failed_once.swap(true, Ordering::SeqCst) => {
@@ -1481,6 +1515,7 @@ impl BackendAdapter for WrongTypeBackend {
                 claim: "Wrong type for this test.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             _ => Card::Finding(FindingCard {
@@ -1489,6 +1524,7 @@ impl BackendAdapter for WrongTypeBackend {
                 finding: "This is deliberately not a patch.".into(),
                 location: None,
                 annotation: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
         };
@@ -1623,7 +1659,7 @@ async fn rejecting_a_patch_cancels_read_only_speculation_without_redrafting() {
     );
 }
 
-type RecordedExpectation = (Option<CardKind>, String, Vec<String>);
+type RecordedExpectation = (Option<CardKind>, String, Vec<String>, bool);
 
 #[derive(Default)]
 struct ExpectationRecorder {
@@ -1638,6 +1674,7 @@ impl BackendAdapter for ExpectationRecorder {
             req.card_contract.expected_kind,
             req.session.prompt.clone(),
             req.session.interaction_feedback.clone(),
+            req.card_contract.conversation_only,
         ));
         self.inner.next_card(req).await
     }
@@ -1677,21 +1714,22 @@ async fn interaction_feedback_is_injected_once_on_the_next_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn plain_auto_prompt_expects_any_kind() {
+async fn investigate_prompt_requires_a_hypothesis() {
     let backend = Arc::new(ExpectationRecorder::default());
     let mut engine = Engine::new(backend.clone());
 
-    let mut auto = params();
-    auto.mode = Mode::Auto;
-    engine.start(auto).await.unwrap();
+    let mut investigate = params();
+    investigate.mode = Mode::Investigate;
+    engine.start(investigate).await.unwrap();
 
     let requests = backend.requests.lock().unwrap().clone();
-    assert_eq!(requests[0].0, None);
+    assert_eq!(requests[0].0, Some(CardKind::Hypothesis));
     assert_eq!(requests[0].1, "payload is empty");
+    assert!(!requests[0].3);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn kind_prefix_forces_the_expected_card() {
+async fn slash_prefixed_text_cannot_override_the_visible_mode() {
     let backend = Arc::new(ExpectationRecorder::default());
     let mut engine = Engine::new(backend.clone());
     let mut start_params = params();
@@ -1700,8 +1738,8 @@ async fn kind_prefix_forces_the_expected_card() {
     engine.start(start_params).await.unwrap();
 
     let requests = backend.requests.lock().unwrap().clone();
-    assert_eq!(requests[0].0, Some(CardKind::Patch));
-    assert_eq!(requests[0].1, "guard the payload");
+    assert_eq!(requests[0].0, Some(CardKind::Hypothesis));
+    assert_eq!(requests[0].1, "/patch guard the payload");
 }
 
 #[derive(Default)]
@@ -1721,6 +1759,7 @@ impl BackendAdapter for NavigatingBackend {
                 claim: "The sizing lives in the component file.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             BackendAction::User(Action::Fix) => {
@@ -1797,6 +1836,7 @@ fn granted_context() -> ContextBundle {
         hints: vec![],
         artifacts: vec![],
         report: None,
+        call_hierarchy: None,
     }
 }
 

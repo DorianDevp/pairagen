@@ -32,6 +32,11 @@ pub use stream::*;
 /// reliably from language-agnostic diff syntax alone.
 pub const IMPLEMENTATION_GUIDELINES: &str = "Compiler acceptance is a hard invariant for every patch. Applying this one proposed patch by itself to the currently accepted source must leave the project compiling and type-checking; never rely on a later patch to repair undefined symbols, missing declarations or imports, incompatible signatures, producer/consumer mismatches, schema drift, or an incomplete refactor. Order work by dependencies: introduce each declaration, type, interface, function, import, field, and compatibility shim in an independently compiler-valid patch before any later patch first references, implements, or depends on it. For interface or named-type extraction, the first patch contains ONLY the independently valid declaration and leaves every existing use byte-for-byte unchanged; only after that declaration patch is accepted may a later patch replace the inline type or implement the interface. A declaration-only preparation must also satisfy the project's unused-declaration compiler and lint rules; use the project's appropriate exported/public/annotation mechanism, or return choice/deny when no clean standalone declaration is valid. Never combine a declaration and its separated consumer change on one card, even when both fit inside one @@ header. Emit exactly one uninterrupted change block. In structured hunk lines, after the first add/remove record, a context record ends the change block and no later add/remove record is allowed. Prefer backward-compatible preparation such as declarations, adapters, overloads, defaults, or optional fields before changing consumers. If no compiler-valid intermediate state fits one uninterrupted block, return a blocking choice or deny instead of broken code or a batch.";
 
+/// Contract shared by every backend for the editor-resolved static Flow
+/// graph. Keeping this text identical prevents adapters from silently
+/// spending discovery tools on information the LSP already supplied.
+pub const FLOW_GUIDELINES: &str = "When ctx.call_hierarchy is present, treat it as the complete locally resolved static Flow graph within its explicit limits. Use its caller-to-callee edges, exact call-site ranges, reference counts, partial/truncated flags, and snippets to explain code flow, assess impact, choose the change location, plan tests, refactor, and navigate call-sites. Do not use tools or searches to re-enumerate the same callers or callees and do not reconstruct a competing callstack. When the user asks to show or explain a callstack, call path, or code flow, return a hypothesis or finding with flow_path containing every available node id on the requested path in caller-to-callee order; never invent an id. Return an empty flow_path for other answers. A partial, truncated, or unavailable graph is an explicit boundary, not permission for agent-side call-hierarchy discovery; other supplied context and references remain usable.";
+
 #[async_trait]
 pub trait BackendAdapter: Send + Sync {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse>;
@@ -143,6 +148,7 @@ pub fn backend_context(context: &ContextBundle) -> serde_json::Value {
         "buffer_start_line": context.buffer_start_line,
         "diagnostics": context.diagnostics,
         "artifacts": artifacts,
+        "call_hierarchy": context.call_hierarchy,
     })
 }
 
@@ -309,7 +315,7 @@ pub(crate) fn test_request() -> BackendRequest {
             interaction_feedback: vec![],
             completed_steps: vec![],
             known_observations: vec![],
-            mode: Mode::Auto,
+            mode: Mode::Investigate,
             card_count: 0,
             last_card: None,
             last_summary: None,
@@ -326,6 +332,7 @@ pub(crate) fn test_request() -> BackendRequest {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         },
         card_contract: CardContract::default(),
     }
@@ -372,6 +379,7 @@ mod tests {
             claim: "The response has the wrong type.".into(),
             evidence: None,
             next_move: None,
+            flow_path: vec![],
             actions: vec![Action::Fix],
         })
     }
@@ -492,12 +500,21 @@ mod tests {
                 candidate_count: 99,
                 ..Default::default()
             }),
+            call_hierarchy: Some(loopbiotic_protocol::CallHierarchy {
+                root: None,
+                nodes: vec![],
+                edges: vec![],
+                partial: false,
+                truncated: false,
+                unavailable: true,
+            }),
         };
 
         let value = backend_context(&context);
 
         assert!(value.get("report").is_none());
         assert!(value.get("hints").is_none());
+        assert_eq!(value["call_hierarchy"]["unavailable"], true);
         assert_eq!(value["artifacts"][0]["text"], "struct User;");
         assert!(value["artifacts"][0].get("score").is_none());
     }

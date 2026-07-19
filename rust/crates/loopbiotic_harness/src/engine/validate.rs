@@ -286,6 +286,7 @@ mod tests {
                 column: 1,
             }),
             annotation: None,
+            flow_path: vec![],
             actions: vec![Action::Open, Action::Stop],
         });
 
@@ -302,6 +303,7 @@ mod tests {
             finding: "   ".into(),
             location: None,
             annotation: None,
+            flow_path: vec![],
             actions: vec![Action::Stop],
         });
 

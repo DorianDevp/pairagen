@@ -87,9 +87,8 @@ return function(t)
     state.reset()
   end)
 
-  t.test("accepted patch completion stays silent after its proposal", function()
+  t.test("accepted patch completion replaces Working in AgentWindow", function()
     state.reset()
-    state.accept_continuation = true
     state.card = { id = "working", kind = "working" }
     local result = turn_result()
     result.goal = { statement = "updated goal", status = "complete" }
@@ -102,18 +101,15 @@ return function(t)
 
     with_stubbed_show(function(shown)
       session.apply_turn_result(result)
-      t.eq(#shown, 0, "redundant completion card must not be shown")
-      t.eq(state.card, nil, "no card remains after silent completion")
-      t.eq(state.last_card.id, "complete", "completion is retained for state and checks")
+      t.eq(#shown, 1, "completion remains visible in the same AgentWindow")
+      t.eq(shown[1].id, "complete")
       t.eq(state.goal.status, "complete", "goal completion is retained")
-      t.eq(state.accept_continuation, nil, "accept continuation is consumed")
     end)
     state.reset()
   end)
 
   t.test("accepted patch still surfaces the next unresolved change", function()
     state.reset()
-    state.accept_continuation = true
     local result = turn_result()
     result.card = {
       id = "next-patch",
@@ -126,7 +122,6 @@ return function(t)
       session.apply_turn_result(result)
       t.eq(#shown, 1, "next patch remains reviewable")
       t.eq(shown[1].id, "next-patch")
-      t.eq(state.accept_continuation, nil, "accept continuation is consumed")
     end)
     state.reset()
   end)

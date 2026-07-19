@@ -43,11 +43,11 @@ return function(t)
     state.agent_identity = nil
     state.backend_model = nil
 
-    t.eq(prompt.title("Prompt"), " Loopbiotic Prompt · mock / model? ")
+    t.eq(prompt.title("Prompt", "investigate"), " Loopbiotic Prompt · investigate · mock / model? ")
 
     state.agent_identity = { backend = "mock", model = "claude-fable-5", models = {} }
-    t.eq(prompt.title("Reply"), " Loopbiotic Reply · mock / claude-fable-5 ")
-    t.eq(prompt.title("Reply"):find("default", 1, true), nil, "no default in title")
+    t.eq(prompt.title("Reply", "fix"), " Loopbiotic Reply · fix · mock / claude-fable-5 ")
+    t.eq(prompt.title("Reply", "fix"):find("default", 1, true), nil, "no default in title")
 
     state.agent_identity = nil
     config.values.backend.agent = previous_agent
@@ -64,15 +64,15 @@ return function(t)
     t.eq(candidates, { "configured", "identity", "alpha", "beta", "gamma", "backend" })
   end)
 
-  t.test("model_candidates includes phase models", function()
+  t.test("model_candidates excludes the discovery-only model", function()
     local candidates = prompt.model_candidates(
       nil,
-      { model = vim.NIL, phases = { discovery = "haiku", patch = vim.NIL }, models = { "sonnet", "haiku" } },
+      { model = vim.NIL, phases = { discovery = "haiku", patch = vim.NIL }, models = { "sonnet" } },
       nil,
       nil
     )
 
-    t.eq(candidates, { "haiku", "sonnet" })
+    t.eq(candidates, { "sonnet" })
   end)
 
   t.test("model_candidates filters nil, vim.NIL, and empty values", function()
@@ -116,5 +116,35 @@ return function(t)
 
   t.test("keymaps.models defaults to <C-l>", function()
     t.eq(config.values.keymaps.models, "<C-l>")
+  end)
+
+  t.test("every PromptWindow exposes the complete mode picker", function()
+    t.eq(prompt.mode_candidates(), { "fix", "explain", "investigate", "review", "propose" })
+    t.eq(config.values.keymaps.modes, "<C-k>")
+
+    local original_select = vim.ui.select
+    vim.ui.select = function(items, opts, callback)
+      t.eq(items, prompt.mode_candidates())
+      t.eq(opts.prompt, "Loopbiotic mode")
+      callback("fix")
+    end
+    prompt.pick_mode()
+    vim.ui.select = original_select
+
+    t.eq(prompt.current_mode(), "fix")
+  end)
+
+  t.test("unsupported modes are rejected instead of silently falling back", function()
+    local previous = config.values.backend.mode
+    local ok, err = pcall(config.setup, { backend = { mode = "unsupported" } })
+
+    t.eq(ok, false)
+    t.eq(err:find("Configure one of: fix, explain, investigate, review, propose", 1, true) ~= nil, true)
+    t.eq(err:find("PromptWindow with <C-k>", 1, true) ~= nil, true)
+    t.eq(config.values.backend.mode, previous)
+  end)
+
+  t.test("keymaps.flow defaults to an explicit normal-mode toggle", function()
+    t.eq(config.values.keymaps.flow, "F")
   end)
 end

@@ -18,23 +18,14 @@
 ---@field source_cursor integer[]|nil { line, column } (0-based column)
 ---@field card LoopbioticCard|nil card currently shown
 ---@field goal LoopbioticGoal|nil
----@field prompt_win integer|nil
----@field prompt_buf integer|nil
----@field prompt_frame_win integer|nil
----@field prompt_frame_buf integer|nil
----@field card_win integer|nil
----@field card_buf integer|nil
----@field status_win integer|nil
----@field status_buf integer|nil
----@field diff_tab integer|nil
+---@field call_hierarchy table|nil session-pinned locally resolved Flow graph
+---@field card_flow_active boolean Flow navigation owns the card keymaps
 ---@field diff_buf integer|nil draft buffer of the inline patch preview
 ---@field diff_win integer|nil
 ---@field diff_source_buf integer|nil
 ---@field diff_source_tick integer|nil changedtick guard for the draft
 ---@field diff_first_row integer|nil
 ---@field diff_cursor integer[]|nil
----@field thinking_win integer|nil
----@field thinking_buf integer|nil
 ---@field thinking_timer userdata|nil
 ---@field thinking_frame integer|nil
 ---@field thinking_request_id string|nil
@@ -43,23 +34,24 @@
 ---@field thinking_label string|nil
 ---@field thinking_steps table[]|nil
 ---@field thinking_preview table|nil non-actionable streamed { title, body? }
----@field last_card LoopbioticCard|nil
 ---@field token_usage LoopbioticTokenUsage|nil
 ---@field turn_token_usage LoopbioticTokenUsage|nil
 ---@field backend_model string|nil model the backend reported using
 ---@field agent_identity table|nil backend/warmup identity: { backend, model, models }
 ---@field backend_preflight_error string|nil last backend/warmup error; nil once a warmup or turn succeeds
 ---@field prompt_stash string|nil composed prompt text preserved across a failed session start
+---@field prompt_stash_mode string|nil mode preserved with a failed submitted prompt
+---@field session_mode string|nil mode used by the active session's latest submitted prompt
 ---@field last_backend_error string|nil message of the last backend error card, for repeat escalation
 ---@field context_report table|nil
 ---@field workspace_hints table[]|nil
----@field completion_notified_card string|nil
----@field completion_checked_card string|nil
 ---@field details_card LoopbioticCard|nil
 ---@field details_expanded boolean
----@field navigated_card LoopbioticCard|nil
 ---@field cancelled_turn_id string|nil
----@field accept_continuation boolean|nil true until an accepted patch yields its next card
+---@field turn_barrier boolean true while an interrupted backend turn is settling
+---@field pending_widget_context table<string, table> visible context selected in AgentWindow Widgets
+---@field creation table|nil validated pending new-file plan
+---@field surfaces table authoritative PromptWindow and AgentWindow singleton state
 ---@field reset fun()
 
 -- Every mutable field with its initial value. Fields that start as nil list
@@ -70,23 +62,14 @@ local defaults = {
   source_cursor = vim.NIL,
   card = vim.NIL,
   goal = vim.NIL,
-  prompt_win = vim.NIL,
-  prompt_buf = vim.NIL,
-  prompt_frame_win = vim.NIL,
-  prompt_frame_buf = vim.NIL,
-  card_win = vim.NIL,
-  card_buf = vim.NIL,
-  status_win = vim.NIL,
-  status_buf = vim.NIL,
-  diff_tab = vim.NIL,
+  call_hierarchy = vim.NIL,
+  card_flow_active = false,
   diff_buf = vim.NIL,
   diff_win = vim.NIL,
   diff_source_buf = vim.NIL,
   diff_source_tick = vim.NIL,
   diff_first_row = vim.NIL,
   diff_cursor = vim.NIL,
-  thinking_win = vim.NIL,
-  thinking_buf = vim.NIL,
   thinking_timer = vim.NIL,
   thinking_frame = vim.NIL,
   thinking_request_id = vim.NIL,
@@ -95,23 +78,33 @@ local defaults = {
   thinking_label = vim.NIL,
   thinking_steps = vim.NIL,
   thinking_preview = vim.NIL,
-  last_card = vim.NIL,
   token_usage = vim.NIL,
   turn_token_usage = vim.NIL,
   backend_model = vim.NIL,
   agent_identity = vim.NIL,
   backend_preflight_error = vim.NIL,
   prompt_stash = vim.NIL,
+  prompt_stash_mode = vim.NIL,
+  session_mode = vim.NIL,
   last_backend_error = vim.NIL,
   context_report = vim.NIL,
   workspace_hints = vim.NIL,
-  completion_notified_card = vim.NIL,
-  completion_checked_card = vim.NIL,
   details_card = vim.NIL,
   details_expanded = false,
-  navigated_card = vim.NIL,
   cancelled_turn_id = vim.NIL,
-  accept_continuation = vim.NIL,
+  turn_barrier = false,
+  pending_widget_context = {},
+  creation = vim.NIL,
+  surfaces = {
+    prompt = {
+      mode = "closed",
+    },
+    agent = {
+      mode = "closed",
+      working = false,
+      cursorline = false,
+    },
+  },
 }
 
 ---@type LoopbioticState

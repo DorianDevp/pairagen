@@ -829,6 +829,7 @@ mod tests {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         };
 
         PatchNormalizer::normalize_card(&mut card, &context).unwrap();
@@ -863,6 +864,7 @@ mod tests {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         };
 
         let error = PatchNormalizer::normalize_card(&mut card, &context).unwrap_err();
@@ -900,6 +902,7 @@ mod tests {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         };
 
         PatchValidator::validate_card_against_context(&card, &context).unwrap();
@@ -933,6 +936,7 @@ mod tests {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         };
 
         let error = PatchValidator::validate_card_against_context(&card, &context).unwrap_err();
@@ -971,6 +975,7 @@ mod tests {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         };
 
         PatchNormalizer::normalize_card(&mut card, &context).unwrap();
@@ -1050,6 +1055,7 @@ mod tests {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         };
 
         PatchNormalizer::normalize_card(&mut card, &context).unwrap();
@@ -1093,6 +1099,7 @@ mod tests {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         };
 
         let error = PatchNormalizer::normalize_card(&mut card, &context).unwrap_err();
@@ -1134,6 +1141,7 @@ mod tests {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         }
     }
 

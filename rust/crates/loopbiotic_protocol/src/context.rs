@@ -46,7 +46,6 @@ fn default_min_artifact_score() -> i32 {
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     #[default]
-    Auto,
     Investigate,
     Fix,
     Explain,
@@ -162,6 +161,73 @@ pub struct ContextArtifact {
     pub score: i32,
 }
 
+/// A concrete source range resolved by the editor's language server. Flow
+/// ranges are 1-based so they can be opened directly by editor clients and
+/// displayed without another protocol conversion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CallHierarchyLocation {
+    pub file: PathBuf,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+/// One normalized symbol in the locally resolved static call graph.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CallHierarchyNode {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub kind: String,
+    pub file: PathBuf,
+    pub line: usize,
+    pub column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub depth: usize,
+    pub call_site_count: usize,
+    /// References that are not already represented by an incoming call-site.
+    pub reference_count: usize,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<CallHierarchyLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+
+/// A caller-to-callee edge. Every call-site remains concrete so the editor
+/// and agent can distinguish one relationship from several invocations.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CallHierarchyEdge {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub call_sites: Vec<CallHierarchyLocation>,
+    #[serde(default)]
+    pub cycle: bool,
+}
+
+/// Static Flow graph supplied by LSP. Absence means the client predates Flow
+/// or did not attempt it; `unavailable` represents an attempted client whose
+/// server has no call hierarchy provider.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CallHierarchy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub nodes: Vec<CallHierarchyNode>,
+    #[serde(default)]
+    pub edges: Vec<CallHierarchyEdge>,
+    #[serde(default)]
+    pub partial: bool,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub unavailable: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ContextCandidateReport {
     pub file: PathBuf,
@@ -206,6 +272,8 @@ pub struct ContextBundle {
     pub artifacts: Vec<ContextArtifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<ContextReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_hierarchy: Option<CallHierarchy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -223,6 +291,8 @@ pub struct StartSessionParams {
     #[serde(default)]
     pub hints: Vec<ContextHint>,
     #[serde(default)]
+    pub call_hierarchy: Option<CallHierarchy>,
+    #[serde(default)]
     pub context_policy: ContextPolicy,
 }
 
@@ -239,10 +309,87 @@ impl ContextBundle {
             hints: params.hints,
             artifacts: vec![],
             report: None,
+            call_hierarchy: params.call_hierarchy,
         }
     }
 }
 
 fn one() -> usize {
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mode_requires_an_explicit_supported_user_contract() {
+        assert_eq!(Mode::default(), Mode::Investigate);
+        assert!(serde_json::from_str::<Mode>("\"unsupported\"").is_err());
+        assert_eq!(serde_json::from_str::<Mode>("\"fix\"").unwrap(), Mode::Fix);
+    }
+
+    #[test]
+    fn context_without_flow_remains_backward_compatible() {
+        let context: ContextBundle = serde_json::from_value(json!({
+            "cwd": "/tmp/project",
+            "file": "src/main.rs",
+            "cursor": {"line": 1, "column": 1},
+            "selection": null,
+            "buffer_text": "fn main() {}",
+            "diagnostics": []
+        }))
+        .unwrap();
+
+        assert_eq!(context.call_hierarchy, None);
+        assert_eq!(context.buffer_start_line, 1);
+    }
+
+    #[test]
+    fn full_flow_graph_serializes_nodes_edges_ranges_and_flags() {
+        let location = CallHierarchyLocation {
+            file: "src/main.rs".into(),
+            start_line: 8,
+            start_column: 5,
+            end_line: 8,
+            end_column: 12,
+        };
+        let graph = CallHierarchy {
+            root: Some("root".into()),
+            nodes: vec![CallHierarchyNode {
+                id: "root".into(),
+                name: "run".into(),
+                detail: None,
+                kind: "Function".into(),
+                file: "src/main.rs".into(),
+                line: 1,
+                column: 1,
+                end_line: 4,
+                end_column: 2,
+                depth: 0,
+                call_site_count: 1,
+                reference_count: 2,
+                state: "partial".into(),
+                references: vec![location.clone()],
+                snippet: Some("1 fn run() {}".into()),
+            }],
+            edges: vec![CallHierarchyEdge {
+                from: "caller".into(),
+                to: "root".into(),
+                call_sites: vec![location],
+                cycle: false,
+            }],
+            partial: true,
+            truncated: true,
+            unavailable: false,
+        };
+
+        let value = serde_json::to_value(graph).unwrap();
+        assert_eq!(value["root"], "root");
+        assert_eq!(value["nodes"][0]["reference_count"], 2);
+        assert_eq!(value["edges"][0]["call_sites"][0]["start_line"], 8);
+        assert_eq!(value["partial"], true);
+        assert_eq!(value["truncated"], true);
+    }
 }

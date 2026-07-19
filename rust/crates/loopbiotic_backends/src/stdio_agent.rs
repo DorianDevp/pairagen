@@ -264,8 +264,9 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
 
 fn agent_api() -> serde_json::Value {
     json!(format!(
-        "Return one JSON Loopbiotic op only. Ops: hypothesis, finding, patch, choice, deny, open_location, summary, error. When limits.conversation_only is true, never return patch or summary. Return patch for user action fix or start mode fix unless impossible. Goal execution is explicit and advances one small, compilable hunk per turn with a plan of remaining coherent steps. A patch is exactly one file and one hunk within the supplied changed-line limit. You may emit loopbiotic_progress records before the result. Never emit hidden reasoning. End with either a raw Loopbiotic op or a loopbiotic_result record. Implementation guidelines: {}",
-        crate::IMPLEMENTATION_GUIDELINES
+        "Return one JSON Loopbiotic op only. Ops: hypothesis, finding, patch, choice, deny, open_location, summary, error. When limits.conversation_only is true, never return patch or summary. Return patch for user action fix or mode fix/propose unless impossible. The user-selected mode and limits.expected define the response contract; never infer or replace the mode. Goal execution is explicit and advances one small, compilable hunk per turn with a plan of remaining coherent steps. A patch is exactly one file and one hunk within the supplied changed-line limit. You may emit loopbiotic_progress records before the result. Never emit hidden reasoning. End with either a raw Loopbiotic op or a loopbiotic_result record. Implementation guidelines: {} Flow guidelines: {}",
+        crate::IMPLEMENTATION_GUIDELINES,
+        crate::FLOW_GUIDELINES
     ))
 }
 
@@ -293,6 +294,7 @@ mod tests {
         assert!(api.contains("Compiler acceptance is a hard invariant"));
         assert!(api.contains("before any later patch first references, implements"));
         assert!(api.contains("exactly one uninterrupted change block"));
+        assert!(api.contains("Do not use tools or searches to re-enumerate"));
     }
 
     #[tokio::test]

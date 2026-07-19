@@ -1,5 +1,6 @@
 local config = require("loopbiotic.config")
 local state = require("loopbiotic.state")
+local surfaces = require("loopbiotic.surfaces")
 local ui = require("loopbiotic.ui")
 
 local M = {}
@@ -33,10 +34,6 @@ function M.start(label, session_id)
   }
 
   M.render()
-
-  vim.keymap.set("n", "q", function()
-    M.stop(true)
-  end, { buffer = state.thinking_buf, nowait = true, silent = true })
 
   state.thinking_timer = uv.new_timer()
   state.thinking_timer:start(
@@ -118,19 +115,19 @@ end
 function M.render()
   local lines = M.lines(state.thinking_frame or 0)
   local drafting = type(state.thinking_preview) == "table"
-  local buf, win = ui.render(state.card_buf, state.card_win, lines, {
-    width = width,
-    height = math.min(#lines, 8),
-    border = config.values.card.border,
-    anchor = M.anchor(),
+  surfaces.render_agent(lines, {
+    view = "working",
+    working = true,
     enter = false,
-    title = drafting and " Loopbiotic: Drafting " or " Loopbiotic: Working ",
+    window = {
+      width = width,
+      height = math.min(#lines, 8),
+      border = config.values.card.border,
+      anchor = M.anchor(),
+      title = drafting and " Loopbiotic: Drafting " or " Loopbiotic: Working ",
+    },
   })
 
-  state.card_buf = buf
-  state.card_win = win
-  state.thinking_buf = buf
-  state.thinking_win = win
 end
 
 function M.current(request_id)
@@ -234,18 +231,16 @@ function M.stop(close)
   end
 
   state.thinking_timer = nil
-  state.thinking_win = nil
-  state.thinking_buf = nil
   state.thinking_request_id = nil
   state.thinking_session_id = nil
   state.thinking_started_at = nil
   state.thinking_label = nil
   state.thinking_steps = nil
   state.thinking_preview = nil
+  surfaces.set_agent_working(false)
 
   if close then
-    ui.close(state.card_win)
-    state.card_win = nil
+    surfaces.close_agent()
   end
 end
 

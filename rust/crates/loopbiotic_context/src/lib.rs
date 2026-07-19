@@ -234,6 +234,7 @@ pub(crate) mod test_support {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         }
     }
 }

@@ -238,18 +238,24 @@ impl Engine {
         result
     }
 
-    pub async fn reply(&mut self, session_id: &str, text: String) -> Result<ActionResult> {
-        self.reply_with_progress(session_id, text, None).await
+    pub async fn reply(
+        &mut self,
+        session_id: &str,
+        text: String,
+        mode: Mode,
+    ) -> Result<ActionResult> {
+        self.reply_with_progress(session_id, text, mode, None).await
     }
 
     pub async fn reply_with_progress(
         &mut self,
         session_id: &str,
         text: String,
+        mode: Mode,
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         let generation = self.begin_turn(session_id)?;
-        self.reply_with_progress_generation(session_id, generation, text, progress)
+        self.reply_with_progress_generation(session_id, generation, text, mode, progress)
             .await
     }
 
@@ -258,6 +264,7 @@ impl Engine {
         session_id: &str,
         generation: u64,
         text: String,
+        mode: Mode,
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         let mut session = self.session_for_turn(session_id, generation)?;
@@ -266,7 +273,7 @@ impl Engine {
         self.cancel_goal_continuation(&mut session).await;
         self.cancel_accept_continuation(&mut session).await;
         let result = self
-            .reply_taken(session_id, &mut session, text, progress)
+            .reply_taken(session_id, &mut session, text, mode, progress)
             .await;
 
         self.commit_session(session, generation)?;
@@ -390,6 +397,7 @@ impl Engine {
         session_id: &str,
         session: &mut Session,
         text: String,
+        selected_mode: Mode,
         progress: Option<ProgressReporter>,
     ) -> Result<ActionResult> {
         if text.trim().is_empty() {
@@ -402,7 +410,12 @@ impl Engine {
             session.goal_paused = true;
             session.goal_status = loopbiotic_protocol::GoalStatus::Paused;
         }
-        let expected = NextState::Conversation;
+        session.mode = selected_mode;
+        let expected = if matches!(session.mode, Mode::Fix | Mode::Propose) {
+            NextState::Patch
+        } else {
+            NextState::Any
+        };
 
         session.state = SessionState::Thinking;
 
@@ -903,6 +916,7 @@ impl Engine {
                 finding: "The automatic continuation was cancelled. The reviewed change remains applied; send a message or explicitly choose the next step.".into(),
                 location: None,
                 annotation: None,
+                flow_path: vec![],
                 actions: vec![
                     Action::Follow,
                     Action::Fix,
@@ -947,9 +961,7 @@ impl Engine {
 }
 
 fn expected_start_state(session: &Session) -> NextState {
-    if session.forced_kind.is_none() && session.mode == Mode::Auto {
-        NextState::Conversation
-    } else if matches!(session.mode, Mode::Fix | Mode::Propose) {
+    if matches!(session.mode, Mode::Fix | Mode::Propose) {
         NextState::Patch
     } else {
         NextState::Any
@@ -957,9 +969,8 @@ fn expected_start_state(session: &Session) -> NextState {
 }
 
 /// None means the agent may answer with whichever card kind fits, including a
-/// clarifying choice or a deny. A kind is only demanded when the user asked
-/// for one (a "/{kind}" prompt prefix, an explicit mode, or a concrete action
-/// such as Fix) or when the state machine requires it.
+/// clarifying choice or a deny. A kind is demanded by the visible user-selected
+/// mode, a concrete action such as Fix, or the state machine.
 fn expected_card_kind(
     session: &Session,
     action: &BackendAction,
@@ -975,13 +986,16 @@ fn expected_card_kind(
     }
 
     match action {
-        BackendAction::Start => session.forced_kind.or(match session.mode {
+        BackendAction::Start => match session.mode {
             Mode::Fix | Mode::Propose => Some(CardKind::Patch),
             Mode::Explain | Mode::Review => Some(CardKind::Finding),
             Mode::Investigate => Some(CardKind::Hypothesis),
-            Mode::Auto => None,
-        }),
-        BackendAction::Reply(_) => None,
+        },
+        BackendAction::Reply(_) => match session.mode {
+            Mode::Fix | Mode::Propose => Some(CardKind::Patch),
+            Mode::Explain | Mode::Review => Some(CardKind::Finding),
+            Mode::Investigate => Some(CardKind::Hypothesis),
+        },
         BackendAction::ContractRetry(_) => None,
         BackendAction::LocationGranted => None,
         BackendAction::User(action) => match action {
@@ -996,8 +1010,7 @@ fn expected_card_kind(
                 .iter()
                 .rev()
                 .find(|card| !matches!(card, Card::Error(_) | Card::Deny(_)))
-                .map(Card::kind)
-                .or(session.forced_kind),
+                .map(Card::kind),
             Action::Apply | Action::ApplyPatch { .. } | Action::ResumeDraft | Action::Stop => {
                 Some(CardKind::Summary)
             }

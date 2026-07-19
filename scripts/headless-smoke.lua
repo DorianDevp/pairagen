@@ -290,9 +290,7 @@ if smoke_bin and smoke_bin ~= "" then
   config.values.backend.agent = "mock"
 
   vim.cmd("edit README.md")
-  -- The /hypothesis prefix pins the first card kind, keeping the round-trip
-  -- deterministic against the mock agent.
-  loopbiotic.start("/hypothesis Smoke round-trip: inspect this file", "auto")
+  loopbiotic.start("Smoke round-trip: inspect this file", "investigate")
   local started = vim.wait(15000, function()
     return state.session_id ~= nil and state.card ~= nil
   end, 50)
@@ -318,7 +316,7 @@ if smoke_bin and smoke_bin ~= "" then
 
   -- A new session after stop also proves the daemon processed session/stop
   -- without shutting down the reusable backend process.
-  loopbiotic.start("/hypothesis Smoke cancellation after local stop", "auto")
+  loopbiotic.start("Smoke cancellation after local stop", "investigate")
   local restarted = vim.wait(15000, function()
     return state.session_id ~= nil and state.card ~= nil
   end, 50)

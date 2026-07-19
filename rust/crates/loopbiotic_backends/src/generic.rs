@@ -65,7 +65,7 @@ impl GenericCliBackend {
 
 /// The op contract sent on every turn. A `const` so it can never interpolate
 /// volatile data: it opens the prompt and anchors the provider prompt cache.
-const GENERIC_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|open|run_check|stop. Use deny when you cannot or should not proceed. When limits.conversation_only is true, never return patch or summary. Goal turns are explicitly user-authorized. error is only for technical failures. limits.expected, when set, is the required op. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.";
+const GENERIC_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next,flow_path), finding(title,finding,location,annotation,flow_path), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). flow_path is an ordered array of node ids from ctx.call_hierarchy and is empty unless the answer presents a code path. choice.options items are {id,label,action} objects; action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|open|run_check|stop. Use deny when you cannot or should not proceed. When limits.conversation_only is true, never return patch or summary. The user-selected mode and limits.expected define the response contract; never infer or replace the mode. Goal turns are explicitly user-authorized. error is only for technical failures. limits.expected, when set, is the required op. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.";
 
 pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     let mut rules = vec![
@@ -82,6 +82,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
             "A non-goal patch is one small local pair-programming step: one file, one hunk, and no more changed lines than the supplied limit; its plan is null."
         ),
         json!(crate::IMPLEMENTATION_GUIDELINES),
+        json!(crate::FLOW_GUIDELINES),
         json!(
             "Explain why the next coherent block matters and return control to the user after that step."
         ),
@@ -403,6 +404,7 @@ mod tests {
         assert!(!generic_prompt(&req).contains("one small, compilable hunk"));
         assert!(generic_prompt(&req).contains("Compiler acceptance is a hard invariant"));
         assert!(generic_prompt(&req).contains("exactly one uninterrupted change block"));
+        assert!(generic_prompt(&req).contains("Do not use tools or searches to re-enumerate"));
 
         req.card_contract.allow_goal_completion = true;
         let goal = generic_prompt(&req);

@@ -475,6 +475,56 @@ fn session_start_returns_first_mock_card() {
 }
 
 #[test]
+fn reply_prompt_submits_its_selected_mode() {
+    let mut daemon = Daemon::spawn();
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+    let start = daemon.request("2", "session/start", start_session_params());
+    let session_id = start["result"]["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+
+    let reply = daemon.request(
+        "3",
+        "session/reply",
+        json!({
+            "session_id": session_id,
+            "text": "Napraw to",
+            "mode": "fix"
+        }),
+    );
+
+    assert!(reply.get("error").is_none(), "unexpected error: {reply}");
+    assert_eq!(reply["result"]["card"]["kind"], json!("patch"));
+}
+
+#[test]
+fn reply_without_a_mode_is_rejected_at_the_rpc_boundary() {
+    let mut daemon = Daemon::spawn();
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+    let start = daemon.request("2", "session/start", start_session_params());
+    let session_id = start["result"]["session_id"].as_str().expect("session id");
+
+    let reply = daemon.request(
+        "3",
+        "session/reply",
+        json!({"session_id": session_id, "text": "Napraw to"}),
+    );
+
+    assert!(
+        reply.get("result").is_none(),
+        "mode-less reply ran: {reply}"
+    );
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("mode"))
+    );
+}
+
+#[test]
 fn backend_warmup_reports_the_backend_identity() {
     let mut daemon = Daemon::spawn();
 
@@ -501,10 +551,10 @@ fn backend_warmup_reports_the_backend_identity() {
 /// authenticated Codex CLI and spends real tokens:
 ///
 /// cargo test -p loopbioticd --test rpc \
-///   real_codex_auto_proposal_is_fast_and_non_mutating -- --ignored --nocapture
+///   real_codex_explanation_is_fast_and_non_mutating -- --ignored --nocapture
 #[test]
 #[ignore = "requires an authenticated real Codex CLI"]
-fn real_codex_auto_proposal_is_fast_and_non_mutating() {
+fn real_codex_explanation_is_fast_and_non_mutating() {
     let cwd = std::env::temp_dir().join(format!("loopbiotic-real-codex-{}", std::process::id()));
     let source = cwd.join("src/work.ts");
     std::fs::create_dir_all(source.parent().expect("source parent")).expect("create fixture");
@@ -524,7 +574,7 @@ fn real_codex_auto_proposal_is_fast_and_non_mutating() {
         start_session_params_with(
             cwd,
             "How would you propose making displayName handle an empty last name?",
-            "auto",
+            "explain",
             "export function displayName(first, last) {\n  return `${first} ${last}`;\n}\n",
         ),
     );
@@ -558,6 +608,51 @@ fn real_codex_auto_proposal_is_fast_and_non_mutating() {
     );
 }
 
+/// Manual regression for the production failure captured in the session log:
+/// an imperative prompt in user-selected fix mode must draft the requested
+/// change instead of returning a Finding that only identifies the edit location.
+///
+/// cargo test -p loopbioticd --test rpc \
+///   real_codex_fix_mode_implementation_request_returns_patch -- --ignored --nocapture
+#[test]
+#[ignore = "requires an authenticated real Codex CLI"]
+fn real_codex_fix_mode_implementation_request_returns_patch() {
+    let cwd = std::env::temp_dir().join(format!(
+        "loopbiotic-real-codex-fix-mode-{}",
+        std::process::id()
+    ));
+    let source = cwd.join("src/work.ts");
+    let buffer = "import { Component } from '@angular/core';\n\n@Component({\n  selector: 'app-customer-shell',\n  standalone: true,\n  template: '',\n})\nexport class CustomerShellComponent {}\n";
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("create fixture");
+    std::fs::write(&source, buffer).expect("write fixture");
+
+    let mut daemon = Daemon::spawn_codex();
+    let init = daemon.request("1", "initialize", json!({}));
+    assert!(init.get("error").is_none(), "unexpected error: {init}");
+
+    let response = daemon.request(
+        "2",
+        "session/start",
+        start_session_params_with(
+            cwd,
+            "Potrzebuję dobrze przygotowanego shella: dodaj ładny wrapper zgodny ze stylem innych shelli i router-outlet.",
+            "fix",
+            buffer,
+        ),
+    );
+    let result = daemon.finish_turn(response, Duration::from_secs(120), None);
+
+    assert_eq!(
+        result["card"]["kind"],
+        json!("patch"),
+        "user-selected fix mode was reduced to a non-actionable finding: {result}"
+    );
+    let diff = result["card"]["patches"][0]["diff"]
+        .as_str()
+        .expect("real Codex patch diff");
+    UnifiedDiff::parse(diff).expect("real Codex returned parseable diff");
+}
+
 /// Real transport gate for the programmer-flow fast path. The long visible
 /// deadline keeps the request in the foreground so this test can observe the
 /// complete progress stream before the final response.
@@ -583,7 +678,7 @@ fn real_codex_streams_a_preview_before_the_validated_card() {
         start_session_params_with(
             cwd,
             "Explain the smallest safe way to handle an empty last name.",
-            "auto",
+            "explain",
             buffer,
         ),
         Duration::from_secs(120),
@@ -681,7 +776,7 @@ fn real_codex_prioritizes_cursor_local_error_over_distant_deprecation() {
         "cursor": {"line": 259, "column": 16},
         "selection": null,
         "prompt": "What's wrong with it?",
-        "mode": "auto",
+        "mode": "investigate",
         "buffer_text": excerpt,
         "buffer_start_line": 235,
         "diagnostics": context["diagnostics"],
@@ -835,7 +930,7 @@ fn real_codex_interface_extraction_declares_before_use() {
         "params": start_session_params_with(
             cwd,
             "Extract the inline cards item type into a named interface in this file.",
-            "auto",
+            "investigate",
             original,
         ),
     }));
@@ -962,7 +1057,7 @@ fn real_codex_interactive_question_fix_accept_workflow() {
         "params": start_session_params_with(
             cwd.clone(),
             "What does displayName do when last is empty, and what is the smallest sensible behavior change?",
-            "auto",
+            "investigate",
             original,
         ),
     }));
@@ -989,6 +1084,7 @@ fn real_codex_interactive_question_fix_accept_workflow() {
         "params": {
             "session_id": session_id,
             "text": "Keep it minimal: should it return only first, or preserve a trailing space?",
+            "mode": "explain",
             "context": context,
         },
     }));
@@ -1141,7 +1237,7 @@ fn real_codex_reply_replaces_pending_draft_conversationally() {
         start_session_params_with(
             cwd,
             "What is the smallest safe behavior when last is empty?",
-            "auto",
+            "investigate",
             original,
         ),
     );
@@ -1173,6 +1269,7 @@ fn real_codex_reply_replaces_pending_draft_conversationally() {
         "params": {
             "session_id": session_id,
             "text": "Before I apply that draft, explain the tradeoff in one concise response.",
+            "mode": "explain",
             "context": context,
         },
     }));
@@ -1218,7 +1315,7 @@ fn real_codex_working_card_can_interrupt_thinking() {
         start_session_params_with(
             cwd,
             "Inspect this function and explain one possible edge case.",
-            "auto",
+            "investigate",
             buffer,
         ),
     );

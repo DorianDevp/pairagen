@@ -5,6 +5,10 @@ local util = require("loopbiotic.util")
 local navigation = require("loopbiotic.navigation")
 
 return function(t)
+  local function workspace_temp(suffix)
+    return vim.fn.getcwd() .. "/.loopbiotic-test-" .. tostring((vim.uv or vim.loop).hrtime()) .. suffix
+  end
+
   t.test("clamp_cursor keeps valid positions and floors the column", function()
     local buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "one", "two", "three" })
@@ -27,7 +31,7 @@ return function(t)
   end)
 
   t.test("open_location survives a line past the end of a short file", function()
-    local file = vim.fn.tempname() .. ".ts"
+    local file = workspace_temp(".ts")
     vim.fn.writefile({ "export * from './lib/ui-icon-header/ui-icon-header.component';" }, file)
 
     -- Line 2 of a one-line file: the first added line of an appending draft.
@@ -42,14 +46,18 @@ return function(t)
 
   t.test("tab navigation leaves the origin tab on a normal window", function()
     local config = require("loopbiotic.config")
-    local ui = require("loopbiotic.ui")
+    local surfaces = require("loopbiotic.surfaces")
     local previous_open = config.values.navigation.open
-    local file = vim.fn.tempname() .. ".ts"
+    local file = workspace_temp(".ts")
     vim.fn.writefile({ "export const answer = 42;" }, file)
 
     local origin_tab = vim.api.nvim_get_current_tabpage()
     local origin_win = vim.api.nvim_get_current_win()
-    local float_buf, float_win = ui.float({ "Focused action card" }, { enter = true })
+    local float_buf, float_win = surfaces.render_agent({ "Focused AgentWindow" }, {
+      view = "response",
+      enter = true,
+      window = { width = 32, height = 1 },
+    })
     config.values.navigation.open = "tab"
 
     local ok, err = pcall(function()
@@ -59,9 +67,9 @@ return function(t)
       t.eq(vim.api.nvim_win_is_valid(float_win), true, "float remains valid")
     end)
 
-    ui.close(float_win)
+    surfaces.close_agent()
     vim.api.nvim_set_current_tabpage(origin_tab)
-    ui.cleanup_deferred()
+    require("loopbiotic.ui").cleanup_deferred()
     vim.cmd("tabonly")
     if vim.api.nvim_buf_is_valid(float_buf) then
       vim.api.nvim_buf_delete(float_buf, { force = true })
