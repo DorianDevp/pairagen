@@ -77,6 +77,38 @@ model for the current mode's phase (patch for fix/propose, discovery otherwise)
 and persists per agent like |:LoopbioticModel| / |:LoopbioticDiscoveryModel|,
 keeping the prompt window and text open.
 
+PROJECT INTELLIGENCE AND SKILLS                  *loopbiotic-project-skills*
+
+Loopbiotic derives a bounded ProjectProfile in Rust. A registry automatically
+activates independent adapters from root markers such as deno.json,
+package.json, nx.json, Cargo.toml, and Compose files. Root facts are read
+concurrently and matching adapters run in parallel; no adapter knows a project
+name. Lua contributes only facts from already-active Neovim LSP clients.
+
+Detection is local and deterministic: it does not run commands, contact the
+network, call MCP, or spend an agent turn. The profile carries activated adapter
+IDs, exact known versions, technology roles, project areas and dependencies,
+project commands, and bounded LSP tool capabilities to the backend.
+For development diagnostics, `loopbioticd dev project-profile [ROOT]` prints
+the same marker-adapter profile as JSON, without editor-only LSP signals.
+
+Press `keymaps.skills` (`<C-g>` by default) in PromptWindow or Reply to open a
+session Markdown multiselect above the prompt. Space toggles optional workspace
+root files, `<CR>` applies, and `<Esc>` cancels. Files from `skills.autoload`
+are marked `auto` and locked. Selected filenames remain visible before submit
+and persist through Reply until Stop or Reset. Selection is local and grants no
+tool or command capability; file content reaches the backend only with submit.
+
+Defaults: >lua
+
+  skills = {
+    autoload = { "AGENTS.md" },
+    discover_root_markdown = true,
+    max_file_bytes = 65536,
+    picker_height = 10,
+  }
+<
+
 FLOW WIDGET                                                *loopbiotic-flow*
 
 With an LSP callHierarchyProvider, prompts resolve a session-pinned static call
@@ -109,7 +141,12 @@ Defaults: >lua
 
 The default prompt and explorer picker keys are: >lua
 
-  keymaps = { modes = "<C-k>", models = "<C-l>", flow = "F" }
+  keymaps = {
+    skills = "<C-g>",
+    modes = "<C-k>",
+    models = "<C-l>",
+    flow = "F",
+  }
 <
 
 Loopbiotic has been tested primarily with the Codex CLI app-server backend.
@@ -160,8 +197,9 @@ PRIVACY                                                   *loopbiotic-privacy*
 
 Session traces are local, content-redacted by default, and subject to retention.
 Enabling `logging.include_content` may store proprietary source code, prompts,
-diffs, and model responses. Loopbiotic sends selected source context to the backend
-configured by the user.
+diffs, instruction files, and model responses. Loopbiotic sends selected source
+context and selected instruction Markdown to the backend configured by the
+user.
 
 ===============================================================================
 HEALTH                                                     *loopbiotic-health*

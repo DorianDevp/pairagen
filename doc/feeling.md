@@ -73,14 +73,20 @@ orient -> compose -> hand off -> observe -> inspect -> select evidence -> compos
 
 ### Orient
 
-The current buffer, cursor, selection, diagnostics, and resolved call graph make
-the agent feel situated. Evidence points to real code rather than generic prose.
+The current buffer, cursor, selection, diagnostics, resolved call graph, and
+deterministic project profile make the agent feel situated. Exact versions and
+workspace areas point to real project facts rather than generic ecosystem prose.
 
 ### Compose
 
 PromptWindow appears as a small editor instrument. The user can see and remove
 Widget-selected context before submit, so the request feels intentional rather
 than secretly augmented.
+
+The same authorship applies to instruction Skills. Config-autoloaded rules are
+plainly marked, optional root Markdown files are chosen in a compact local
+multiselect above PromptWindow, and the selected filenames remain visible. The
+model never silently chooses its own instructions.
 
 ### Hand off
 
@@ -186,6 +192,9 @@ Trust comes from boundaries that remain visible:
   arbitrary backend controls.
 - **Context boundary:** selected references keep provenance and appear before
   submission.
+- **Instruction boundary:** project facts are host-derived; Markdown Skills are
+  bounded inert text with visible selection, provenance, and content hashes.
+  Neither grants execution.
 - **Tab boundary:** AgentWindow remains attached to the context where it began.
 - **Mutation boundary:** the editable diff and `Accept` / `Reject` remain explicit;
   Widget selection and ordinary prompt submission do not mutate code. Accept may
@@ -226,6 +235,9 @@ when known. Warnings remain proportional to their actual consequence.
 ## Motion and pacing
 
 - PromptWindow appears before optional warmup/context work completes.
+- Project profiling begins in the Rust turn path only after composition and does
+  not run external tools or block PromptWindow editing. Neovim contributes its
+  already-active LSP facts without spawning another client.
 - Agent progress updates in place and never spawns another product Window.
 - The initial processing View appears directly at its stable source-relative
   geometry; later progress may change content and size, but not repair a missing
@@ -254,6 +266,7 @@ Always visible when relevant:
 - Widget provenance and uncertainty that affect interpretation;
 - current local Widget selection;
 - the summary of selected context before prompt submission;
+- the summary of selected instruction Skills before prompt submission;
 - errors that block safe continuation.
 - during Review: the agent comment, exact proposal, target path, and
   `Accept` / `Reject` consequence.
@@ -326,6 +339,8 @@ counters, action rows, and persistent chrome.
 - New-file and directory review feels grounded in the actual parent directory,
   with nonexistent paths stated honestly rather than faked in Netrw.
 - Selected context feels deliberate because it is visible and removable.
+- Instruction selection feels deliberate because autoload is marked, optional
+  files are explicitly chosen, and the selection lasts exactly one session.
 - Structured explanations feel grounded in real editor data.
 - Waiting feels observable and interruptible, not theatrical.
 - Completion and Stop remain quiet.

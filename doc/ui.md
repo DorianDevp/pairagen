@@ -39,7 +39,8 @@ PromptWindow contains:
   `review`, or `propose`;
 - agent/model identity when needed;
 - a compact, removable summary of context selected in AgentWindow widgets;
-- submit, close, and mode/model controls.
+- a compact summary of session-selected Markdown instruction Skills;
+- submit, close, Skills, mode, and model controls.
 
 There is no automatic or inferred mode. The visible PromptWindow mode is the
 response contract selected by the user. `fix` and `propose` lead to Patch Review;
@@ -51,6 +52,20 @@ mode. `<C-k>` opens a subordinate native picker, analogous to the `<C-l>` model
 picker. Choosing a mode updates the same PromptWindow title and preserves typed
 text, attached Widget context, AgentWindow, and focus ownership. The picker is a
 Frame, not a third Window.
+
+`<C-g>` opens a session-scoped multiselect Frame above PromptWindow. It lists
+safe Markdown files from the workspace root plus configured autoload entries.
+Autoloaded entries are visibly marked and locked; other entries can be toggled
+with Space and applied with Enter. Escape restores the previous selection. The
+Frame closes with PromptWindow, is height-bounded and scrollable when space is
+narrow, and never contacts the backend. Its footer labels are derived from the
+actual configured bindings.
+
+Selected instruction Skills are summarized in PromptWindow before submission.
+The selection belongs to the session: it remains available in Reply, is
+snapshotted with each submitted turn, and clears on Stop or Reset. Markdown
+selection is not a capability grant and does not create a Widget or product
+Window.
 
 PromptWindow does not contain agent responses, progress, Flow, patch controls,
 or other agent widgets. It may use native pickers for configuration, but those
@@ -84,6 +99,10 @@ Context selected in a Widget must be visible before submit as a compact summary,
 for example `3 files · 3 call sites`. The user must be able to inspect and remove
 that context. Exact payloads may stay collapsed, but selected context must never
 be attached invisibly.
+
+The instruction summary is separate from Widget-selected context. It names the
+selected Markdown files rather than presenting their full content in permanent
+chrome; the local Skills picker is the inspection and selection route.
 
 ## AgentWindow
 
@@ -288,6 +307,8 @@ spacing and hierarchy, not decoration, carry the design.
   Finding View.
 - Every PromptWindow visibly owns exactly one mode; mode selection reuses a
   subordinate picker and never creates agent work before submit.
+- Instruction Skills remain visible, session-scoped PromptWindow context;
+  choosing them is local and cannot create agent work before submit.
 
 ## Known implementation gaps
 
@@ -307,6 +328,10 @@ contradictions are explicit:
   proposal is not yet representable by the patch protocol, and failure to open
   Netrw currently falls back to the AgentWindow manifest rather than a dedicated
   subordinate confirmation Frame.
+- Project Intelligence currently supplies a compact deterministic profile and
+  inert Markdown instructions. It does not yet expose task-sliced area Views,
+  native framework documentation probes, or versioned knowledge-pack status in
+  PromptWindow.
 
 ## Self-healing protocol
 
@@ -328,4 +353,5 @@ is allowed.
 Primary reconciliation sources: `lua/loopbiotic/ui.lua`, `prompt.lua`,
 `surfaces.lua`, `scope.lua`, `card.lua`, `diff.lua`, `creation.lua`, `widgets.lua`,
 `flow.lua`, `thinking.lua`, `state.lua`, `config.lua`, the protocol card/context
-schemas, `README.md`, and Lua interaction, Flow, prompt, and navigation tests.
+schemas, `lua/loopbiotic/skills.lua`, the Rust context project adapters,
+`README.md`, and Lua interaction, Flow, prompt, and navigation tests.

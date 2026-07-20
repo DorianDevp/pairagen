@@ -96,6 +96,10 @@ continues until completion, explicit cancellation, prompt interruption, or Stop.
 - `<C-k>` opens the mode picker in both insert and normal mode. Picking changes
   only PromptWindow-local state, refreshes the visible title, preserves composed
   text and attachments, and performs no backend request.
+- `<C-g>` opens the Markdown Skills multiselect in both insert and normal mode.
+  Space changes only the pending session selection, Enter applies it, and Escape
+  restores the selection present when the picker opened. Config-autoloaded
+  entries cannot be deselected. None of these actions contacts the backend.
 - The editing surface appears before backend warmup and context discovery finish.
 - Empty input does nothing.
 - Model selection preserves typed text and targets the current mode's phase:
@@ -112,8 +116,9 @@ continues until completion, explicit cancellation, prompt interruption, or Stop.
 - Context selected in Widgets is presented separately from implicit ranked
   context. The user can inspect and remove it before submit.
 - Submitting sends one immutable snapshot of prompt text, the mode visible at
-  the instant of submit, editor context, and selected Widget references. A mode
-  change after submit cannot alter an in-flight request.
+  the instant of submit, editor context, selected Widget references, selected
+  Markdown Skills, and the deterministic ProjectProfile. Later local changes
+  cannot alter an in-flight request.
 - Submission establishes that complete user action and its source anchor before
   AgentWindow enters `processing`. The resulting order is `submit -> processing
   View -> session request`; session transport must not independently create a
@@ -122,6 +127,42 @@ continues until completion, explicit cancellation, prompt interruption, or Stop.
 Widget selection does not silently rewrite prompt text. The user explains the
 desired operation in their own words; selected references supply evidence and
 scope.
+
+### Project Intelligence and instruction Skills
+
+Project Intelligence is backend-owned context, separate from ranked
+source-context optimization. Lua supplies only cheap editor facts: the active
+Neovim LSP clients, their workspace-relative roots, versions when announced,
+and a bounded allowlist of capabilities. On session start, the Rust profiler
+reads workspace-owned manifests, lockfiles, and project descriptors. It performs
+no model turn, network request, command execution, or MCP call. Schema version 1
+classifies the workspace and supplies bounded technology, area, dependency,
+project-command, and editor-tool facts with provenance.
+
+The profiler is a registry of independent Rust adapters, not project-specific
+logic. Each adapter declares root markers and is activated automatically only
+when its evidence exists. Root facts are read concurrently and active adapters
+inspect an immutable fact set in parallel; their outputs are merged and sorted
+deterministically. The profile lists the adapter IDs that contributed evidence.
+
+The shipped POC includes package-workspace, TypeScript, Angular, React,
+Excalidraw, RxJS, Deno, Nx, Cargo/Rust, Axum, SQLx, Tokio, Docker Compose, and
+Neovim-LSP adapters. It resolves installed npm versions from `deno.lock`, Nx
+areas and `implicitDependencies`, Cargo workspace members, Rust edition and
+selected framework dependencies, Compose services, Deno tasks, and bounded
+language-server capabilities. No adapter knows the Libregraf project name.
+
+Instruction discovery lists safe `.md` files at the workspace root and any
+configured autoload paths. Entries must remain inside the workspace, be regular
+Markdown files, and stay below the configured per-file limit. The protocol also
+limits count, per-file bytes, and total bytes. Submitted entries carry relative
+path, content hash, provenance, autoload state, and inert text content. Selecting
+a file grants no tool or command capability.
+
+The selection persists from session start through every Reply. Reply snapshots
+the current selection and updates the harness before the turn begins. Stop and
+Reset clear the catalog, selection, and ProjectProfile. A different workspace
+cannot replace this metadata inside an active session.
 
 Submitting a Reply through PromptWindow carries that Reply Window's selected
 mode through `session/reply`. In `fix` or `propose`, Patch is required;
@@ -369,6 +410,11 @@ validation remain identical; the fallback cannot weaken the transaction.
   the first submitted prompt and a submitted Reply.
 - Every PromptWindow has a visible, picker-controlled mode, and both session
   start and session reply transmit that exact submitted mode.
+- ProjectProfile is built by marker-activated Rust adapters from bounded local
+  evidence; selected instruction Skills are user/config-derived. Their discovery
+  and selection never run a model or grant execution.
+- Skill selection persists only for the active session and remains visible in
+  PromptWindow before each submit.
 - Missing or unsupported modes are rejected at configuration/RPC boundaries;
   they never fall back to an inferred or hidden contract.
 
@@ -386,6 +432,11 @@ validation remain identical; the fallback cannot weaken the transaction.
   not run a project-specific compile/type-check command at every accepted
   boundary. The backend contract enforces independently valid slices, while
   editor diagnostics remain the only ambient compiler evidence.
+- Project Intelligence does not yet follow required-document links inside an
+  autoloaded `AGENTS.md`, choose task-relevant area slices, run native framework
+  compile probes, or load versioned technology knowledge packs. Exact detected
+  versions ground the model today but do not by themselves teach an older model
+  Angular 22 or TypeScript 6 APIs.
 
 ## Self-healing protocol
 
@@ -408,5 +459,6 @@ gaps` must enumerate every shipped contradiction until it is repaired.
 Primary reconciliation sources: `lua/loopbiotic/init.lua`, `prompt.lua`,
 `surfaces.lua`, `scope.lua`, `card.lua`, `flow.lua`, `widgets.lua`,
 `creation.lua`, `navigation.lua`, `thinking.lua`, `state.lua`, `commands.lua`,
-`keymaps.lua`, protocol card/context schemas, the Rust session/turn engine, and
-Lua interactivity, Flow, prompt, and navigation tests.
+`keymaps.lua`, protocol card/context schemas, the Rust session/turn engine and
+context project-adapter registry, and Lua interactivity, Flow, prompt, and
+navigation tests.

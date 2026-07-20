@@ -196,11 +196,58 @@ require("loopbiotic").setup({
     },
   },
   keymaps = {
+    skills = "<C-g>", -- session Markdown multiselect above PromptWindow
     modes = "<C-k>", -- mode picker inside every prompt window
     models = "<C-l>", -- model picker inside the prompt window
   },
+  skills = {
+    autoload = { "AGENTS.md" }, -- locked, session-scoped instructions
+    discover_root_markdown = true,
+    max_file_bytes = 65536,
+    picker_height = 10,
+  },
 })
 ```
+
+## Project Intelligence and Skills
+
+Loopbiotic gives every backend a deterministic `ProjectProfile` alongside the
+ranked source context. Lua only contributes cheap facts from already-active
+Neovim LSP clients. On session start, a Rust registry activates adapters from
+root markers such as `deno.json`, `package.json`, `nx.json`, `Cargo.toml`, and
+Compose files. Root facts are read concurrently, matching adapters run in
+parallel, and their results are merged deterministically. No adapter knows a
+project name.
+
+The first POC includes independent adapters for package workspaces, TypeScript,
+Angular, React, Excalidraw, RxJS, Deno, Nx, Cargo/Rust, Axum, SQLx, Tokio,
+Docker Compose, and Neovim LSP. It records the adapter IDs that fired, exact
+versions from `deno.lock`, Nx project areas and dependencies, Cargo workspace
+members, project tasks, selected runtime/infrastructure versions, and bounded
+LSP capabilities. Profiling runs without an agent turn, command execution,
+network request, or MCP. This keeps frontier models on a direct evidence path
+while giving smaller local models facts they are less likely to infer reliably.
+
+Inspect adapter activation and the exact profile during development with:
+
+```sh
+cargo run -q -p loopbioticd -- dev project-profile ../libregraf
+```
+
+Press `<C-g>` (`keymaps.skills`) in PromptWindow or Reply to open a bounded
+multiselect Frame above the prompt. It lists Markdown files in the workspace
+root and configured `skills.autoload` paths. Space toggles an optional file,
+Enter applies the selection, and Escape cancels it. Autoloaded files are marked
+`auto` and cannot be deselected. The selected filenames stay visible in the
+PromptWindow footer and persist until Stop or Reset.
+
+On submit, Loopbiotic snapshots each selected file as workspace-relative inert
+text with provenance and a SHA-256 content hash. Selection never executes the
+file, grants tools, or contacts the backend by itself. Protocol limits bound the
+number, individual size, and combined size of instruction files. Today exact
+project versions ground the model; versioned framework knowledge packs and
+native compile probes—for example Angular 22 and TypeScript 6 guidance for an
+older local model—remain follow-up work.
 
 ## Flow
 

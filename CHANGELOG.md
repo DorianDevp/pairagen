@@ -73,6 +73,14 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- PromptWindow now has a session-scoped Markdown Skills multiselect. Configured
+  files such as `AGENTS.md` autoload as locked inert instructions; optional root
+  Markdown files are explicitly selected, remain visible through Reply, and are
+  content-addressed and bounded before reaching the backend. A deterministic
+  ProjectProfile is built in Rust by marker-activated technology adapters and
+  supplies exact lockfile versions, Nx/Cargo workspace areas and dependencies,
+  commands, Compose infrastructure, and active Neovim LSP capabilities without
+  MCP or a model discovery turn. Protocol version is now 12.
 - Prompts resolve a session-pinned static Flow graph through LSP call hierarchy
   without opening UI or changing geometry. The explorer is an explicit `F`
   toggle with lazy caller/callee expansion, exact call-site/reference
@@ -97,7 +105,7 @@ The project follows [Semantic Versioning](https://semver.org/).
   backend, the concrete model the next turn will use (configured, or resolved
   from the backend — the Claude CLI announces it at process start, Ollama
   always knows it), and the models the backend can enumerate (Ollama's local
-  tags). Protocol version is now 10.
+  tags).
 - The prompt window title names the active agent and resolved model (never
   "default"), refreshing as soon as warmup resolves it, and `Ctrl-l`
   (`keymaps.models`) opens a model picker fed by the backend-enumerated
