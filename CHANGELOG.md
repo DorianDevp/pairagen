@@ -73,6 +73,11 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A controlled real-model Project Intelligence A/B runner now compares the
+  feature-disabled baseline, marker-derived ProjectProfile, and ProjectProfile
+  plus selected Skills. It includes Angular 22, TypeScript 6, React, Nx, and
+  Rust fixtures, deterministic rubrics, token/latency/retry telemetry, and an
+  OpenAI-compatible LM Studio backend for safe sequential local-model runs.
 - PromptWindow now has a session-scoped Markdown Skills multiselect. Configured
   files such as `AGENTS.md` autoload as locked inert instructions; optional root
   Markdown files are explicitly selected, remain visible through Reply, and are

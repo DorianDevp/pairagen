@@ -23,7 +23,8 @@ The editor experience stays the same.
 
 Loopbiotic is beta software. It has been developed and tested primarily with the
 Codex CLI app-server backend. Persistent Claude CLI (stream-json), Ollama HTTP,
-generic CLI, and stdio agent adapters are available, but currently receive less
+an OpenAI-compatible HTTP adapter used for local LM Studio benchmarks, generic
+CLI, and stdio agent adapters are available, but currently receive less
 real-world testing than Codex.
 
 Requirements:
@@ -46,6 +47,7 @@ Implemented capabilities include:
 - generic CLI backend
 - persistent Claude CLI backend (one stream-json process per session)
 - Ollama HTTP backend for local models (model stays loaded, JSON-forced output)
+- OpenAI-compatible HTTP backend for LM Studio and controlled local benchmarks
 - structured agent denial (`deny` op) rendered as a distinct card
 - deterministic token-budgeted project context with LSP hints and dependency ranking
 
@@ -227,6 +229,16 @@ members, project tasks, selected runtime/infrastructure versions, and bounded
 LSP capabilities. Profiling runs without an agent turn, command execution,
 network request, or MCP. This keeps frontier models on a direct evidence path
 while giving smaller local models facts they are less likely to infer reliably.
+
+The reproducible real-model A/B runner compares no profile/Skills, profile only,
+and profile plus selected Skills across the fixtures in
+`tests/fixtures/project-intelligence`. See the
+[2026-07-20 benchmark](doc/benchmarks/project-intelligence-2026-07-20.md) for
+methodology and measured tradeoffs, or run:
+
+```sh
+scripts/project-intelligence-report.sh --repeat 3 --out results.jsonl
+```
 
 Inspect adapter activation and the exact profile during development with:
 
