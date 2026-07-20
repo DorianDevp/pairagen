@@ -151,6 +151,23 @@ impl CodexAppBackend {
         }
     }
 
+    /// The model a turn of this phase actually runs. When nothing is
+    /// configured the app-server resolves its own default (the one model/list
+    /// advertises); reporting that resolved name — not a bare null — keeps the
+    /// client's displayed model and cost attribution honest, matching
+    /// `identity()`.
+    async fn resolved_phase_model(&self, phase: Phase) -> Option<String> {
+        if let Some(model) = self.phase_model(phase) {
+            return Some(model);
+        }
+        let default = self.model_catalog.lock().await.default.clone();
+        let patch = self.model.clone().or(default);
+        match phase {
+            Phase::Patch => patch,
+            Phase::Discovery => self.discovery_model.clone().or(patch),
+        }
+    }
+
     fn phase_effort(&self, phase: Phase) -> Option<String> {
         match phase {
             Phase::Discovery => self.discovery_effort.clone(),
@@ -426,7 +443,10 @@ impl CodexAppBackend {
         let mut catalog = ModelCatalog::default();
         let mut cursor: Option<String> = None;
 
-        loop {
+        // Bound the loop: a misbehaving app-server that returns an empty or
+        // non-advancing nextCursor must not spin forever while holding the
+        // lane lock. 50 pages of 100 is far more than any real model catalog.
+        for _ in 0..50 {
             let response = state
                 .request(json!({
                     "method": "model/list",
@@ -438,13 +458,16 @@ impl CodexAppBackend {
                 }))
                 .await?;
             append_model_page(&mut catalog, &response);
-            cursor = response
+            let next = response
                 .get("nextCursor")
                 .and_then(Value::as_str)
+                .filter(|next| !next.is_empty())
                 .map(str::to_owned);
-            if cursor.is_none() {
+            // Stop on an absent, empty, or non-advancing cursor.
+            if next.is_none() || next == cursor {
                 break;
             }
+            cursor = next;
         }
 
         Ok(catalog)
@@ -493,7 +516,7 @@ impl BackendAdapter for CodexAppBackend {
             raw_output: Some(output.text.clone()),
             metadata: BackendMetadata {
                 backend: "codex_app".into(),
-                model: self.phase_model(turn_phase(&req)),
+                model: self.resolved_phase_model(turn_phase(&req)).await,
                 token_usage: output.token_usage.or_else(|| {
                     Some(TokenUsage::estimated(
                         estimate_tokens(&prompt(&req, true)),

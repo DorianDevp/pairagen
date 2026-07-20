@@ -98,8 +98,9 @@ continues until completion, explicit cancellation, prompt interruption, or Stop.
   text and attachments, and performs no backend request.
 - The editing surface appears before backend warmup and context discovery finish.
 - Empty input does nothing.
-- Model selection preserves typed text and does not alter a separately configured
-  discovery model.
+- Model selection preserves typed text and targets the current mode's phase:
+  `fix`/`propose` set the patch-drafting model, `explain`/`investigate`/`review`
+  set the discovery model. It performs no backend request.
 - A submitted prompt is stashed before PromptWindow closes. Startup failure
   restores that text on the next open.
 - Slash-prefixed words remain ordinary prompt content. Prompt text cannot force

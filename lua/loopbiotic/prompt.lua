@@ -235,16 +235,20 @@ function M.next_stash(stash, event, text)
   return stash
 end
 
--- Pick the concrete model out of the fixed resolution order: configured
--- model, then the model the warmup identity announced for the next turn,
--- then the model the backend reported after a turn. Returns nil when none
+-- Pick the concrete model out of the fixed resolution order: the model the
+-- backend reported it actually ran this turn, then the user's configured
+-- pick, then the model the warmup identity announced. Returns nil when none
 -- is known. vim.NIL (JSON null) and empty strings count as unknown.
 ---@param configured string|nil
 ---@param identity_model string|nil
 ---@param backend_model string|nil
 ---@return string|nil
 function M.resolved_model(configured, identity_model, backend_model)
-  local candidates = { configured, identity_model, backend_model }
+  -- Actual-used first: once a turn has run, the backend-reported model is the
+  -- honest answer for the headline (a discovery turn ran discovery_model, a
+  -- patch turn ran the patch model). Before any turn, fall back to the user's
+  -- configured pick, then the backend's advertised default.
+  local candidates = { backend_model, configured, identity_model }
 
   for index = 1, 3 do
     local value = candidates[index]
@@ -257,24 +261,17 @@ function M.resolved_model(configured, identity_model, backend_model)
 end
 
 -- Title-ready model name; "model?" until any concrete model is known. The
--- word "default" is never rendered. When the backend runs a different
--- discovery model (identity.phases), it is shown alongside the patch model
--- instead of being presented as "the" model.
+-- word "default" is never rendered. The label always reflects the actual
+-- per-turn model (a discovery turn shows discovery_model, a patch turn shows
+-- the patch model) via resolved_model, so no separate discovery suffix is
+-- needed — the headline is never a model the turn did not run.
 ---@param configured string|nil
 ---@param identity table|nil backend/warmup identity ({ model, models, phases })
 ---@param backend_model string|nil
 ---@return string
 function M.model_label(configured, identity, backend_model)
   local identity_model = type(identity) == "table" and identity.model or nil
-  local label = M.resolved_model(configured, identity_model, backend_model) or "model?"
-  local phases = type(identity) == "table" and type(identity.phases) == "table" and identity.phases or nil
-  local discovery = phases and phases.discovery
-
-  if type(discovery) == "string" and discovery ~= "" and discovery ~= label then
-    return label .. " · discovery " .. discovery
-  end
-
-  return label
+  return M.resolved_model(configured, identity_model, backend_model) or "model?"
 end
 
 -- Deduped model-picker candidates, in resolution-priority order: configured
@@ -300,6 +297,10 @@ function M.model_candidates(configured, identity, agent_models, backend_model)
     add(identity.model)
     if type(identity.phases) == "table" then
       add(identity.phases.patch)
+      -- Discovery runs a distinct (often cheaper) model; keep it selectable so
+      -- the user can control which model answers investigate/explain/review
+      -- turns, not only patch turns.
+      add(identity.phases.discovery)
     end
     if type(identity.models) == "table" then
       for _, name in ipairs(identity.models) do
@@ -343,9 +344,19 @@ end
 -- goes through the regular model-switch entry point (persisting the
 -- per-agent preference); only the frame title changes, the typed prompt
 -- text and window stay as they are.
+-- fix/propose draft a patch; explain/investigate/review run discovery. The
+-- visible PromptWindow mode therefore names the phase the model picker targets.
+function M.model_phase(mode)
+  if mode == "fix" or mode == "propose" then
+    return "patch"
+  end
+  return "discovery"
+end
+
 function M.pick_model()
   local agent = config.agent()
   local identity = state.agent_identity
+  local phase = M.model_phase(M.current_mode())
   local candidates = M.model_candidates(config.model(), identity, config.model_names(), state.backend_model)
 
   if #candidates == 0 then
@@ -353,12 +364,17 @@ function M.pick_model()
     return
   end
 
-  vim.ui.select(candidates, { prompt = "Loopbiotic model (" .. agent .. ")" }, function(choice)
+  local label = phase == "patch" and "patch model" or "discovery model"
+  vim.ui.select(candidates, { prompt = "Loopbiotic " .. label .. " (" .. agent .. ")" }, function(choice)
     if not choice or choice == "" then
       return
     end
 
-    require("loopbiotic").model(choice)
+    if phase == "patch" then
+      require("loopbiotic").model(choice)
+    else
+      require("loopbiotic").discovery_model(choice)
+    end
     M.refresh_title()
   end)
 end

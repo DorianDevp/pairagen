@@ -151,30 +151,34 @@ Switch at runtime:
 :LoopbioticAgent claude
 :LoopbioticAgent local
 :LoopbioticModel <model>
+:LoopbioticDiscoveryModel <model>
 ```
 
 If the active agent has no `model` set in `setup()`, `:LoopbioticModel <model>` stores
 the selection per agent in `stdpath("state")/loopbiotic/preferences.json` and
-restores it on the next Neovim start. A model explicitly configured in
-`setup()` always takes precedence. `:LoopbioticModel default` clears the stored model
-and returns that agent to its own default.
+restores it on the next Neovim start. `:LoopbioticDiscoveryModel <model>` does the
+same for the discovery model (investigate/explain/review turns), stored
+separately per agent. A model explicitly configured in `setup()` always takes
+precedence. `:LoopbioticModel default` (or `:LoopbioticDiscoveryModel default`)
+clears the stored model and returns that agent to its own default.
 
 The prompt window title always names the selected mode, active agent, and the
 concrete model the next turn will use, e.g. `fix · codex / gpt-…`. Without a configured
 model it shows the model the backend announces during warmup (or reported
 after the last turn), and `model?` until one is known — it never shows
-`default`. The title always names the patch-drafting model; when an agent
-runs discovery on a different model (the shipped Codex agent uses
-`gpt-5.4-mini` at low effort; Claude pins `discovery_model = "haiku"`), that
-is shown separately, e.g.
-`claude-fable-5 · discovery haiku`. Press `<C-l>` (`keymaps.models`) inside
-the prompt to pick a model from every known candidate: the configured model,
-the models the backend enumerates (Codex `model/list`, Ollama's local tags;
-claude offers its stable CLI aliases `sonnet`, `opus`, `haiku`), an optional `models` list on
-the agent definition, and the model reported by the last turn. Picking sets
-the patch model; `discovery_model` stays as configured. The picked model
-persists per agent exactly like `:LoopbioticModel`; the prompt window and its
-typed text stay open.
+`default`. The title names the model the turn actually runs: a patch mode
+(`fix`/`propose`) shows the patch-drafting model, a discovery mode
+(`explain`/`investigate`/`review`) shows the discovery model (the shipped Codex
+agent uses `gpt-5.4-mini` at low effort; Claude pins `discovery_model = "haiku"`).
+Press `<C-l>` (`keymaps.models`) inside the prompt to pick a model from every
+known candidate: the configured patch and discovery models, the models the
+backend enumerates (Codex `model/list`, Ollama's local tags; claude offers its
+stable CLI aliases `sonnet`, `opus`, `haiku`), an optional `models` list on the
+agent definition, and the model reported by the last turn. The picker sets the
+model for the current mode's phase — `<C-l>` in `fix`/`propose` sets the patch
+model, in the other modes it sets the discovery model (`:LoopbioticModel` and
+`:LoopbioticDiscoveryModel` do the same from the command line). The picked model
+persists per agent; the prompt window and its typed text stay open.
 
 Every PromptWindow, including Reply, also shows exactly one turn mode in its
 title. Press `<C-k>` (`keymaps.modes`) inside the prompt to choose `fix`,

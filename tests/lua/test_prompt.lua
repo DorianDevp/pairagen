@@ -3,12 +3,14 @@ return function(t)
   local prompt = require("loopbiotic.prompt")
   local state = require("loopbiotic.state")
 
-  t.test("model_label prefers the configured model", function()
-    t.eq(prompt.model_label("configured", { model = "identity" }, "backend"), "configured")
+  t.test("model_label prefers the actually-used backend model", function()
+    -- The honest headline: what the turn actually ran wins over the pick.
+    t.eq(prompt.model_label("configured", { model = "identity" }, "backend"), "backend")
   end)
 
-  t.test("model_label falls back to identity, then backend, then model?", function()
-    t.eq(prompt.model_label(nil, { model = "identity" }, "backend"), "identity")
+  t.test("model_label falls back to configured, then identity, then model?", function()
+    t.eq(prompt.model_label("configured", { model = "identity" }, nil), "configured")
+    t.eq(prompt.model_label(nil, { model = "identity" }, nil), "identity")
     t.eq(prompt.model_label(nil, nil, "backend"), "backend")
     t.eq(prompt.model_label(nil, nil, nil), "model?")
   end)
@@ -19,16 +21,13 @@ return function(t)
     t.eq(prompt.model_label("", { model = vim.NIL }, "backend"), "backend")
   end)
 
-  t.test("model_label shows a differing discovery model alongside, never as the model", function()
-    -- The shipped claude default: discovery pinned, patch model unknown.
-    local identity = { model = vim.NIL, phases = { discovery = "haiku", patch = vim.NIL } }
-    t.eq(prompt.model_label(nil, identity, nil), "model? · discovery haiku")
-
-    identity = { model = "claude-fable-5", phases = { discovery = "haiku", patch = "claude-fable-5" } }
-    t.eq(prompt.model_label(nil, identity, nil), "claude-fable-5 · discovery haiku")
-
-    -- Same model in both phases: no suffix.
-    identity = { model = "claude-fable-5" }
+  t.test("model_label reflects the actual per-turn model, with no discovery suffix", function()
+    local identity = { model = "claude-fable-5", phases = { discovery = "haiku", patch = "claude-fable-5" } }
+    -- A discovery turn actually ran haiku; the headline says so plainly.
+    t.eq(prompt.model_label(nil, identity, "haiku"), "haiku")
+    -- A patch turn actually ran the patch model.
+    t.eq(prompt.model_label(nil, identity, "claude-fable-5"), "claude-fable-5")
+    -- Before any turn, the advertised identity model stands in, no suffix.
     t.eq(prompt.model_label(nil, identity, nil), "claude-fable-5")
   end)
 
@@ -64,7 +63,7 @@ return function(t)
     t.eq(candidates, { "configured", "identity", "alpha", "beta", "gamma", "backend" })
   end)
 
-  t.test("model_candidates excludes the discovery-only model", function()
+  t.test("model_candidates includes the discovery model", function()
     local candidates = prompt.model_candidates(
       nil,
       { model = vim.NIL, phases = { discovery = "haiku", patch = vim.NIL }, models = { "sonnet" } },
@@ -72,13 +71,44 @@ return function(t)
       nil
     )
 
-    t.eq(candidates, { "sonnet" })
+    -- Discovery is selectable so the user can steer investigate/explain/review
+    -- turns, not only patch turns.
+    t.eq(candidates, { "haiku", "sonnet" })
   end)
 
   t.test("model_candidates filters nil, vim.NIL, and empty values", function()
     t.eq(prompt.model_candidates(nil, nil, nil, nil), {})
     t.eq(prompt.model_candidates("", { model = vim.NIL, models = vim.NIL }, {}, ""), {})
     t.eq(prompt.model_candidates(nil, { models = { "", "only" } }, nil, nil), { "only" })
+  end)
+
+  t.test("model picker targets the current mode's phase", function()
+    t.eq(prompt.model_phase("fix"), "patch")
+    t.eq(prompt.model_phase("propose"), "patch")
+    t.eq(prompt.model_phase("investigate"), "discovery")
+    t.eq(prompt.model_phase("explain"), "discovery")
+    t.eq(prompt.model_phase("review"), "discovery")
+  end)
+
+  t.test("discovery_model is settable per agent and independent of the patch model", function()
+    local previous_agent = config.values.backend.agent
+    config.values.backend.agent = "mock"
+    -- Treat the model as explicitly configured so the setter does not touch the
+    -- real preferences.json on disk during the test.
+    config.explicit_models.mock = true
+
+    config.model("opus")
+    config.discovery_model("haiku")
+    t.eq(config.discovery_model(), "haiku")
+    t.eq(config.model(), "opus", "patch model is independent of discovery")
+
+    config.discovery_model("")
+    t.eq(config.discovery_model(), nil, "cleared discovery model")
+    t.eq(config.model(), "opus", "clearing discovery leaves the patch model")
+
+    config.model("")
+    config.explicit_models.mock = nil
+    config.values.backend.agent = previous_agent
   end)
 
   t.test("on_warmup stores the identity and tolerates old daemons", function()

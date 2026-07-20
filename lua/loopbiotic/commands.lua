@@ -77,6 +77,15 @@ function M.setup()
       return require("loopbiotic").models()
     end,
   })
+
+  command("LoopbioticDiscoveryModel", function(opts)
+    require("loopbiotic").discovery_model(opts.args)
+  end, {
+    nargs = "?",
+    complete = function()
+      return require("loopbiotic").models()
+    end,
+  })
 end
 
 return M

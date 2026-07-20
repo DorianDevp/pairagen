@@ -69,12 +69,16 @@ into new renderers.
 The title has this semantic shape:
 
 ```text
-Loopbiotic {Prompt|Reply} · {mode} · {agent} / {concrete patch model}
+Loopbiotic {Prompt|Reply} · {mode} · {agent} / {concrete turn model}
 ```
 
-If the model is unknown, the label is `model?`; the literal word `default` is
-never presented as a model. A distinct discovery model is a secondary suffix,
-not a replacement for the patch model.
+The model names the model the next turn will actually run: a patch mode
+(`fix`/`propose`) shows the patch-drafting model, a discovery mode
+(`explain`/`investigate`/`review`) shows the discovery model. The title is never
+a model the turn will not use. If the model is unknown, the label is `model?`;
+the literal word `default` is never presented as a model. `<C-l>` picks the
+model for the current mode's phase, so both the patch and discovery models are
+selectable from PromptWindow without becoming a second Window.
 
 Context selected in a Widget must be visible before submit as a compact summary,
 for example `3 files · 3 call sites`. The user must be able to inspect and remove

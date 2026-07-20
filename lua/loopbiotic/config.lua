@@ -250,6 +250,7 @@ function M.read_preferences()
     return { models = {} }
   end
   value.models = type(value.models) == "table" and value.models or {}
+  value.discovery_models = type(value.discovery_models) == "table" and value.discovery_models or {}
   return value
 end
 
@@ -261,11 +262,19 @@ function M.load_models()
       agent.model = model
     end
   end
+  for name, model in pairs(preferences.discovery_models) do
+    local agent = M.values.agents[name]
+    if agent and not M.explicit_models[name] and type(model) == "string" and model ~= "" then
+      agent.discovery_model = model
+    end
+  end
 end
 
-function M.persist_model(agent_name, model)
+-- Persist a per-agent model preference under the named preferences field
+-- (`models` for the patch/response model, `discovery_models` for discovery).
+local function persist_preference(field, agent_name, model)
   local preferences = M.read_preferences()
-  preferences.models[agent_name] = model and model ~= "" and model or nil
+  preferences[field][agent_name] = model and model ~= "" and model or nil
   local path = M.preferences_path()
   local directory = vim.fn.fnamemodify(path, ":h")
   local ok, error_message = pcall(function()
@@ -280,6 +289,14 @@ function M.persist_model(agent_name, model)
     return true, nil
   end
   return false, tostring(error_message)
+end
+
+function M.persist_model(agent_name, model)
+  return persist_preference("models", agent_name, model)
+end
+
+function M.persist_discovery_model(agent_name, model)
+  return persist_preference("discovery_models", agent_name, model)
 end
 
 function M.migrate_legacy_codex()
@@ -334,6 +351,24 @@ function M.model(name)
   end
 
   return agent.model, false
+end
+
+function M.discovery_model(name)
+  local agent_name, agent = M.agent_config()
+
+  if name then
+    if name == "" then
+      agent.discovery_model = nil
+    else
+      agent.discovery_model = name
+    end
+    if not M.explicit_models[agent_name] then
+      local saved, error_message = M.persist_discovery_model(agent_name, agent.discovery_model)
+      return agent.discovery_model, saved, error_message
+    end
+  end
+
+  return agent.discovery_model, false
 end
 
 function M.model_names()
