@@ -36,7 +36,9 @@ function M.show(card, opts)
   end
   local diff = require("loopbiotic.diff")
   if card.kind ~= "patch" and diff.valid_preview() then
-    diff.restore_source()
+    -- Cleaning up a stale preview because a non-patch card (often a background
+    -- progress tick) arrived must not steal the user's focus into the diff.
+    diff.restore_source(nil, { focus = opts.enter == true })
   end
   if state.details_card ~= card then
     state.details_card = card
@@ -464,6 +466,10 @@ function M.bind(buf, card)
 
   if state.card_flow_active and state.call_hierarchy and (config.values.flow or {}).enabled ~= false then
     local flow = require("loopbiotic.flow")
+    -- Route graph notifications back to the card so in-session Flow navigation
+    -- (move/expand) actually redraws; the prompt only owns this listener while
+    -- its own window is open (and clears it on close).
+    flow.set_listener(state.call_hierarchy, M.refresh_flow)
     vim.keymap.set("n", "j", function()
       flow.move(state.call_hierarchy, 1)
     end, { buffer = buf, nowait = true, silent = true })
@@ -494,6 +500,18 @@ function M.bind(buf, card)
       M.refresh_flow(state.call_hierarchy)
     end, { buffer = buf, nowait = true, silent = true })
     return
+  end
+
+  -- The AgentWindow buffer is reused across renders, so Flow-mode bindings
+  -- from a previous render must be cleared or they hijack normal card
+  -- navigation (j/k scroll, <CR>, etc.) for the rest of the session.
+  for _, key in ipairs({ "j", "k", "h", "l", "u", "<CR>", "s", "R" }) do
+    pcall(vim.keymap.del, "n", key, { buffer = buf })
+  end
+  -- Leaving Flow mode: stop routing graph notifications to the card, unless
+  -- the prompt window is open and owns the listener for its own rendering.
+  if state.call_hierarchy and not surfaces.prompt_open() then
+    require("loopbiotic.flow").set_listener(state.call_hierarchy, nil)
   end
 
   if type(card.flow_path) == "table" and state.call_hierarchy then

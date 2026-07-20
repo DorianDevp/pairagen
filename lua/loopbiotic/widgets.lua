@@ -37,7 +37,10 @@ function M.validate(envelope)
       table.insert(intents, intent)
     end
   end
-  local valid, reason = spec.validate and spec.validate(envelope.data) or true
+  local valid, reason = true, nil
+  if spec.validate then
+    valid, reason = spec.validate(envelope.data)
+  end
   if not valid then
     return nil, reason or "invalid widget payload"
   end

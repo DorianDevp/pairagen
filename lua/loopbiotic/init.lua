@@ -67,6 +67,9 @@ rpc.on("agent/turn_ready", function(params)
   end
   if params.error then
     surfaces.set_agent_working(false)
+    -- Retire this turn so a late agent/progress for it cannot re-render the
+    -- working card over the error view.
+    state.cancelled_turn_id = params.turn_id
     show_agent_error(params.error, true)
     return
   end
@@ -97,7 +100,7 @@ rpc.on_request("editor/open_location", function(params, respond)
 
   if M.workspace_location(file) and missing then
     respond({ granted = true, context = context.new_file(file) })
-  elseif M.workspace_location(file) and navigation.open_location(location) then
+  elseif M.workspace_location(file) and navigation.open_location(location, { focus = false }) then
     respond({ granted = true, context = context.session() })
   else
     respond({ granted = false })
@@ -518,6 +521,44 @@ function M.model(name)
     ui.notify("Loopbiotic model: " .. name .. " (could not save: " .. save_error .. ")", vim.log.levels.WARN)
   else
     ui.notify("Loopbiotic model: " .. name .. (saved and " · saved" or ""))
+  end
+
+  return name
+end
+
+-- The model for discovery turns (investigate/explain/review). Mirrors M.model
+-- but targets the discovery phase, so the user can steer which model answers
+-- non-patch turns independently of the patch-drafting model.
+function M.discovery_model(name)
+  if not name or name == "" then
+    local model = config.discovery_model()
+    ui.notify("Loopbiotic discovery model: " .. (model and model ~= "" and model or "agent default"))
+    return model
+  end
+
+  if state.session_id then
+    ui.notify("Finish the active session before changing the discovery model", vim.log.levels.WARN)
+    return config.discovery_model()
+  end
+
+  -- "default"/"none" clear the stored preference back to the agent default.
+  if name == "default" or name == "none" then
+    local _, saved, save_error = config.discovery_model("")
+    rpc.stop()
+    if save_error then
+      ui.notify("Loopbiotic discovery model: agent default (could not save: " .. save_error .. ")", vim.log.levels.WARN)
+    else
+      ui.notify("Loopbiotic discovery model: agent default" .. (saved and " · saved" or ""))
+    end
+    return nil
+  end
+
+  local _, saved, save_error = config.discovery_model(name)
+  rpc.stop()
+  if save_error then
+    ui.notify("Loopbiotic discovery model: " .. name .. " (could not save: " .. save_error .. ")", vim.log.levels.WARN)
+  else
+    ui.notify("Loopbiotic discovery model: " .. name .. (saved and " · saved" or ""))
   end
 
   return name

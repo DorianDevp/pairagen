@@ -145,6 +145,7 @@ function M.show(card, opts)
 end
 
 function M.open_creation_context(plan, source_buf)
+  state.creation_context_win = nil
   local source_win = navigation.normal_window()
   vim.api.nvim_set_current_win(source_win)
   local split_ok = pcall(vim.cmd, "vsplit")
@@ -163,6 +164,10 @@ function M.open_creation_context(plan, source_buf)
   if netrw_win then
     vim.api.nvim_set_current_win(netrw_win)
     pcall(vim.cmd, "edit " .. vim.fn.fnameescape(plan.existing_parent))
+    -- Tracked so restore_source can close it; otherwise every new-file
+    -- proposal leaks another parent-directory split for the rest of the
+    -- session.
+    state.creation_context_win = netrw_win
   end
   vim.api.nvim_set_current_win(draft_win)
   vim.api.nvim_win_set_buf(draft_win, source_buf)
@@ -514,7 +519,13 @@ function M.valid_preview()
     and vim.api.nvim_win_is_valid(state.diff_win)
 end
 
-function M.restore_source(cursor)
+-- opts.focus (default true): user-driven accept/reject return the cursor to
+-- the source window; background cleanup (a non-patch card superseding a stale
+-- preview, e.g. a progress tick mid-turn) passes focus=false so it swaps the
+-- buffer back without yanking the user into the diff window.
+function M.restore_source(cursor, opts)
+  opts = opts or {}
+  local focus = opts.focus ~= false
   local draft_buf = state.diff_buf
   local source_buf = state.diff_source_buf
   local win = state.diff_win
@@ -522,18 +533,40 @@ function M.restore_source(cursor)
 
   if win and vim.api.nvim_win_is_valid(win) and source_buf and vim.api.nvim_buf_is_valid(source_buf) then
     vim.api.nvim_win_set_buf(win, source_buf)
-    vim.api.nvim_set_current_win(win)
+    if focus then
+      vim.api.nvim_set_current_win(win)
 
-    if cursor then
-      local line = math.min(cursor[1], vim.api.nvim_buf_line_count(source_buf))
-      vim.api.nvim_win_set_cursor(win, { math.max(line, 1), cursor[2] })
+      if cursor then
+        local line = math.min(cursor[1], vim.api.nvim_buf_line_count(source_buf))
+        vim.api.nvim_win_set_cursor(win, { math.max(line, 1), cursor[2] })
+      end
     end
   end
+
+  -- Close the parent-directory split opened for new-file review, unless it is
+  -- the very window we just restored the source into.
+  local context_win = state.creation_context_win
+  if
+    context_win
+    and context_win ~= win
+    and type(context_win) == "number"
+    and vim.api.nvim_win_is_valid(context_win)
+    and #vim.api.nvim_tabpage_list_wins(0) > 1
+  then
+    pcall(vim.api.nvim_win_close, context_win, true)
+  end
+  state.creation_context_win = nil
 
   if draft_buf and vim.api.nvim_buf_is_valid(draft_buf) then
     pcall(vim.api.nvim_buf_delete, draft_buf, { force = true })
   end
   if discard_creation and source_buf and vim.api.nvim_buf_is_valid(source_buf) then
+    -- The rejected creation buffer is about to be wiped; drop any remembered
+    -- reference so context capture doesn't fall back to a deleted buffer.
+    if state.source_buf == source_buf then
+      state.source_buf = nil
+      state.source_cursor = nil
+    end
     pcall(vim.api.nvim_buf_delete, source_buf, { force = true })
   end
   if discard_creation then
@@ -597,9 +630,12 @@ function M.send_accept(patch_ids, changed_files)
       return
     end
 
-    -- Patch results historically never updated state.backend_model.
+    -- Accepting a patch now runs a real patch-phase turn on the daemon, which
+    -- reports the model it actually ran; adopt it so the displayed model and
+    -- cost attribution reflect the accepted turn rather than the previous
+    -- (often discovery) turn's model.
     session.apply_turn_result(message.result, {
-      update_model = false,
+      update_model = true,
       track_backend_error = true,
     })
   end)

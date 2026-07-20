@@ -44,6 +44,43 @@ return function(t)
     vim.fn.delete(file)
   end)
 
+  t.test("open_location focus=false loads context without moving the cursor", function()
+    local state = require("loopbiotic.state")
+    local file = workspace_temp(".ts")
+    vim.fn.writefile({ "line one", "line two", "line three" }, file)
+
+    -- The user is sitting in a window with a known cursor while a turn runs.
+    local origin_win = vim.api.nvim_get_current_win()
+    local scratch = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(scratch, 0, -1, false, { "a", "b", "c", "d" })
+    vim.api.nvim_win_set_buf(origin_win, scratch)
+    vim.api.nvim_win_set_cursor(origin_win, { 3, 0 })
+
+    local ok = navigation.open_location({ file = file, line = 2, column = 1 }, { focus = false })
+
+    t.eq(ok, true)
+    -- The user's window, buffer and cursor are untouched...
+    t.eq(vim.api.nvim_get_current_win(), origin_win, "current window unchanged")
+    t.eq(vim.api.nvim_win_get_buf(origin_win), scratch, "buffer unchanged")
+    t.eq(vim.api.nvim_win_get_cursor(origin_win), { 3, 0 }, "cursor unchanged")
+    -- ...but the file is loaded and remembered as the source for context.
+    t.eq(
+      vim.fn.fnamemodify(vim.api.nvim_buf_get_name(state.source_buf), ":p"),
+      vim.fn.fnamemodify(file, ":p"),
+      "source buffer remembered"
+    )
+    t.eq(state.source_cursor[1], 2, "source cursor remembered")
+
+    local target_buf = vim.fn.bufnr(file)
+    if target_buf >= 0 and vim.api.nvim_buf_is_valid(target_buf) then
+      vim.api.nvim_buf_delete(target_buf, { force = true })
+    end
+    if vim.api.nvim_buf_is_valid(scratch) then
+      vim.api.nvim_buf_delete(scratch, { force = true })
+    end
+    vim.fn.delete(file)
+  end)
+
   t.test("tab navigation leaves the origin tab on a normal window", function()
     local config = require("loopbiotic.config")
     local surfaces = require("loopbiotic.surfaces")

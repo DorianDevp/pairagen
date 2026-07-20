@@ -16,6 +16,19 @@ return function(t)
       intents = { "navigate", "execute_command", "select_context" },
     })
     t.eq(valid.intents, { "navigate", "select_context" })
+
+    -- The per-widget validator actually runs: a flow envelope missing its
+    -- graph is rejected. (Regression: an `and/or` fold used to swallow every
+    -- validator's `false` result, accepting malformed payloads.)
+    local bad, bad_reason = widgets.validate({
+      id = "flow",
+      kind = "flow",
+      version = 1,
+      data = {},
+      intents = {},
+    })
+    t.eq(bad, nil)
+    t.eq(bad_reason, "Flow requires an editor-resolved graph")
   end)
 
   t.test("Widget selection is visible, removable and attached only as prompt context", function()

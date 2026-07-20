@@ -124,10 +124,12 @@ local function notify(graph)
   end
   graph._notify_pending = true
   vim.defer_fn(function()
+    -- Always release the latch; leaving it set on a superseded graph would
+    -- permanently suppress notifications on it.
+    graph._notify_pending = false
     if graph.generation ~= generation then
       return
     end
-    graph._notify_pending = false
     if type(graph._listener) == "function" then
       graph._listener(graph)
     end
@@ -157,12 +159,18 @@ local function request_group(graph, requests, callback)
   end
 
   local function finish(entry, err, result)
-    if entry.done or graph.generation ~= generation then
+    if entry.done then
       return
     end
     entry.done = true
     remaining = remaining - 1
     graph.pending = math.max(graph.pending - 1, 0)
+    -- A superseded graph still settles its pending count above (so M.await /
+    -- bundle.partial never hang on it) but must not accumulate results or fire
+    -- the callback.
+    if graph.generation ~= generation then
+      return
+    end
     if err then
       had_error = true
     elseif result ~= nil then
@@ -193,7 +201,9 @@ local function request_group(graph, requests, callback)
   end
 
   vim.defer_fn(function()
-    if finished or graph.generation ~= generation then
+    -- Even when the graph is superseded, cancel outstanding requests and let
+    -- finish() settle their pending count; only skip once already complete.
+    if finished then
       return
     end
     timed_out = true
@@ -407,7 +417,13 @@ load_node = function(graph, node, depth, ancestry, recurse)
     end
     if kind == "calls" then
       node._calls_done = true
-      node._loaded = true
+      -- Only a clean calls result pins the node as loaded. A timeout or error
+      -- must stay reloadable so pressing expand again retries (load_node gates
+      -- on _loaded); otherwise a single slow callHierarchy request wedges the
+      -- node's children forever.
+      if not timed_out and not had_error then
+        node._loaded = true
+      end
     else
       node._refs_done = true
     end

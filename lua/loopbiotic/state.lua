@@ -95,6 +95,7 @@ local defaults = {
   turn_barrier = false,
   pending_widget_context = {},
   creation = vim.NIL,
+  creation_context_win = vim.NIL,
   surfaces = {
     prompt = {
       mode = "closed",
