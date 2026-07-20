@@ -25,7 +25,8 @@ Every other input and the backend implementation remain the same.
   temperature 0, seed 42, 8,192-token context, 768-token output limit, one
   generation at a time.
 - Frontier: GPT-5.4 through the Codex app-server, low reasoning effort.
-- Host: Intel i5-8600K (6 cores), 31 GiB RAM, no discrete NVIDIA device exposed.
+- Host: Intel i5-8600K (6 cores), 31 GiB RAM, AMD Radeon RX 9070 with
+  16 GiB VRAM.
 - Cases: exact polyglot stack mapping, an Angular 22 signal-input patch, and an
   Angular-to-React Nx boundary review.
 - Sample: three repetitions of each case and variant: 9 responses per
@@ -90,12 +91,54 @@ framework conventions, but should be made more selective: activate a small
 adapter-matched section instead of spending context on whole files whenever
 possible.
 
-The next high-leverage local-model change is a structured edit intermediate
-representation owned by Rust. A weak model should select a file, range, and
-replacement (or a typed transformation); Loopbiotic should generate and
-validate the unified diff. Follow that with adapter-provided compile/type-check
-commands and a bounded repair loop. Teaching the model more facts will not fix
-the malformed-diff failure demonstrated here.
+The first high-leverage local-model follow-up was therefore a structured edit
+intermediate representation owned by Rust. The model now selects typed hunk
+lines and Loopbiotic generates and validates the unified diff. The next step is
+adapter-provided compile/type-check commands and a bounded repair loop.
+Teaching the model more facts would not by itself fix the malformed-diff
+failure demonstrated in the original run.
+
+## Backend-parity follow-up
+
+The first local run exposed a backend confound. Codex already returned typed
+hunks that Rust rendered as unified diffs, while the OpenAI-compatible backend
+asked the local model to write raw diff syntax. It was also stateless and
+non-streaming, with no reasoning or tool lifecycle. The Gemma result therefore
+measured the complete shipped path, not model intelligence in isolation.
+
+The OpenAI-compatible adapter was changed to reuse the Codex JSON schema,
+typed-hunk parser, Rust diff renderer, and card validation. A second benchmark
+then compared:
+
+- `gpt-5.6-sol` at low effort through the native Codex app-server, three
+  repetitions per case and variant;
+- Qwen3.6 35B-A3B Q4_K_M through LM Studio with thinking disabled, 8,192-token
+  context, 768-token output limit, one generation at a time, and 50% GPU
+  offload, two repetitions per case and variant.
+
+| Model | Variant | Pass | Content | Accepted | Avg tokens | Avg time | Median time | Avg attempts |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| GPT-5.6 Sol low | before | 44.4% | 88.9% | 100.0% | 10,449 | 18.93 s | 19.45 s | 1.00 |
+| GPT-5.6 Sol low | profile | 77.8% | 95.6% | 100.0% | 10,743 | 19.38 s | 22.38 s | 1.00 |
+| GPT-5.6 Sol low | after | 100.0% | 100.0% | 100.0% | 10,399 | 8.25 s | 7.78 s | 1.00 |
+| Qwen3.6 35B-A3B | before | 0.0% | 30.0% | 100.0% | 1,622 | 23.86 s | 24.17 s | 1.00 |
+| Qwen3.6 35B-A3B | profile | 50.0% | 90.0% | 83.3% | 2,708 | 33.00 s | 25.91 s | 1.50 |
+| Qwen3.6 35B-A3B | after | 100.0% | 100.0% | 100.0% | 2,102 | 20.20 s | 20.92 s | 1.00 |
+
+For GPT-5.6, full context raised pass rate by 55.6 percentage points while
+reducing average latency by 56.4% and tokens by 0.5%. For Qwen, it raised pass
+rate by 100 points and content by 70 points while reducing average latency by
+15.3%, despite 29.7% more tokens. ProjectProfile alone let Qwen recover the
+polyglot ownership and exact version facts; the selected Angular Skill was
+still necessary for reliable `input.required()` syntax.
+
+The malformed-diff class did not recur with typed transport: every Patch Qwen
+produced was rendered and accepted by the shared Rust path. One `profile`
+attempt exhausted structured-output retries and became an Error card, so output
+recovery is not solved completely. Nor are the backends fully equal. The local
+adapter still lacks streaming progress, persistent model threads, reasoning
+controls, and bounded read-only tools. Those are product-runtime gaps and must
+not be attributed to the model in future comparisons.
 
 ## Reproduction
 
