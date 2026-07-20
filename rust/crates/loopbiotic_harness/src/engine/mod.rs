@@ -16,12 +16,12 @@ use anyhow::{Result, anyhow};
 use loopbiotic_backends::{
     BackendAction, BackendAdapter, BackendRequest, CardContract, ProgressReporter, SessionSnapshot,
 };
-use loopbiotic_context::ContextOptimizer;
+use loopbiotic_context::{ContextOptimizer, project::ProjectProfiler};
 use loopbiotic_patch::PatchCoherence;
 use loopbiotic_protocol::{
     Action, ActionResult, Card, CardKind, ContextBundle, ContextPolicy, ErrorCard, FindingCard,
-    Mode, PatchApplyResult, StartSessionParams, StartSessionResult, SummaryCard, TokenUsage,
-    WorkingCard,
+    InstructionSkill, Mode, PatchApplyResult, StartSessionParams, StartSessionResult, SummaryCard,
+    TokenUsage, WorkingCard,
 };
 
 use crate::session::Session;
@@ -39,6 +39,7 @@ pub struct Engine {
     backend: Arc<dyn BackendAdapter>,
     sessions: HashMap<String, Session>,
     context_optimizer: ContextOptimizer,
+    project_profiler: ProjectProfiler,
     prefetch_mode: PrefetchMode,
     prefetches: HashMap<String, Prefetch>,
     /// In-flight speculative goal-continuation turns, keyed by session.
@@ -81,6 +82,7 @@ impl Engine {
             backend,
             sessions: HashMap::new(),
             context_optimizer: ContextOptimizer::default(),
+            project_profiler: ProjectProfiler,
             prefetch_mode: PrefetchMode::Off,
             prefetches: HashMap::new(),
             continuations: HashMap::new(),
@@ -121,6 +123,15 @@ impl Engine {
         Ok(())
     }
 
+    pub fn update_skills(&mut self, session_id: &str, skills: Vec<InstructionSkill>) -> Result<()> {
+        let session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        session.skills = skills;
+        Ok(())
+    }
+
     pub async fn start(&mut self, params: StartSessionParams) -> Result<StartSessionResult> {
         self.start_with_progress(params, None).await
     }
@@ -151,6 +162,7 @@ impl Engine {
         progress: Option<ProgressReporter>,
     ) -> Result<StartSessionResult> {
         let mut session = self.session_for_turn(session_id, generation)?;
+        session.project = Some(self.profile_project(&session.cwd, &session.project_signals));
         let context = self.optimize_context(
             session.context.clone(),
             &session.original_prompt,
@@ -734,6 +746,14 @@ impl Engine {
         tokio::task::block_in_place(|| self.context_optimizer.optimize(context, prompt, policy))
     }
 
+    fn profile_project(
+        &self,
+        root: &std::path::Path,
+        signals: &loopbiotic_protocol::ProjectSignals,
+    ) -> loopbiotic_protocol::ProjectProfile {
+        tokio::task::block_in_place(|| self.project_profiler.inspect(root, signals))
+    }
+
     fn request(
         &self,
         session: &Session,
@@ -766,6 +786,8 @@ impl Engine {
                 card_count: session.cards.len(),
                 last_card: session.cards.last().cloned(),
                 last_summary: session.cards.last().map(card_summary),
+                project: session.project.clone(),
+                skills: session.skills.clone(),
             },
             action,
             context,

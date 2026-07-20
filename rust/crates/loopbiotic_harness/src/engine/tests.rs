@@ -32,6 +32,8 @@ pub(super) fn params() -> StartSessionParams {
         hints: vec![],
         call_hierarchy: None,
         context_policy: Default::default(),
+        project_signals: Default::default(),
+        skills: vec![],
     }
 }
 
@@ -627,6 +629,27 @@ async fn replies_inside_session() {
     };
 
     assert!(card.finding.contains("that is not it"));
+}
+
+#[test]
+fn selected_instruction_skills_replace_the_session_snapshot_locally() {
+    let backend = Arc::new(MockBackend);
+    let mut engine = Engine::new(backend);
+    let (session_id, _) = engine.reserve_start(params());
+    let skill = loopbiotic_protocol::InstructionSkill {
+        name: "ANGULAR.md".into(),
+        path: "ANGULAR.md".into(),
+        content: "Use Angular 22 APIs.".into(),
+        provenance: "workspace_root".into(),
+        auto: false,
+        sha256: "abc".into(),
+    };
+
+    engine
+        .update_skills(&session_id, vec![skill.clone()])
+        .unwrap();
+
+    assert_eq!(engine.get(&session_id).unwrap().skills, vec![skill]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1659,7 +1682,7 @@ async fn rejecting_a_patch_cancels_read_only_speculation_without_redrafting() {
     );
 }
 
-type RecordedExpectation = (Option<CardKind>, String, Vec<String>, bool);
+type RecordedExpectation = (Option<CardKind>, String, Vec<String>, bool, Vec<String>);
 
 #[derive(Default)]
 struct ExpectationRecorder {
@@ -1675,6 +1698,11 @@ impl BackendAdapter for ExpectationRecorder {
             req.session.prompt.clone(),
             req.session.interaction_feedback.clone(),
             req.card_contract.conversation_only,
+            req.session
+                .project
+                .as_ref()
+                .map(|profile| profile.adapters.clone())
+                .unwrap_or_default(),
         ));
         self.inner.next_card(req).await
     }
@@ -1726,6 +1754,31 @@ async fn investigate_prompt_requires_a_hypothesis() {
     assert_eq!(requests[0].0, Some(CardKind::Hypothesis));
     assert_eq!(requests[0].1, "payload is empty");
     assert!(!requests[0].3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn start_profiles_marker_activated_adapters_before_the_backend_turn() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("package.json"),
+        r#"{"dependencies":{"@angular/core":"22.0.6"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("deno.lock"),
+        r#"{"specifiers":{"npm:@angular/core@22.0.6":"22.0.6"}}"#,
+    )
+    .unwrap();
+    let backend = Arc::new(ExpectationRecorder::default());
+    let mut engine = Engine::new(backend.clone());
+    let mut start = params();
+    start.cwd = root.path().to_path_buf();
+
+    engine.start(start).await.unwrap();
+
+    let requests = backend.requests.lock().unwrap();
+    assert!(requests[0].4.contains(&"angular".into()));
+    assert!(requests[0].4.contains(&"package-workspace".into()));
 }
 
 #[tokio::test(flavor = "multi_thread")]

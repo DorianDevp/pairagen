@@ -40,6 +40,12 @@ async fn main() -> Result<()> {
         [cmd, sub] if cmd == "backend" && sub == "check" => check_backend(),
         [cmd, sub] if cmd == "schema" && sub == "card" => print_card_schema(),
         [cmd, sub] if cmd == "dev" && sub == "mock-session" => print_mock_session().await,
+        [cmd, sub] if cmd == "dev" && sub == "project-profile" => {
+            print_project_profile(std::path::Path::new("."))
+        }
+        [cmd, sub, root] if cmd == "dev" && sub == "project-profile" => {
+            print_project_profile(std::path::Path::new(root))
+        }
         [cmd, sub] if cmd == "dev" && sub == "stdio-agent" => run_stdio_agent(),
         [cmd, sub, rest @ ..] if cmd == "dev" && sub == "token-report" => {
             token_report::run(rest).await
@@ -388,6 +394,10 @@ impl Server {
             "backend/list" => json!([self.backend.capabilities()]),
             "session/start" => {
                 let params = parse::<StartSessionParams>(&id, request.params)?;
+                loopbiotic_protocol::validate_project_metadata(None, &params.skills)
+                    .map_err(server_error(&id))?;
+                loopbiotic_protocol::validate_project_signals(&params.project_signals)
+                    .map_err(server_error(&id))?;
                 let deadline = start_deadline(&params);
                 let (session_id, generation, working) = {
                     let mut engine = self.engine.lock().await;
@@ -462,6 +472,8 @@ impl Server {
             }
             "session/reply" => {
                 let params = parse::<ReplyParams>(&id, request.params)?;
+                loopbiotic_protocol::validate_project_metadata(None, &params.skills)
+                    .map_err(server_error(&id))?;
                 let deadline = reply_deadline(&params.mode);
                 self.abort_pending(&params.session_id).await;
                 self.apply_interaction_feedback(&params.session_id)
@@ -474,6 +486,11 @@ impl Server {
                         .update_context(&params.session_id, context)
                         .map_err(server_error(&id))?;
                 }
+                self.engine
+                    .lock()
+                    .await
+                    .update_skills(&params.session_id, params.skills)
+                    .map_err(server_error(&id))?;
                 let (generation, working) = {
                     let mut engine = self.engine.lock().await;
                     let generation = engine
@@ -877,6 +894,8 @@ async fn print_mock_session() -> Result<()> {
         hints: vec![],
         call_hierarchy: None,
         context_policy: Default::default(),
+        project_signals: Default::default(),
+        skills: vec![],
     };
     let start = engine.start(params).await?;
     let patch = engine
@@ -886,6 +905,13 @@ async fn print_mock_session() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&start)?);
     println!("{}", serde_json::to_string_pretty(&patch)?);
 
+    Ok(())
+}
+
+fn print_project_profile(root: &std::path::Path) -> Result<()> {
+    let profile = loopbiotic_context::project::ProjectProfiler
+        .inspect(root, &loopbiotic_protocol::ProjectSignals::default());
+    println!("{}", serde_json::to_string_pretty(&profile)?);
     Ok(())
 }
 
@@ -967,6 +993,7 @@ fn print_help() -> Result<()> {
     eprintln!("loopbioticd schema card");
     eprintln!("loopbioticd dev mock-session");
     eprintln!("loopbioticd dev stdio-agent");
+    eprintln!("loopbioticd dev project-profile [ROOT]");
     eprintln!("loopbioticd dev token-report [--fixtures DIR] [--json FILE] [--max-turns N]");
     eprintln!("loopbioticd dev token-report --render FILE");
     eprintln!("loopbioticd dev token-report --check BASELINE CURRENT");

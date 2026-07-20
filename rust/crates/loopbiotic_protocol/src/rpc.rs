@@ -128,6 +128,8 @@ pub struct ReplyParams {
     pub mode: Mode,
     #[serde(default)]
     pub context: Option<ContextBundle>,
+    #[serde(default)]
+    pub skills: Vec<crate::InstructionSkill>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

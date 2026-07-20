@@ -189,6 +189,8 @@ async fn run_case(
         hints: vec![],
         call_hierarchy: None,
         context_policy: Default::default(),
+        project_signals: Default::default(),
+        skills: vec![],
     };
 
     let started = Instant::now();

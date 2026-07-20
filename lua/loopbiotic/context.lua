@@ -101,6 +101,49 @@ function M.capture(preferred_buf, opts)
   }
 end
 
+function M.project_signals(buf, cwd)
+  if not vim.lsp then
+    return { lsp_clients = {} }
+  end
+  local clients = vim.lsp.get_clients and vim.lsp.get_clients({ bufnr = buf })
+    or vim.lsp.get_active_clients({ bufnr = buf })
+  local capability_fields = {
+    call_hierarchy = "callHierarchyProvider",
+    declaration = "declarationProvider",
+    definition = "definitionProvider",
+    diagnostics = "diagnosticProvider",
+    implementation = "implementationProvider",
+    references = "referencesProvider",
+    type_definition = "typeDefinitionProvider",
+    workspace_symbols = "workspaceSymbolProvider",
+  }
+  local signals = {}
+  for _, client in ipairs(clients or {}) do
+    if #signals >= 16 then
+      break
+    end
+    local capabilities = {}
+    for label, field in pairs(capability_fields) do
+      if (client.server_capabilities or {})[field] then
+        table.insert(capabilities, label)
+      end
+    end
+    table.sort(capabilities)
+    local root = client.config and client.config.root_dir or nil
+    root = type(root) == "string" and util.relative_path(cwd, root) or nil
+    table.insert(signals, {
+      name = tostring(client.name or client.id or "lsp"),
+      version = client.server_info and client.server_info.version or nil,
+      root = root,
+      capabilities = capabilities,
+    })
+  end
+  table.sort(signals, function(left, right)
+    return left.name < right.name
+  end)
+  return { lsp_clients = signals }
+end
+
 function M.lsp_hints_async(buf, cursor, cwd, callback)
   local lsp_options = config.values.context.lsp or {}
   if lsp_options.enabled == false or not vim.lsp then

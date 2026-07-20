@@ -254,7 +254,9 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
             "known_observations": req.session.known_observations,
             "mode": req.session.mode,
             "n": req.session.card_count,
-            "last": req.session.last_summary
+            "last": req.session.last_summary,
+            "project": req.session.project,
+            "skills": req.session.skills
         },
         "a": action_value(&req.action),
         "ctx": crate::backend_context(&req.context),

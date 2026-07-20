@@ -701,6 +701,7 @@ fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
                 "id": req.session.id,
                 "mode": req.session.mode,
                 "p": req.session.prompt,
+                "project": req.session.project,
             }),
         ),
         // Turn-kind-stable: constant across all turns of the same kind
@@ -740,6 +741,7 @@ fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
     // stays byte-stable as they grow.
     fields.push(("completed_steps", json!(req.session.completed_steps)));
     fields.push(("known_observations", json!(req.session.known_observations)));
+    fields.push(("skills", json!(req.session.skills)));
 
     // Volatile: changes every turn, so it must trail everything cacheable.
     fields.push((

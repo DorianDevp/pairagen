@@ -384,6 +384,8 @@ name = "loopbiotic_context"
 version = "0.3.2"
 dependencies = [
  "loopbiotic_protocol",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -397,6 +399,7 @@ dependencies = [
  "loopbiotic_patch",
  "loopbiotic_protocol",
  "serde_json",
+ "tempfile",
  "tokio",
  "uuid",
 ]
@@ -413,6 +416,7 @@ dependencies = [
 name = "loopbiotic_protocol"
 version = "0.3.2"
 dependencies = [
+ "anyhow",
  "serde",
  "serde_json",
 ]
@@ -423,6 +427,7 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "loopbiotic_backends",
+ "loopbiotic_context",
  "loopbiotic_harness",
  "loopbiotic_patch",
  "loopbiotic_protocol",

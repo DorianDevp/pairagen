@@ -10,3 +10,7 @@ publish = false
 
 [dependencies]
 loopbiotic_protocol = { path = "../loopbiotic_protocol" }
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

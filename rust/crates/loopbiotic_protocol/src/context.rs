@@ -294,6 +294,10 @@ pub struct StartSessionParams {
     pub call_hierarchy: Option<CallHierarchy>,
     #[serde(default)]
     pub context_policy: ContextPolicy,
+    #[serde(default)]
+    pub project_signals: crate::ProjectSignals,
+    #[serde(default)]
+    pub skills: Vec<crate::InstructionSkill>,
 }
 
 impl ContextBundle {

@@ -757,6 +757,25 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
     } else {
         "Source context is unchanged from the preceding turn in this Loopbiotic thread. Reuse those exact diagnostics, buffer, and ranked project context.".into()
     };
+    let project_profile =
+        serde_json::to_string(&req.session.project).unwrap_or_else(|_| "null".into());
+    let instruction_skills = if req.session.skills.is_empty() {
+        "none".into()
+    } else {
+        req.session
+            .skills
+            .iter()
+            .map(|skill| {
+                format!(
+                    "--- {} ({}) ---\n{}",
+                    skill.path.display(),
+                    skill.provenance,
+                    skill.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
     // Block order is byte-order for the provider prompt cache: the static
     // header first, then the turn-kind-stable contract and rules, then the
@@ -773,6 +792,9 @@ Rules:
 
 Session prompt: {prompt}
 Mode: {mode}
+Rust-adapter project profile: {project_profile}
+Active instruction skills:
+{instruction_skills}
 
 Required card kind: {expected_kind}. Return that exact kind.
 Completed local steps: {completed_steps}
@@ -803,6 +825,8 @@ Immediate directive (highest priority for this response): {immediate_directive}"
         output_contract = output_contract,
         last = req.session.last_summary.as_deref().unwrap_or("none"),
         source_context = source_context,
+        project_profile = project_profile,
+        instruction_skills = instruction_skills,
         immediate_directive = immediate_directive,
     )
 }
@@ -872,6 +896,8 @@ mod tests {
                 card_count: 0,
                 last_card: None,
                 last_summary: None,
+                project: None,
+                skills: vec![],
             },
             action: BackendAction::Start,
             context: loopbiotic_protocol::ContextBundle {

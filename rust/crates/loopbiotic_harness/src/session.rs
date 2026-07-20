@@ -2,8 +2,9 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use loopbiotic_protocol::{
-    Card, ContextBundle, ContextPolicy, Cursor, GoalStatus, Location, Mode, ObservationProgress,
-    PatchCard, PatchId, Selection, StartSessionParams, TokenUsage,
+    Card, ContextBundle, ContextPolicy, Cursor, GoalStatus, InstructionSkill, Location, Mode,
+    ObservationProgress, PatchCard, PatchId, ProjectProfile, ProjectSignals, Selection,
+    StartSessionParams, TokenUsage,
 };
 use uuid::Uuid;
 
@@ -47,6 +48,9 @@ pub struct Session {
     pub context: ContextBundle,
     pub token_usage: TokenUsage,
     pub context_policy: ContextPolicy,
+    pub project: Option<ProjectProfile>,
+    pub project_signals: ProjectSignals,
+    pub skills: Vec<InstructionSkill>,
 }
 
 impl Session {
@@ -81,6 +85,9 @@ impl Session {
             context,
             token_usage: TokenUsage::default(),
             context_policy: params.context_policy,
+            project: None,
+            project_signals: params.project_signals,
+            skills: params.skills,
         }
     }
 

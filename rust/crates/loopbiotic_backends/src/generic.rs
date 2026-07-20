@@ -130,6 +130,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
                 "id": req.session.id,
                 "mode": req.session.mode,
                 "p": req.session.prompt,
+                "project": req.session.project,
             }),
         ),
         // Turn-kind-stable: constant across all turns of the same kind.
@@ -149,6 +150,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
         // Append-only within a session.
         ("completed_steps", json!(req.session.completed_steps)),
         ("known_observations", json!(req.session.known_observations)),
+        ("skills", json!(req.session.skills)),
         // Volatile: changes every turn.
         (
             "interaction_feedback",
@@ -411,6 +413,38 @@ mod tests {
         assert!(goal.contains("one small, compilable hunk"));
         assert!(goal.contains("plan {remaining:[{file,summary}],complete}"));
         assert!(goal.contains("next planned coherent step"));
+    }
+
+    #[test]
+    fn generic_prompt_includes_project_facts_and_selected_instruction_content() {
+        let mut req = crate::test_request();
+        req.session.project = Some(loopbiotic_protocol::ProjectProfile {
+            schema_version: 1,
+            kind: "polyglot_monorepo".into(),
+            adapters: vec!["angular".into()],
+            technologies: vec![loopbiotic_protocol::ProjectTechnology {
+                name: "Angular".into(),
+                version: Some("22.0.6".into()),
+                role: "web_framework".into(),
+                source: "deno.lock".into(),
+            }],
+            areas: vec![],
+            commands: vec![],
+            tools: vec![],
+        });
+        req.session.skills = vec![loopbiotic_protocol::InstructionSkill {
+            name: "AGENTS.md".into(),
+            path: "AGENTS.md".into(),
+            content: "Preserve the public API.".into(),
+            provenance: "config".into(),
+            auto: true,
+            sha256: "abc".into(),
+        }];
+
+        let prompt = generic_prompt(&req);
+        assert!(prompt.contains("polyglot_monorepo"));
+        assert!(prompt.contains("22.0.6"));
+        assert!(prompt.contains("Preserve the public API."));
     }
 
     #[test]

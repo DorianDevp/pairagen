@@ -12,8 +12,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use loopbiotic_protocol::{
-    Action, BackendInfo, Card, CardKind, ContextBundle, ErrorCard, MAX_CHANGED_LINES,
-    MAX_HUNKS_PER_PATCH, MAX_PATCH_FILES, Mode, TokenUsage,
+    Action, BackendInfo, Card, CardKind, ContextBundle, ErrorCard, InstructionSkill,
+    MAX_CHANGED_LINES, MAX_HUNKS_PER_PATCH, MAX_PATCH_FILES, Mode, ProjectProfile, TokenUsage,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -294,6 +294,10 @@ pub struct SessionSnapshot {
     pub card_count: usize,
     pub last_card: Option<Card>,
     pub last_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<InstructionSkill>,
 }
 
 /// Length of the shared byte prefix of two prompts — the part a provider
@@ -319,6 +323,8 @@ pub(crate) fn test_request() -> BackendRequest {
             card_count: 0,
             last_card: None,
             last_summary: None,
+            project: None,
+            skills: vec![],
         },
         action: BackendAction::Start,
         context: ContextBundle {
