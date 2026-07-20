@@ -3,6 +3,7 @@ pub mod codex_app;
 pub mod generic;
 pub mod mock;
 pub mod ollama;
+pub mod openai_compatible;
 pub mod stdio_agent;
 pub mod stream;
 pub(crate) mod support;
@@ -23,6 +24,7 @@ pub use codex_app::*;
 pub use generic::*;
 pub use mock::*;
 pub use ollama::*;
+pub use openai_compatible::*;
 pub use stdio_agent::*;
 pub use stream::*;
 
