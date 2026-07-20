@@ -249,6 +249,11 @@ when known. Warnings remain proportional to their actual consequence.
   visible, and opens PromptWindow for an optional explanation.
 - Widget exploration is instant and local whenever data is already present.
 - Flow loading is incremental, batched, and explicit about partial data.
+- Local-model reasoning, streaming, and bounded reads use short concrete phase
+  messages. Private reasoning and raw tool payloads stay hidden; the user sees
+  what evidence operation is happening, not a theatrical transcript.
+- An expired provider response chain recovers once with a calm, explicit
+  context-rebuild message instead of silently losing the conversation.
 - Wrap, restore, source navigation, context selection, and context removal do not
   spend a model turn.
 - Stop is immediate and avoids a ceremonial completion card.

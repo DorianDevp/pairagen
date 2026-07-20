@@ -173,6 +173,10 @@ then relocate after session state catches up.
 Progress, goal, location, cost, and context metadata are subordinate to the
 current answer or Widget. Labels use compact scan columns such as `Goal`, `Now`,
 `At`, `Turn`, `Budget`, and `Context`. AgentWindow should not become a dashboard.
+Local reasoning, response streaming, bounded workspace reads, and response-chain
+recovery update that same processing View. They do not create a log surface or
+expose private reasoning text; read progress names the concrete local operation
+without rendering file contents before the validated card.
 
 ## Diff and creation review
 

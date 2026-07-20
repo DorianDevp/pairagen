@@ -164,6 +164,28 @@ the current selection and updates the harness before the turn begins. Stop and
 Reset clear the catalog, selection, and ProjectProfile. A different workspace
 cannot replace this metadata inside an active session.
 
+The OpenAI-compatible local backend may supplement submitted context through a
+Rust-owned evidence loop. It uses provider-stored response chains per session
+phase, resolves every previous function call before appending a Reply, and
+rebuilds the full bounded context once if the provider has expired the chain.
+Discovery turns and explicit Goals may use at most the configured number of
+workspace reads; ordinary Patch turns cannot read beyond the already submitted
+context. The only host tools are workspace-relative UTF-8 file reads, literal
+text search, and one-level directory listing. Reads, results, line counts, file
+counts, file sizes, and directory entries are bounded; dependency and build
+trees are excluded from search. Canonical-path checks reject absolute paths,
+parent traversal, and symlink escapes.
+
+These tools are not Skills and do not use MCP. They cannot execute commands,
+contact the network, edit source, or bypass Patch Review. Tool results remain
+untrusted project evidence. The backend executes at most one read from each
+provider response and resolves any extra parallel calls as rejected, even when
+the provider ignores its serial-tool setting. Reasoning is configurable but
+private: AgentWindow receives only a concise phase transition, never reasoning
+text. Streaming provisional card content and tool activity update AgentWindow
+in place. Cancellation closes the active response stream, and its late data
+cannot be saved as session state.
+
 Submitting a Reply through PromptWindow carries that Reply Window's selected
 mode through `session/reply`. In `fix` or `propose`, Patch is required;
 explanation, investigation, and review modes keep their typed response contracts.
@@ -415,6 +437,9 @@ validation remain identical; the fallback cannot weaken the transaction.
   and selection never run a model or grant execution.
 - Skill selection persists only for the active session and remains visible in
   PromptWindow before each submit.
+- OpenAI-compatible local response chains, reasoning, streaming, and bounded
+  read tools remain backend-owned; reads are workspace-confined and cannot
+  mutate source or originate intent.
 - Missing or unsupported modes are rejected at configuration/RPC boundaries;
   they never fall back to an inferred or hidden contract.
 

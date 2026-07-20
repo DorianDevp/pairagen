@@ -47,7 +47,8 @@ Implemented capabilities include:
 - generic CLI backend
 - persistent Claude CLI backend (one stream-json process per session)
 - Ollama HTTP backend for local models (model stays loaded, JSON-forced output)
-- OpenAI-compatible HTTP backend for LM Studio and controlled local benchmarks
+- stateful OpenAI-compatible Responses backend for LM Studio, with SSE progress,
+  optional reasoning, and bounded read-only workspace tools
 - structured agent denial (`deny` op) rendered as a distinct card
 - deterministic token-budgeted project context with LSP hints and dependency ranking
 
@@ -256,10 +257,18 @@ PromptWindow footer and persist until Stop or Reset.
 On submit, Loopbiotic snapshots each selected file as workspace-relative inert
 text with provenance and a SHA-256 content hash. Selection never executes the
 file, grants tools, or contacts the backend by itself. Protocol limits bound the
-number, individual size, and combined size of instruction files. Today exact
-project versions ground the model; versioned framework knowledge packs and
-native compile probes—for example Angular 22 and TypeScript 6 guidance for an
-older local model—remain follow-up work.
+number, individual size, and combined size of instruction files. Exact project
+versions ground the model; versioned framework knowledge packs and native
+compile probes—for example Angular 22 and TypeScript 6 guidance for an older
+local model—remain follow-up work.
+
+The LM Studio backend adds a separate Rust-owned evidence loop for discovery and
+explicit Goal turns. It can perform bounded workspace-relative file reads,
+literal search, and directory listing without MCP, command execution, network
+access, or source mutation. Ordinary Patch turns receive no read tools. Provider
+response IDs keep Replies stateful, while an expired chain is rebuilt once from
+the current bounded session context. Reasoning text remains private; AgentWindow
+shows only concise reasoning, streaming, read, and recovery phases.
 
 ## Flow
 
@@ -563,3 +572,24 @@ The generic backend sends a strict JSON card contract to stdin. It accepts a raw
 ```
 
 `loopbiotic_progress.message` is user-visible feedback. It must be a concise status summary, never raw model reasoning. Claude and local agents that do not emit this protocol still show lifecycle feedback from Loopbiotic while their process is running.
+
+## LM Studio / OpenAI-compatible Responses Backend
+
+This backend requires a server that implements the OpenAI-compatible Responses
+API with streaming and stored responses. LM Studio is the tested target:
+
+```bash
+LOOPBIOTIC_BACKEND=lm_studio \
+LOOPBIOTIC_OPENAI_MODEL=qwen/qwen3.6-35b-a3b \
+LOOPBIOTIC_OPENAI_BASE_URL=http://127.0.0.1:1234/v1 \
+loopbioticd --stdio
+```
+
+`LOOPBIOTIC_OPENAI_MAX_TOKENS` defaults to `4096`.
+`LOOPBIOTIC_OPENAI_TOOLS` defaults to `true`; read tools are still restricted to
+discovery and explicit Goal turns. `LOOPBIOTIC_OPENAI_MAX_TOOL_CALLS` defaults
+to `2` and is capped at `4`. `LOOPBIOTIC_OPENAI_REASONING_EFFORT` accepts
+`none`, `minimal`, `low`, `medium`, `high`, or `xhigh` and defaults to `none`,
+because some small models spend their entire output budget on hidden reasoning.
+`LOOPBIOTIC_OPENAI_API_KEY` is optional. The shared
+`LOOPBIOTIC_TURN_TIMEOUT_SECS` deadline and real turn cancellation also apply.

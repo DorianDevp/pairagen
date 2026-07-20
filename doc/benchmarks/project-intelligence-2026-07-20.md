@@ -135,10 +135,53 @@ still necessary for reliable `input.required()` syntax.
 The malformed-diff class did not recur with typed transport: every Patch Qwen
 produced was rendered and accepted by the shared Rust path. One `profile`
 attempt exhausted structured-output retries and became an Error card, so output
-recovery is not solved completely. Nor are the backends fully equal. The local
-adapter still lacks streaming progress, persistent model threads, reasoning
-controls, and bounded read-only tools. Those are product-runtime gaps and must
-not be attributed to the model in future comparisons.
+recovery is not solved completely. At this point the local adapter still lacked
+streaming progress, persistent model threads, reasoning controls, and bounded
+read-only tools. The runtime follow-up below closes those adapter gaps rather
+than attributing them to model intelligence.
+
+## Stateful runtime and bounded-tool follow-up
+
+The LM Studio adapter now uses the streaming Responses API. Rust owns stored
+response IDs, function-call resolution, card validation, cancellation, compact
+progress, and three workspace-confined read tools. The model receives no shell,
+write, network, or MCP capability. Search and reads are deterministically
+bounded, and ordinary non-goal Patch turns receive no tools.
+
+A complex full-card function schema caused LM Studio's llama.cpp tool parser to
+split one terminal call into four output items. In a single Angular case it
+still passed 5/5, but consumed 12,360 tokens and 92.4 seconds. Replacing only the
+transport schema with a compact `{card: object}` envelope while retaining the
+authoritative Rust card parser and typed-patch validator produced 5/5 in the
+latest smoke run with 2,450 tokens in 19.2 seconds. This is a transport result,
+not evidence that validation should be weakened.
+
+The new `tool-read` fixture disables ranked context and asks for an exact value
+held outside the active buffer. With Qwen3.6 35B-A3B, reasoning disabled, and
+all other inputs fixed, the single-run isolation was:
+
+| Backend tools | Score | Accepted | Tokens | Time |
+|---|---:|---:|---:|---:|
+| disabled | 1/4 | 100% | 1,811 | 11.42 s |
+| enabled | 4/4 | 100% | 4,294 | 20.15 s |
+
+The extra evidence loop therefore converted an impossible lookup into a fully
+grounded Finding, at the expected cost of one search continuation: +2,483
+tokens and +8.73 seconds in this sample. It did not change the source-mutation
+boundary.
+
+A four-case `after` smoke run on the completed Responses backend produced 75.0%
+pass, 94.4% content, 100.0% accepted card kinds, 3,109 average tokens, and 20.65
+seconds average latency. Angular, React-boundary, and tool-read cases passed;
+stack-map missed one editor-contract rubric item but returned a valid Finding.
+This one-run smoke checks regression shape and must not replace the repeated A/B
+sample above.
+
+Reasoning remains configurable, but `none` is the Qwen default. In a diagnostic
+`minimal` run the provider completed after hidden reasoning without emitting a
+card or read call. The adapter now reports incomplete-provider reasons when
+available and never exposes reasoning text. Enabling reasoning should therefore
+be benchmarked per model rather than assumed to improve a weaker model.
 
 ## Reproduction
 

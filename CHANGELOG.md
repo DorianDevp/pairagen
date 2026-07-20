@@ -8,6 +8,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Empty or malformed model-preference state now supplies both patch and
+  discovery model maps instead of crashing backend setup.
 - OpenAI-compatible local models now return the same typed patch hunks as
   Codex. Rust renders and validates the unified diff, so weak models no longer
   have to reproduce fragile diff syntax themselves.
@@ -78,6 +80,11 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The LM Studio/OpenAI-compatible backend now uses streaming Responses with
+  provider-stored session chains, optional private reasoning, real cancellation,
+  and Rust-owned bounded workspace read/search/list tools. Tools are available
+  only for discovery and explicit Goals, never execute commands or mutate
+  source, and remain independent of MCP and instruction Skills.
 - A controlled real-model Project Intelligence A/B runner now compares the
   feature-disabled baseline, marker-derived ProjectProfile, and ProjectProfile
   plus selected Skills. It includes Angular 22, TypeScript 6, React, Nx, and
