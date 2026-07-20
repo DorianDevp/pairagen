@@ -77,6 +77,52 @@ pub(crate) fn structured_prompt(req: &BackendRequest) -> String {
     prompt_with_contract(req, STRUCTURED_API_CONTRACT)
 }
 
+/// Compact append-only turn data for a provider-managed response chain. The
+/// first response already owns the static API contract, original prompt, and
+/// project profile; continuations transmit only state that can change.
+pub(crate) fn structured_continuation_prompt(
+    req: &BackendRequest,
+    include_context: bool,
+) -> String {
+    let fields = vec![
+        (
+            "turn",
+            json!({
+                "mode": req.session.mode,
+                "limits": {
+                    "one": req.card_contract.one_card_only,
+                    "max": req.card_contract.max_body_chars,
+                    "patch_files": req.card_contract.max_patch_files,
+                    "hunks_per_patch": req.card_contract.max_hunks_per_patch,
+                    "changed_lines": req.card_contract.max_changed_lines,
+                    "goal_completion": req.card_contract.allow_goal_completion,
+                    "conversation_only": req.card_contract.conversation_only,
+                    "expected": req.card_contract.expected_kind,
+                },
+                "action": action_value(&req.action),
+                "last": req.session.last_summary,
+                "card_count": req.session.card_count,
+            }),
+        ),
+        ("completed_steps", json!(req.session.completed_steps)),
+        ("known_observations", json!(req.session.known_observations)),
+        ("skills", json!(req.session.skills)),
+        (
+            "interaction_feedback",
+            json!(req.session.interaction_feedback),
+        ),
+        (
+            "ctx",
+            if include_context {
+                crate::backend_context(&req.context)
+            } else {
+                json!("unchanged; reuse the preceding response-chain context")
+            },
+        ),
+    ];
+    crate::support::ordered_json_object(&fields)
+}
+
 fn prompt_with_contract(req: &BackendRequest, api_contract: &str) -> String {
     let mut rules = vec![
         json!(

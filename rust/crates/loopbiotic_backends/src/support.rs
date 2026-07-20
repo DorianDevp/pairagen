@@ -93,26 +93,9 @@ pub(crate) fn turn_phase(req: &BackendRequest) -> Phase {
 /// re-sending an unchanged buffer to a persistent process.
 pub(crate) fn context_fingerprint(req: &BackendRequest) -> u64 {
     let mut hasher = DefaultHasher::new();
-    req.context.file.hash(&mut hasher);
-    req.context.cursor.line.hash(&mut hasher);
-    req.context.cursor.column.hash(&mut hasher);
-    req.context.buffer_start_line.hash(&mut hasher);
-    req.context.buffer_text.hash(&mut hasher);
-    for diagnostic in &req.context.diagnostics {
-        diagnostic.file.hash(&mut hasher);
-        diagnostic.line.hash(&mut hasher);
-        diagnostic.message.hash(&mut hasher);
-    }
-    for artifact in &req.context.artifacts {
-        artifact.file.hash(&mut hasher);
-        artifact.start_line.hash(&mut hasher);
-        artifact.text.hash(&mut hasher);
-    }
-    if let Some(call_hierarchy) = &req.context.call_hierarchy {
-        serde_json::to_string(call_hierarchy)
-            .unwrap_or_default()
-            .hash(&mut hasher);
-    }
+    serde_json::to_string(&crate::backend_context(&req.context))
+        .unwrap_or_default()
+        .hash(&mut hasher);
     hasher.finish()
 }
 
@@ -273,6 +256,19 @@ mod tests {
             partial: false,
             truncated: false,
             unavailable: true,
+        });
+
+        assert_ne!(context_fingerprint(&req), without);
+    }
+
+    #[test]
+    fn selection_participates_in_context_fingerprinting() {
+        let mut req = crate::test_request();
+        let without = context_fingerprint(&req);
+        req.context.selection = Some(loopbiotic_protocol::Selection {
+            start: loopbiotic_protocol::Cursor { line: 1, column: 1 },
+            end: loopbiotic_protocol::Cursor { line: 1, column: 3 },
+            text: "fn".into(),
         });
 
         assert_ne!(context_fingerprint(&req), without);
