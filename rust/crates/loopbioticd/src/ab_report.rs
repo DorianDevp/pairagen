@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use loopbiotic_harness::Engine;
-use loopbiotic_protocol::{Card, Cursor, Diagnostic, InstructionSkill, Mode, StartSessionParams};
+use loopbiotic_protocol::{
+    Card, ContextPolicy, Cursor, Diagnostic, InstructionSkill, Mode, StartSessionParams,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -62,6 +64,8 @@ struct CaseSpec {
     diagnostics: Vec<Diagnostic>,
     #[serde(default)]
     skills: Vec<PathBuf>,
+    #[serde(default)]
+    context_policy: ContextPolicy,
     rubric: Vec<RubricItem>,
 }
 
@@ -232,7 +236,7 @@ async fn run_case(
         diagnostics: spec.diagnostics,
         hints: vec![],
         call_hierarchy: None,
-        context_policy: Default::default(),
+        context_policy: spec.context_policy,
         project_signals: Default::default(),
         skills,
     };
