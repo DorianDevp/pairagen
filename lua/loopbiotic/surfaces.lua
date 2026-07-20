@@ -115,6 +115,57 @@ function M.open_prompt(spec)
   return buf, win
 end
 
+function M.open_prompt_picker(lines, spec)
+  spec = spec or {}
+  M.close_prompt_picker({ focus_prompt = false })
+  local prompt = prompt_state()
+  if not M.prompt_open() or not prompt.spec then
+    return nil, nil
+  end
+
+  local maximum = tonumber((config.values.skills or {}).picker_height) or 10
+  local prompt_row = tonumber(prompt.spec.row) or 0
+  local available_above = math.max(math.floor(prompt_row) - 2, 1)
+  local height = math.max(math.min(#lines, maximum, available_above), 1)
+  local width = math.max(1, math.min(prompt.spec.outer_width, ui.viewport().width - 2))
+  local row = math.max(prompt_row - height - 2, 0)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    row = row,
+    col = prompt.spec.col,
+    width = width,
+    height = height,
+    style = "minimal",
+    border = config.values.prompt.border,
+    title = spec.title,
+    title_pos = "left",
+    footer = spec.footer,
+    footer_pos = "right",
+    zindex = (config.values.prompt.zindex or 200) + 2,
+  })
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = "loopbiotic-skills"
+  configure_content_window(win)
+  prompt.picker_buf = buf
+  prompt.picker_win = win
+  return buf, win
+end
+
+function M.close_prompt_picker(opts)
+  opts = opts or {}
+  local prompt = prompt_state()
+  close_handle(prompt.picker_win)
+  prompt.picker_win = nil
+  prompt.picker_buf = nil
+  if opts.focus_prompt and valid_win(prompt.win) then
+    ui.focus(prompt.win)
+  end
+end
+
 function M.prompt_open()
   local prompt = prompt_state()
   return prompt.mode == "open" and valid_win(prompt.win) and valid_win(prompt.frame_win)
@@ -138,6 +189,7 @@ function M.relayout_prompt(spec)
   if not M.prompt_open() then
     return false
   end
+  M.close_prompt_picker({ focus_prompt = false })
   spec = spec or prompt.spec
   if not spec then
     return false
@@ -167,6 +219,8 @@ function M.close_prompt(opts)
   if focus_agent == nil then
     focus_agent = prompt.return_to_agent
   end
+
+  M.close_prompt_picker({ focus_prompt = false })
 
   close_handle(prompt.win)
   close_handle(prompt.frame_win)

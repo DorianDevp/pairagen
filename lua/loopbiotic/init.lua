@@ -215,7 +215,7 @@ local function send_session_start(params, request_id)
   end)
 end
 
-function M.submit_prompt(text, mode, source)
+function M.submit_prompt(text, mode, source, selected_skills)
   if not text or text == "" then
     return
   end
@@ -226,6 +226,8 @@ function M.submit_prompt(text, mode, source)
   local carried_graph = state.call_hierarchy
   if state.session_id then
     M.stop()
+    require("loopbiotic.skills").prepare((source and source.value.cwd) or vim.fn.getcwd())
+    require("loopbiotic.skills").activate(selected_skills)
     state.call_hierarchy = carried_graph
     for _, ref in ipairs(carried_context) do
       require("loopbiotic.widgets").select(ref)
@@ -259,7 +261,9 @@ function M.submit_prompt(text, mode, source)
   local request_id = thinking.start("Thinking", nil)
   state.workspace_hints = context.workspace_hints(text, params.cwd, captured.buf)
   params.hints = context.merge_hints(params.hints, state.workspace_hints)
+  params.project_signals = context.project_signals(captured.buf, params.cwd)
   require("loopbiotic.widgets").attach(params)
+  require("loopbiotic.skills").attach(params, selected_skills)
   send_session_start(params, request_id)
 end
 
@@ -293,7 +297,7 @@ local function send_session_reply(params, request_id, mode)
   end)
 end
 
-function M.submit_reply(text, mode)
+function M.submit_reply(text, mode, selected_skills)
   if not state.session_id then
     ui.notify("No active session", vim.log.levels.WARN)
 
@@ -320,6 +324,7 @@ function M.submit_reply(text, mode)
     text = text,
     mode = mode,
     context = require("loopbiotic.widgets").attach(context.session()),
+    skills = vim.deepcopy(selected_skills or require("loopbiotic.skills").snapshot()),
   }
   local request_id = thinking.start("Thinking", session_id)
   send_session_reply(params, request_id, mode)
@@ -370,6 +375,7 @@ function M.stop()
   state.card_flow_active = false
   state.session_mode = nil
   require("loopbiotic.widgets").clear()
+  require("loopbiotic.skills").reset()
   state.details_card = nil
   state.details_expanded = false
   state.cancelled_turn_id = nil

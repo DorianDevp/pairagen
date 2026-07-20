@@ -51,6 +51,9 @@
 ---@field turn_barrier boolean true while an interrupted backend turn is settling
 ---@field pending_widget_context table<string, table> visible context selected in AgentWindow Widgets
 ---@field creation table|nil validated pending new-file plan
+---@field skills_root string|nil workspace root for the session instruction catalog
+---@field instruction_skill_catalog table[] safe Markdown candidates
+---@field selected_instruction_skills table<string, boolean> session-scoped selection
 ---@field surfaces table authoritative PromptWindow and AgentWindow singleton state
 ---@field reset fun()
 
@@ -96,6 +99,9 @@ local defaults = {
   pending_widget_context = {},
   creation = vim.NIL,
   creation_context_win = vim.NIL,
+  skills_root = vim.NIL,
+  instruction_skill_catalog = {},
+  selected_instruction_skills = {},
   surfaces = {
     prompt = {
       mode = "closed",

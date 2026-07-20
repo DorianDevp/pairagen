@@ -39,6 +39,7 @@ end
 ---@field thinking { enabled: boolean, interval: integer }
 ---@field context table context capture limits, optimization policy, and LSP hint options
 ---@field flow table static LSP call hierarchy limits and responsive layout
+---@field skills { autoload: string[], discover_root_markdown: boolean, max_file_bytes: integer, picker_height: integer }
 ---@field navigation { open: "current"|"tab"|"split"|"vsplit", annotate: boolean }
 ---@field diff { layout: string, apply_to_buffer: boolean, max_changed_lines: integer }
 
@@ -122,6 +123,8 @@ M.values = {
     models = "<C-l>",
     -- Turn-mode picker inside every PromptWindow.
     modes = "<C-k>",
+    -- Session-scoped Markdown instruction multiselect in PromptWindow.
+    skills = "<C-g>",
     -- Toggle the session-pinned Flow explorer from prompt and cards.
     flow = "F",
   },
@@ -184,6 +187,12 @@ M.values = {
     request_timeout_ms = 1200,
     submit_wait_ms = 160,
     render_batch_ms = 24,
+  },
+  skills = {
+    autoload = { "AGENTS.md" },
+    discover_root_markdown = true,
+    max_file_bytes = 65536,
+    picker_height = 10,
   },
   navigation = {
     open = "current",

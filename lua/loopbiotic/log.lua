@@ -6,6 +6,7 @@ local sensitive_keys = {
   buffer_text = true,
   candidate_card = true,
   claim = true,
+  content = true,
   detail = true,
   diff = true,
   explanation = true,

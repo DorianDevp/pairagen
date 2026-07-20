@@ -23,6 +23,30 @@ local mode_labels = {
   propose = "Propose — propose a reviewed patch",
 }
 
+local function shortcut_label(key)
+  if type(key) ~= "string" or key == "" then
+    return nil
+  end
+  return key:gsub("<[Cc]%-([^>]+)>", "Ctrl-%1"):gsub("<[Mm]%-([^>]+)>", "Alt-%1")
+end
+
+local function action_footer(submit_label)
+  local actions = {}
+  local function add(key, label)
+    key = shortcut_label(key)
+    if key then
+      table.insert(actions, key .. " " .. label)
+    end
+  end
+  add(config.values.keymaps.skills, "skills")
+  add(config.values.keymaps.modes, "mode")
+  add(config.values.keymaps.models, "model")
+  add("<C-s>", submit_label)
+  add("<Esc>", "normal")
+  add("q", "close")
+  return " " .. table.concat(actions, "  ") .. " "
+end
+
 function M.normalize_mode(mode)
   if config.valid_mode(mode) then
     return mode
@@ -61,14 +85,15 @@ function M.open(mode)
   open_mode = M.normalize_mode(mode or state.prompt_stash_mode or config.values.backend.mode)
   local source = require("loopbiotic.context").capture(nil, { skip_lsp = true })
   open_source = source
+  require("loopbiotic.skills").prepare(source.value.cwd)
 
   open_kind = "Prompt"
   M.open_for({
     title = M.title("Prompt", open_mode),
-    footer = " Ctrl-k mode  Ctrl-l model  Ctrl-s submit  Esc normal  q close ",
+    footer = action_footer("submit"),
     return_to_agent = state.session_id ~= nil,
-    submit = function(text, selected_mode)
-      require("loopbiotic").submit_prompt(text, selected_mode, open_source)
+    submit = function(text, selected_mode, selected_skills)
+      require("loopbiotic").submit_prompt(text, selected_mode, open_source, selected_skills)
     end,
   })
 
@@ -97,12 +122,13 @@ function M.reply(mode)
   open_source = nil
   open_graph = nil
   open_kind = "Reply"
+  require("loopbiotic.skills").prepare(state.skills_root or vim.fn.getcwd())
   M.open_for({
     title = M.title("Reply", open_mode),
-    footer = " Ctrl-k mode  Ctrl-l model  Ctrl-s send  Esc normal  q close ",
+    footer = action_footer("send"),
     return_to_agent = true,
-    submit = function(text, selected_mode)
-      require("loopbiotic").submit_reply(text, selected_mode)
+    submit = function(text, selected_mode, selected_skills)
+      require("loopbiotic").submit_reply(text, selected_mode, selected_skills)
     end,
   })
   M.prefill()
@@ -170,6 +196,10 @@ function M.refresh_footer()
     local context_summary = require("loopbiotic.widgets").summary()
     if context_summary then
       footer = " " .. context_summary .. " · Ctrl-x remove   " .. (footer or "")
+    end
+    local skill_summary = require("loopbiotic.skills").summary()
+    if skill_summary then
+      footer = " " .. skill_summary .. "   " .. (footer or "")
     end
 
     surfaces.update_prompt_frame({ footer = footer, footer_pos = "right" })
@@ -439,6 +469,17 @@ function M.bind(buf, submit)
     end, { buffer = buf, nowait = true, silent = true })
   end
 
+  local skills_key = config.values.keymaps.skills
+  if skills_key and skills_key ~= "" then
+    vim.keymap.set({ "i", "n" }, skills_key, function()
+      local return_to_insert = vim.fn.mode():match("^[iR]") ~= nil
+      if return_to_insert then
+        vim.cmd("stopinsert")
+      end
+      require("loopbiotic.skills").open_picker({ return_to_insert = return_to_insert })
+    end, { buffer = buf, nowait = true, silent = true })
+  end
+
   vim.keymap.set("n", "<CR>", function()
     M.submit(buf, submit)
   end, { buffer = buf, nowait = true, silent = true })
@@ -450,7 +491,6 @@ function M.bind(buf, submit)
   vim.keymap.set({ "i", "n" }, "<C-x>", function()
     M.remove_context()
   end, { buffer = buf, nowait = true, silent = true })
-
 end
 
 function M.remove_context()
@@ -475,6 +515,7 @@ end
 function M.submit(buf, submit)
   local text = M.text(buf)
   local selected_mode = open_mode
+  local selected_skills = require("loopbiotic.skills").snapshot()
 
   if text == "" then
     return
@@ -511,7 +552,7 @@ function M.submit(buf, submit)
       state.call_hierarchy = graph
     end
     M.close(true)
-    submit(text, selected_mode)
+    submit(text, selected_mode, selected_skills)
   end, function()
     return not source or source.lsp_pending ~= true
   end)
