@@ -250,13 +250,13 @@ function M.read_preferences()
   if vim.fn.filereadable(path) ~= 1 then
     local legacy_path = vim.fn.stdpath("state") .. "/pairagen/preferences.json"
     if vim.fn.filereadable(legacy_path) ~= 1 then
-      return { models = {} }
+      return { models = {}, discovery_models = {} }
     end
     path = legacy_path
   end
   local ok, value = pcall(vim.json.decode, table.concat(vim.fn.readfile(path), "\n"))
   if not ok or type(value) ~= "table" then
-    return { models = {} }
+    return { models = {}, discovery_models = {} }
   end
   value.models = type(value.models) == "table" and value.models or {}
   value.discovery_models = type(value.discovery_models) == "table" and value.discovery_models or {}

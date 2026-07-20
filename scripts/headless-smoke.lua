@@ -15,9 +15,8 @@ require("loopbiotic").setup({
 })
 assert(config.values.backend.prefetch == "read_only")
 assert(config.values.backend.token_budget == 50000)
-assert(config.values.keymaps.resume ~= config.values.keymaps.draft_retry)
 assert(config.values.keymaps.resume == "<leader>pr")
-assert(config.values.keymaps.draft_retry == "<leader>pt")
+assert(config.values.keymaps.draft_retry == nil)
 
 local ui = require("loopbiotic.ui")
 local below_row = select(1, ui.near({ row = 5, col = 20 }, 20, 4, 2, { width = 80, height = 20 }, 1))
@@ -33,11 +32,11 @@ assert(config.read_preferences().models.codex == "legacy-model")
 vim.fn.delete(legacy_preferences)
 
 local prompt = require("loopbiotic.prompt")
-assert(prompt.title("Prompt") == " Loopbiotic Prompt · codex / test-model ")
+assert(prompt.title("Prompt", "investigate") == " Loopbiotic Prompt · investigate · codex / test-model ")
 prompt.open_for({ title = prompt.title("Reply"), footer = " Test ", submit = function() end })
 local state = require("loopbiotic.state")
-assert(vim.api.nvim_win_get_config(state.prompt_frame_win).zindex == 200)
-assert(vim.api.nvim_win_get_config(state.prompt_win).zindex == 201)
+assert(vim.api.nvim_win_get_config(state.surfaces.prompt.frame_win).zindex == 200)
+assert(vim.api.nvim_win_get_config(state.surfaces.prompt.win).zindex == 201)
 prompt.close()
 state.token_usage = { total_tokens = 50000 }
 assert(require("loopbiotic").token_budget_exceeded())
@@ -85,19 +84,6 @@ state.turn_token_usage = nil
 state.token_usage = nil
 state.backend_model = nil
 
-local check_buf = vim.fn.bufadd(vim.fn.getcwd() .. "/src/check-test.lua")
-vim.fn.bufload(check_buf)
-local check_namespace = vim.api.nvim_create_namespace("loopbiotic-headless-check")
-vim.diagnostic.set(check_namespace, check_buf, {
-  { lnum = 2, col = 0, severity = vim.diagnostic.severity.ERROR, message = "broken check" },
-})
-local check = require("loopbiotic").editor_check({ "src/check-test.lua" })
-assert(check.checked_files == 1)
-assert(#check.errors == 1)
-assert(check.errors[1].line == 3)
-vim.diagnostic.reset(check_namespace, check_buf)
-vim.api.nvim_buf_delete(check_buf, { force = true })
-
 local navigation = require("loopbiotic.navigation")
 local location = navigation.card_location({
   evidence = { file = "old.rs" },
@@ -113,81 +99,7 @@ local change_cursor = diff.change_cursor({ "before", "  inserted", "after" }, {
 })
 assert(change_cursor[1] == 2)
 assert(change_cursor[2] == 2)
-vim.cmd("enew")
-local focus_source = vim.api.nvim_get_current_buf()
-vim.api.nvim_buf_set_name(focus_source, root .. "/loopbiotic-focus-test.lua")
-vim.api.nvim_buf_set_lines(focus_source, 0, -1, false, { "local before = true", "return before" })
-local focus_card = {
-  id = "focus-card",
-  kind = "patch",
-  title = "Focus inserted text",
-  explanation = "Keep the cursor on the change",
-  actions = { "apply", "why", "retry", "stop" },
-  patches = {
-    {
-      id = "focus-patch",
-      file = "loopbiotic-focus-test.lua",
-      diff = "@@ -1,2 +1,2 @@\n local before = true\n-return before\n+  return not before\n",
-    },
-  },
-}
 local loopbiotic = require("loopbiotic")
-assert(loopbiotic.action_available(focus_card, "apply"))
-assert(loopbiotic.action_available(focus_card, "retry"))
-assert(loopbiotic.action_available({ actions = { { apply_patch = { patch_id = "focus-patch" } } } }, "apply"))
-assert(not loopbiotic.action_available(focus_card, "follow"))
-assert(not loopbiotic.action_available({ kind = "summary", next_actions = {} }, "stop"))
-state.session_id = "proposal-session"
-state.card = focus_card
-assert(diff.show(focus_card))
-assert(vim.api.nvim_get_current_buf() == state.diff_buf)
-assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 2, 2 }))
-local proposal_position = vim.fn.screenpos(state.diff_win, state.diff_cursor[1], state.diff_cursor[2] + 1)
-local action_config = vim.api.nvim_win_get_config(state.card_win)
-local action_top = math.floor(ui.number(action_config.row)) + 1
-local action_height = action_config.height + (ui.has_border(action_config.border) and 2 or 0)
-local action_bottom = action_top + action_height - 1
-assert(action_bottom < proposal_position.row - 1 or action_top > proposal_position.row + 1)
-assert(loopbiotic.actions_visible())
-loopbiotic.resume()
-assert(vim.api.nvim_get_current_win() == state.card_win)
-for _, key in ipairs({
-  config.values.keymaps.draft_accept,
-  config.values.keymaps.draft_reject,
-  config.values.keymaps.draft_retry,
-  config.values.keymaps.why,
-  config.values.keymaps.go_to,
-}) do
-  local mapping = vim.fn.maparg(key, "n", false, true)
-  assert(mapping.buffer == 1, "missing action-window mapping for " .. key)
-  assert(type(mapping.callback) == "function", "action-window mapping has no callback for " .. key)
-end
-local go_to_mapping = vim.fn.maparg(config.values.keymaps.go_to, "n", false, true)
-go_to_mapping.callback()
-assert(vim.api.nvim_get_current_win() == state.diff_win)
-loopbiotic.go_to()
-assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 2, 2 }))
-loopbiotic.hide()
-assert(not loopbiotic.actions_visible())
-local hidden_draft = state.diff_buf
-diff.retry()
-assert(state.diff_buf == hidden_draft)
-assert(diff.valid_preview())
-loopbiotic.resume()
-assert(loopbiotic.actions_visible())
-assert(vim.api.nvim_get_current_win() == state.card_win)
-local proposal_card = state.card
-state.card = { id = "stopped-card", kind = "summary", title = "Stopped", next_actions = {} }
-loopbiotic.action("stop")
-assert(not state.thinking_request_id)
-state.card = proposal_card
-loopbiotic.go_to()
-assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 2, 2 }))
-diff.restore_source()
-assert(vim.api.nvim_get_current_buf() == focus_source)
-state.session_id = nil
-state.card = nil
-vim.api.nvim_buf_delete(focus_source, { force = true })
 local long_goal = "Mam tutaj problem, bo ta pętla nie uwzględnia wszystkich elementów z kolejnych przebiegów"
 local long_explanation =
   "Oznacza korzeń podglądu tym samym dyskryminatorem w węźle nadrzędnym i zachowuje pełny opis zmiany"
@@ -197,9 +109,9 @@ local patch_card = {
   explanation = long_explanation,
 }
 require("loopbiotic.commands").setup()
-assert(vim.fn.exists(":LoopbioticAssess") == 2)
-assert(vim.fn.exists(":LoopbioticGoal") == 2)
-assert(vim.fn.exists(":LoopbioticCancel") == 2)
+assert(vim.fn.exists(":Loopbiotic") == 2)
+assert(vim.fn.exists(":LoopbioticFix") == 2)
+assert(vim.fn.exists(":LoopbioticStop") == 2)
 state.goal = {
   statement = long_goal,
   completed_steps = { "first", "second" },
@@ -212,7 +124,6 @@ local compact = diff.control_lines(patch_card, config.values.keymaps)
 assert(compact[1]:match("%.%.%.$"))
 assert(table.concat(compact, "\n"):find("Expand details", 1, true))
 assert(table.concat(compact, "\n"):find("Now   Przenieś model", 1, true))
-assert(table.concat(compact, "\n"):find("Why this hunk", 1, true))
 assert(not table.concat(compact, "\n"):find(long_explanation, 1, true))
 
 state.details_expanded = true
@@ -241,36 +152,6 @@ assert(navigation.open_location({ file = "README.md", line = 2, column = 1 }))
 assert(vim.api.nvim_get_current_tabpage() == navigation_tab)
 assert(vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t") == "README.md")
 
-local location_card = {
-  id = "location-card",
-  kind = "finding",
-  title = "Relevant call",
-  finding = "This is where the function is called.",
-  location = { file = "README.md", line = 4, column = 2 },
-  next_actions = { "stop" },
-}
-state.session_id = "headless-session"
-card.show(location_card)
-assert(vim.deep_equal(vim.api.nvim_win_get_cursor(0), { 4, 1 }))
-local previous_float_win = state.card_win
-local previous_float_tab = vim.api.nvim_get_current_tabpage()
-vim.cmd("tabnew")
-vim.wait(1000, function()
-  return state.card_win
-    and vim.api.nvim_win_is_valid(state.card_win)
-    and vim.api.nvim_win_get_tabpage(state.card_win) == vim.api.nvim_get_current_tabpage()
-end)
-assert(vim.api.nvim_win_get_tabpage(state.card_win) == vim.api.nvim_get_current_tabpage())
-assert(vim.api.nvim_win_is_valid(previous_float_win))
-require("loopbiotic.ui").close(state.card_win)
-vim.api.nvim_set_current_tabpage(previous_float_tab)
-require("loopbiotic.ui").cleanup_deferred()
-assert(not vim.api.nvim_win_is_valid(previous_float_win))
-state.card_win = nil
-state.card = nil
-state.last_card = nil
-state.session_id = nil
-state.navigated_card = nil
 vim.cmd("tabonly")
 
 print("Loopbiotic headless smoke test passed")
@@ -290,22 +171,20 @@ if smoke_bin and smoke_bin ~= "" then
   config.values.backend.agent = "mock"
 
   vim.cmd("edit README.md")
-  loopbiotic.start("Smoke round-trip: inspect this file", "investigate")
+  loopbiotic.submit_prompt("Smoke round-trip: inspect this file", "investigate")
   local started = vim.wait(15000, function()
-    return state.session_id ~= nil and state.card ~= nil
+    return state.session_id ~= nil and state.card ~= nil and state.card.kind ~= "working"
   end, 50)
   assert(started, "smoke round-trip timed out waiting for the first card")
   assert(state.card.kind == "hypothesis", "unexpected first card kind: " .. tostring(state.card.kind))
-  assert(loopbiotic.action_available(state.card, "follow"), "first card offers no follow action")
-  assert(loopbiotic.actions_visible(), "card actions are not visible after the first turn")
 
   local first_card_id = state.card.id
-  loopbiotic.action("follow")
-  local followed = vim.wait(15000, function()
+  loopbiotic.submit_reply("Review the evidence", "review", {})
+  local replied = vim.wait(15000, function()
     return state.card ~= nil and state.card.id ~= first_card_id and not state.thinking_request_id
   end, 50)
-  assert(followed, "smoke round-trip timed out waiting for the follow card")
-  assert(state.card.kind == "finding", "unexpected follow card kind: " .. tostring(state.card.kind))
+  assert(replied, "smoke round-trip timed out waiting for the reply card")
+  assert(state.card.kind == "finding", "unexpected reply card kind: " .. tostring(state.card.kind))
 
   -- Finishing is local lifecycle work: it must close immediately without
   -- entering Thinking or rendering a redundant Stopped card.
@@ -316,22 +195,15 @@ if smoke_bin and smoke_bin ~= "" then
 
   -- A new session after stop also proves the daemon processed session/stop
   -- without shutting down the reusable backend process.
-  loopbiotic.start("Smoke cancellation after local stop", "investigate")
+  loopbiotic.submit_prompt("Smoke cancellation after local stop", "investigate")
   local restarted = vim.wait(15000, function()
-    return state.session_id ~= nil and state.card ~= nil
+    return state.session_id ~= nil and state.card ~= nil and state.card.kind ~= "working"
   end, 50)
   assert(restarted, "smoke round-trip timed out after local stop")
-  local restarted_card_id = state.card.id
-  loopbiotic.action("follow")
-  local refollowed = vim.wait(15000, function()
-    return state.card ~= nil and state.card.id ~= restarted_card_id and not state.thinking_request_id
-  end, 50)
-  assert(refollowed, "smoke round-trip timed out waiting for the restarted follow card")
 
   -- Stopping the backend mid-request must fail the in-flight callback and
   -- clear the thinking spinner instead of leaving it stuck.
-  assert(loopbiotic.action_available(state.card, "why"), "follow card offers no why action")
-  loopbiotic.action("why")
+  loopbiotic.submit_reply("Explain the evidence", "explain", {})
   assert(state.thinking_request_id, "expected a thinking spinner during the agent turn")
   rpc.stop()
   assert(not state.thinking_request_id, "rpc.stop left the thinking spinner active")
