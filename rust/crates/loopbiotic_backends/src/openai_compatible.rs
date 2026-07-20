@@ -2,22 +2,21 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{BackendInfo, Card, CardKind, TokenUsage};
+use loopbiotic_protocol::{BackendInfo, Card, TokenUsage};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::support::{error_card, optional_env, report_progress, turn_timeout_from_env};
 use crate::{
     BackendAdapter, BackendIdentity, BackendMetadata, BackendRequest, BackendResponse,
-    CardContract, ProgressReporter, enforce_card_contract, estimate_tokens,
+    ProgressReporter, enforce_card_contract, estimate_tokens,
 };
 
 const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(3);
-const AGENT_SCHEMA: &str = include_str!("../../../../schemas/loopbiotic-agent-op.schema.json");
 
 /// OpenAI-compatible local HTTP backend, primarily used with LM Studio. It
-/// keeps benchmark traffic inside the machine and constrains output with the
-/// same Loopbiotic agent-op schema as other stateless adapters.
+/// keeps benchmark traffic inside the machine and uses the same typed patch
+/// schema and Rust renderer as the Codex backend.
 pub struct OpenAiCompatibleBackend {
     base_url: String,
     model: String,
@@ -82,8 +81,8 @@ impl OpenAiCompatibleBackend {
         }
     }
 
-    async fn ask(&self, prompt: &str, contract: &CardContract) -> Result<CompletionResponse> {
-        let schema = response_schema(contract)?;
+    async fn ask(&self, prompt: &str, req: &BackendRequest) -> Result<CompletionResponse> {
+        let schema = crate::codex_app::schema::output_schema(req);
         let mut request = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
@@ -156,14 +155,14 @@ impl BackendAdapter for OpenAiCompatibleBackend {
         req: BackendRequest,
         progress: Option<ProgressReporter>,
     ) -> Result<BackendResponse> {
-        let prompt = crate::generic_prompt(&req);
+        let prompt = crate::generic::structured_prompt(&req);
         report_progress(
             progress.as_ref(),
             &req.session.id,
             "requesting",
             &format!("Sending the task to {}", self.model),
         );
-        let response = self.ask(&prompt, &req.card_contract).await?;
+        let response = self.ask(&prompt, &req).await?;
         let text = response
             .choices
             .into_iter()
@@ -171,7 +170,7 @@ impl BackendAdapter for OpenAiCompatibleBackend {
             .ok_or_else(|| anyhow!("OpenAI-compatible response has no choices"))?
             .message
             .content;
-        let card = crate::parse_card(&text)
+        let card = crate::codex_app::parse::parse_card(&text, &req.card_contract)
             .unwrap_or_else(|error| Self::error_card(format!("{error}\n\nRaw output:\n{text}")));
         let card = enforce_card_contract(card, &req.card_contract, &self.model, &text);
         let token_usage = response
@@ -225,54 +224,6 @@ fn model_names(value: &Value) -> Vec<String> {
         .collect()
 }
 
-fn response_schema(contract: &CardContract) -> Result<Value> {
-    let mut schema: Value = serde_json::from_str(AGENT_SCHEMA)?;
-    let Some(kind) = contract.expected_kind else {
-        return Ok(schema);
-    };
-    let (op, fields): (&str, &[&str]) = match kind {
-        CardKind::Hypothesis => (
-            "hypothesis",
-            &["op", "title", "claim", "evidence", "next", "flow_path"],
-        ),
-        CardKind::Finding => (
-            "finding",
-            &[
-                "op",
-                "title",
-                "finding",
-                "location",
-                "annotation",
-                "flow_path",
-            ],
-        ),
-        CardKind::Patch => (
-            "patch",
-            &[
-                "op",
-                "title",
-                "explanation",
-                "goal_complete",
-                "plan",
-                "patches",
-            ],
-        ),
-        CardKind::Choice => ("choice", &["op", "title", "question", "options"]),
-        CardKind::Deny => ("deny", &["op", "title", "reason", "location"]),
-        CardKind::OpenLocation => ("open_location", &["op", "reason", "location"]),
-        CardKind::Summary => ("summary", &["op", "title", "summary", "changed_files"]),
-        CardKind::Error => ("error", &["op", "title", "message"]),
-        CardKind::Working => return Ok(schema),
-    };
-    let properties = schema["properties"]
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("agent schema properties are not an object"))?;
-    properties.retain(|name, _| fields.contains(&name.as_str()));
-    properties.insert("op".into(), json!({"const": op}));
-    schema["required"] = json!(fields);
-    Ok(schema)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,20 +237,12 @@ mod tests {
     }
 
     #[test]
-    fn bundled_agent_schema_is_valid_json() {
-        let schema: Value = serde_json::from_str(AGENT_SCHEMA).unwrap();
-        assert_eq!(schema["title"], "LoopbioticAgentOp");
-    }
-
-    #[test]
-    fn narrows_schema_to_the_expected_card() {
-        let schema = response_schema(&CardContract {
-            expected_kind: Some(CardKind::Finding),
-            ..Default::default()
-        })
-        .unwrap();
-        assert_eq!(schema["properties"]["op"]["const"], "finding");
-        assert!(schema["properties"].get("patches").is_none());
-        assert_eq!(schema["required"].as_array().unwrap().len(), 6);
+    fn patch_schema_uses_the_codex_typed_hunk_contract() {
+        let mut req = crate::test_request();
+        req.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Patch);
+        let schema = crate::codex_app::schema::output_schema(&req);
+        let patch = &schema["properties"]["patches"]["items"];
+        assert!(patch["properties"]["diff"].is_null());
+        assert!(patch["properties"]["hunks"].is_object());
     }
 }

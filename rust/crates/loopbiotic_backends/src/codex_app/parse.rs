@@ -47,7 +47,7 @@ enum StructuredLineKind {
     Add,
 }
 
-pub(super) fn parse_card(output: &str, _contract: &crate::CardContract) -> Result<Card> {
+pub(crate) fn parse_card(output: &str, _contract: &crate::CardContract) -> Result<Card> {
     let value = serde_json::from_str::<Value>(output.trim())?;
     if value.get("op").and_then(Value::as_str) == Some("patch") {
         return parse_structured_patch(output);

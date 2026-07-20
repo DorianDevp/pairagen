@@ -181,18 +181,17 @@ pub async fn run(args: &[String]) -> Result<()> {
                 Box::new(variants.iter())
             };
             for variant in order {
-                let report = run_case(case, &model, *variant, run, backend.clone()).await;
-                reports.push(
-                    report
-                        .unwrap_or_else(|error| failed_report(&model, *variant, case, run, error)),
-                );
+                let report = run_case(case, &model, *variant, run, backend.clone())
+                    .await
+                    .unwrap_or_else(|error| failed_report(&model, *variant, case, run, error));
+                if let Some(path) = json_path.as_deref() {
+                    append_jsonl(path, std::slice::from_ref(&report))?;
+                }
+                reports.push(report);
             }
         }
     }
 
-    if let Some(path) = json_path {
-        append_jsonl(&path, &reports)?;
-    }
     print_rows(&reports);
     print_summary(&reports);
     Ok(())

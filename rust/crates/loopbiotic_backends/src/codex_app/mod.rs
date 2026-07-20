@@ -1,5 +1,5 @@
-mod parse;
-mod schema;
+pub(crate) mod parse;
+pub(crate) mod schema;
 mod transport;
 
 use std::process::Stdio;

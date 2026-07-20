@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::BackendRequest;
 
-pub(super) fn output_schema(req: &BackendRequest) -> Value {
+pub(crate) fn output_schema(req: &BackendRequest) -> Value {
     if req.card_contract.allow_goal_completion
         && req.card_contract.expected_kind == Some(loopbiotic_protocol::CardKind::Finding)
     {

@@ -8,6 +8,9 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- OpenAI-compatible local models now return the same typed patch hunks as
+  Codex. Rust renders and validates the unified diff, so weak models no longer
+  have to reproduce fragile diff syntax themselves.
 - The Codex model picker now reads the authenticated app-server `model/list`
   catalog and its default model. A discovery-only model is no longer presented
   as the entire set of selectable patch models.
@@ -52,6 +55,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The real-model A/B runner flushes each result to JSONL immediately, preserving
+  completed samples when a long local benchmark is interrupted.
 - Every Prompt and Reply carries a visible user-selected mode. Automatic intent
   routing was removed: fix/propose require Patch, explain/review require Finding,
   and investigate requires Hypothesis. Slash-prefixed text no longer overrides

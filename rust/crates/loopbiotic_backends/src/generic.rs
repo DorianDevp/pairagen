@@ -67,7 +67,17 @@ impl GenericCliBackend {
 /// volatile data: it opens the prompt and anchors the provider prompt cache.
 const GENERIC_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next,flow_path), finding(title,finding,location,annotation,flow_path), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). flow_path is an ordered array of node ids from ctx.call_hierarchy and is empty unless the answer presents a code path. choice.options items are {id,label,action} objects; action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|open|run_check|stop. Use deny when you cannot or should not proceed. When limits.conversation_only is true, never return patch or summary. The user-selected mode and limits.expected define the response contract; never infer or replace the mode. Goal turns are explicitly user-authorized. error is only for technical failures. limits.expected, when set, is the required op. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.";
 
+const STRUCTURED_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next,flow_path), finding(title,finding,location,annotation,flow_path), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). flow_path is an ordered array of node ids from ctx.call_hierarchy and is empty unless the answer presents a code path. choice.options items are {id,label,action} objects; action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|open|run_check|stop. Use deny when you cannot or should not proceed. When limits.conversation_only is true, never return patch or summary. The user-selected mode and limits.expected define the response contract; never infer or replace the mode. Goal turns are explicitly user-authorized. error is only for technical failures. limits.expected, when set, is the required op. A patch item contains id, file, explanation, and hunks. Each hunk contains 1-based old_start, 1-based new_start, and ordered lines. Each line is {kind,text}, where kind is context, remove, or add and text has no diff prefix or trailing newline. Never write a raw unified diff; Rust renders it from the typed lines. Unused schema fields null.";
+
 pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
+    prompt_with_contract(req, GENERIC_API_CONTRACT)
+}
+
+pub(crate) fn structured_prompt(req: &BackendRequest) -> String {
+    prompt_with_contract(req, STRUCTURED_API_CONTRACT)
+}
+
+fn prompt_with_contract(req: &BackendRequest, api_contract: &str) -> String {
     let mut rules = vec![
         json!(
             "If a.kind is user and a.action is fix, return a patch op unless a patch is impossible."
@@ -108,7 +118,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     // lead with the volatile action.
     let fields: Vec<(&str, serde_json::Value)> = vec![
         // Static: identical bytes across all turns and sessions.
-        ("api", json!(GENERIC_API_CONTRACT)),
+        ("api", json!(api_contract)),
         (
             "stream",
             json!({
