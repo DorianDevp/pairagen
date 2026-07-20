@@ -1,0 +1,6 @@
+{
+  "name": "editor-react",
+  "sourceRoot": "apps/editor-react/src",
+  "projectType": "library",
+  "implicitDependencies": ["editor-contract"]
+}

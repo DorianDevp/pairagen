@@ -1,0 +1,5 @@
+{
+  "name": "editor-contract",
+  "sourceRoot": "packages/editor-bridge/src",
+  "projectType": "library"
+}

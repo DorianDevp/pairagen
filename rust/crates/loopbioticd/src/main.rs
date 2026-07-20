@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use loopbiotic_backends::{
     BackendAdapter, ClaudeAppBackend, CodexAppBackend, GenericCliBackend, MockBackend,
-    OllamaBackend, ProgressReporter, StdioAgentBackend,
+    OllamaBackend, OpenAiCompatibleBackend, ProgressReporter, StdioAgentBackend,
 };
 use loopbiotic_harness::{Engine, LocationGranter, PrefetchMode, SourceContextProvider};
 use loopbiotic_protocol::{
@@ -17,6 +17,7 @@ use loopbiotic_protocol::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+mod ab_report;
 mod token_report;
 
 const OPEN_LOCATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
         [cmd, sub, rest @ ..] if cmd == "dev" && sub == "token-report" => {
             token_report::run(rest).await
         }
+        [cmd, sub, rest @ ..] if cmd == "dev" && sub == "ab-report" => ab_report::run(rest).await,
         _ => print_help(),
     }
 }
@@ -261,6 +263,9 @@ pub(crate) fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
         Ok("codex_app") | Ok("codex") => Ok(Arc::new(CodexAppBackend::from_env()?)),
         Ok("claude_app") | Ok("claude") => Ok(Arc::new(ClaudeAppBackend::from_env()?)),
         Ok("ollama") => Ok(Arc::new(OllamaBackend::from_env()?)),
+        Ok("openai") | Ok("openai_compatible") | Ok("lm_studio") => {
+            Ok(Arc::new(OpenAiCompatibleBackend::from_env()?))
+        }
         Ok("agent") | Ok("agent_stdio") => Ok(Arc::new(StdioAgentBackend::from_env()?)),
         Ok("generic") | Ok("generic_cli") => Ok(Arc::new(GenericCliBackend::from_env()?)),
         _ => Ok(Arc::new(MockBackend)),
@@ -997,6 +1002,9 @@ fn print_help() -> Result<()> {
     eprintln!("loopbioticd dev token-report [--fixtures DIR] [--json FILE] [--max-turns N]");
     eprintln!("loopbioticd dev token-report --render FILE");
     eprintln!("loopbioticd dev token-report --check BASELINE CURRENT");
+    eprintln!(
+        "loopbioticd dev ab-report [--fixtures DIR] [--cases NAME,...] [--variants before,profile,after] [--repeat N] [--json FILE]"
+    );
 
     Ok(())
 }

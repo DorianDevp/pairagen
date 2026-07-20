@@ -1,0 +1,9 @@
+{
+  "name": "web-angular",
+  "sourceRoot": "apps/web-angular/src",
+  "projectType": "application",
+  "implicitDependencies": ["feature-host"],
+  "targets": {
+    "build": { "executor": "@angular/build:application" }
+  }
+}

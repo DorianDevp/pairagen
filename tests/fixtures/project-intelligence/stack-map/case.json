@@ -1,0 +1,16 @@
+{
+  "name": "stack-map",
+  "prompt": "Review the workspace architecture around the current Angular bootstrap. State the exact Angular, TypeScript, and React versions, the Rust edition, and the Nx contract that separates the Angular shell from the React editor. Do not propose code.",
+  "entry": "apps/web-angular/src/bootstrap.ts",
+  "mode": "review",
+  "expected_kind": "finding",
+  "skills": ["AGENTS.md", "ARCHITECTURE.md"],
+  "rubric": [
+    { "label": "Angular 22.0.6", "any": ["22.0.6"] },
+    { "label": "TypeScript 6.0.3", "any": ["6.0.3"] },
+    { "label": "React 18.3.1", "any": ["18.3.1"] },
+    { "label": "Rust edition 2024", "any": ["edition 2024", "2024 edition"] },
+    { "label": "editor contract boundary", "any": ["editor-contract"] },
+    { "label": "React implementation area", "any": ["editor-react"] }
+  ]
+}

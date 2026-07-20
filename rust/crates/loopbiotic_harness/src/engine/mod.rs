@@ -40,6 +40,7 @@ pub struct Engine {
     sessions: HashMap<String, Session>,
     context_optimizer: ContextOptimizer,
     project_profiler: ProjectProfiler,
+    project_intelligence_enabled: bool,
     prefetch_mode: PrefetchMode,
     prefetches: HashMap<String, Prefetch>,
     /// In-flight speculative goal-continuation turns, keyed by session.
@@ -83,6 +84,7 @@ impl Engine {
             sessions: HashMap::new(),
             context_optimizer: ContextOptimizer::default(),
             project_profiler: ProjectProfiler,
+            project_intelligence_enabled: true,
             prefetch_mode: PrefetchMode::Off,
             prefetches: HashMap::new(),
             continuations: HashMap::new(),
@@ -101,6 +103,12 @@ impl Engine {
 
     pub fn set_source_context_provider(&mut self, provider: SourceContextProvider) {
         self.source_context_provider = Some(provider);
+    }
+
+    /// Benchmark/control seam for comparing the pre-profile harness with the
+    /// marker-adapter path while keeping every other engine behavior identical.
+    pub fn set_project_intelligence(&mut self, enabled: bool) {
+        self.project_intelligence_enabled = enabled;
     }
 
     pub fn record_interaction_feedback(
@@ -162,7 +170,9 @@ impl Engine {
         progress: Option<ProgressReporter>,
     ) -> Result<StartSessionResult> {
         let mut session = self.session_for_turn(session_id, generation)?;
-        session.project = Some(self.profile_project(&session.cwd, &session.project_signals));
+        if self.project_intelligence_enabled {
+            session.project = Some(self.profile_project(&session.cwd, &session.project_signals));
+        }
         let context = self.optimize_context(
             session.context.clone(),
             &session.original_prompt,

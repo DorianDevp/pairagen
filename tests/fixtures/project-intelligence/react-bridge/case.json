@@ -1,0 +1,15 @@
+{
+  "name": "react-bridge",
+  "prompt": "Review the editor integration boundary. Explain which project owns the Angular shell, which owns the React implementation, where framework-neutral editor types belong, and where mounting should occur. Do not propose code.",
+  "entry": "libs/editor/feature-host/src/editor-host.ts",
+  "mode": "review",
+  "expected_kind": "finding",
+  "skills": ["AGENTS.md", "BOUNDARIES.md"],
+  "rubric": [
+    { "label": "Angular shell owner", "any": ["web-angular"] },
+    { "label": "React implementation owner", "any": ["editor-react"] },
+    { "label": "neutral contract owner", "any": ["editor-contract"] },
+    { "label": "mounting host", "any": ["feature-host"] },
+    { "label": "framework separation", "any": ["framework-neutral", "framework neutral"] }
+  ]
+}
