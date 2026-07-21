@@ -48,10 +48,11 @@ response contract selected by the user. `fix` and `propose` lead to Patch Review
 Prompt text cannot override the visible mode.
 
 Every PromptWindow, including Reply after Reject or a completed response, owns a
-mode. `<C-k>` opens a subordinate native picker, analogous to the `<C-l>` model
-picker. Choosing a mode updates the same PromptWindow title and preserves typed
-text, attached Widget context, AgentWindow, and focus ownership. The picker is a
-Frame, not a third Window.
+mode. `<C-k>` opens a subordinate picker Frame above PromptWindow — the same
+Frame the `<C-l>` model picker and the `<C-g>` Skills picker use. Enter picks
+the highlighted mode; Escape keeps the current one. Choosing a mode updates the
+same PromptWindow title and preserves typed text, attached Widget context,
+AgentWindow, and focus ownership. The picker is a Frame, not a third Window.
 
 `<C-g>` opens a session-scoped multiselect Frame above PromptWindow. It lists
 safe Markdown files from the workspace root plus configured autoload entries.
@@ -68,8 +69,9 @@ selection is not a capability grant and does not create a Widget or product
 Window.
 
 PromptWindow does not contain agent responses, progress, Flow, patch controls,
-or other agent widgets. It may use native pickers for configuration, but those
-pickers are subordinate frames rather than new product Windows.
+or other agent widgets. Its configuration pickers — mode, model, Skills, and
+attached-context removal — all open the same subordinate picker Frame above
+PromptWindow rather than new product Windows.
 
 PromptWindow may be open while AgentWindow remains visible. This is the normal
 state after a rejected patch and while composing a follow-up to a completed

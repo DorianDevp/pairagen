@@ -6,6 +6,14 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The PromptWindow mode (`<C-k>`), model (`<C-l>`), and attached-context
+  removal (`<C-x>`) pickers now open the same subordinate picker Frame above
+  PromptWindow as the Skills multiselect, instead of `vim.ui.select`. Enter
+  picks the highlighted entry, Escape cancels, the active entry is marked and
+  pre-selected, and a picker opened from insert mode returns to insert mode.
+
 ### Fixed
 
 - Split-window layouts no longer throw the cursor into the first (top-left)

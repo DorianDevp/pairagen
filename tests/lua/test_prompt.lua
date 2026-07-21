@@ -176,16 +176,60 @@ return function(t)
     t.eq(prompt.mode_candidates(), { "fix", "explain", "investigate", "review", "propose" })
     t.eq(config.values.keymaps.modes, "<C-k>")
 
-    local original_select = vim.ui.select
-    vim.ui.select = function(items, opts, callback)
-      t.eq(items, prompt.mode_candidates())
-      t.eq(opts.prompt, "Loopbiotic mode")
-      callback("fix")
-    end
-    prompt.pick_mode()
-    vim.ui.select = original_select
+    local surfaces = require("loopbiotic.surfaces")
+    state.reset()
+    surfaces.open_prompt({
+      row = 14,
+      col = 4,
+      outer_width = 60,
+      outer_height = 10,
+      inner_width = 52,
+      inner_height = 6,
+      padding_x = 4,
+      padding_y = 2,
+      title = " Prompt ",
+      footer = " footer ",
+    })
 
-    t.eq(prompt.current_mode(), "fix")
+    prompt.pick_mode()
+    local buf = state.surfaces.prompt.picker_buf
+    local win = state.surfaces.prompt.picker_win
+    t.eq(type(buf), "number", "mode picker is the subordinate prompt Frame")
+
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    t.eq(#lines, #prompt.mode_candidates(), "every mode is listed")
+    t.eq(lines[1]:find("Fix", 1, true) ~= nil, true, "modes render their labels")
+    local current_index
+    for index, mode in ipairs(prompt.mode_candidates()) do
+      if mode == prompt.current_mode() then
+        current_index = index
+      end
+    end
+    t.eq(lines[current_index]:sub(1, 3), "[x]", "the active mode is marked")
+
+    local function bound(lhs)
+      local wanted = vim.api.nvim_replace_termcodes(lhs, true, true, true)
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+        if vim.api.nvim_replace_termcodes(map.lhs, true, true, true) == wanted then
+          return map.callback
+        end
+      end
+    end
+
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    bound("<CR>")()
+    t.eq(prompt.current_mode(), "fix", "Enter picks the cursor line")
+    t.eq(state.surfaces.prompt.picker_win, nil, "picking closes the picker")
+
+    prompt.pick_mode()
+    buf = state.surfaces.prompt.picker_buf
+    win = state.surfaces.prompt.picker_win
+    vim.api.nvim_win_set_cursor(win, { 3, 0 })
+    bound("<Esc>")()
+    t.eq(prompt.current_mode(), "fix", "Escape keeps the current mode")
+    t.eq(state.surfaces.prompt.picker_win, nil, "cancel closes the picker")
+
+    surfaces.close_prompt({ focus_agent = false })
   end)
 
   t.test("unsupported modes are rejected instead of silently falling back", function()

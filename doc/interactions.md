@@ -93,18 +93,23 @@ continues until completion, explicit cancellation, prompt interruption, or Stop.
 - PromptWindow and Reply PromptWindow always initialize with one valid mode.
   The main prompt uses its requested/configured mode; Reply starts from the
   active session's latest submitted mode.
-- `<C-k>` opens the mode picker in both insert and normal mode. Picking changes
-  only PromptWindow-local state, refreshes the visible title, preserves composed
-  text and attachments, and performs no backend request.
+- `<C-k>` opens the mode picker in both insert and normal mode, in the same
+  subordinate Frame above PromptWindow as the Skills multiselect: Enter applies
+  the highlighted mode, Escape keeps the current one, and a picker opened from
+  insert mode returns to insert mode. Picking changes only PromptWindow-local
+  state, refreshes the visible title, preserves composed text and attachments,
+  and performs no backend request.
 - `<C-g>` opens the Markdown Skills multiselect in both insert and normal mode.
   Space changes only the pending session selection, Enter applies it, and Escape
   restores the selection present when the picker opened. Config-autoloaded
   entries cannot be deselected. None of these actions contacts the backend.
 - The editing surface appears before backend warmup and context discovery finish.
 - Empty input does nothing.
-- Model selection preserves typed text and targets the current mode's phase:
-  `fix`/`propose` set the patch-drafting model, `explain`/`investigate`/`review`
-  set the discovery model. It performs no backend request.
+- Model selection uses the same picker Frame, preserves typed text, and targets
+  the current mode's phase: `fix`/`propose` set the patch-drafting model,
+  `explain`/`investigate`/`review` set the discovery model. It performs no
+  backend request. Removing attached Widget context (`<C-x>`) opens the same
+  Frame over the removable entries.
 - A submitted prompt is stashed before PromptWindow closes. Startup failure
   restores that text on the next open.
 - Slash-prefixed words remain ordinary prompt content. Prompt text cannot force

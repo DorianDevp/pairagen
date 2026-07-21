@@ -211,6 +211,7 @@ function M.open_picker(opts)
   local buf, win = surfaces.open_prompt_picker(picker_lines(items), {
     title = " Loopbiotic Skills · session ",
     footer = " Space toggle  Enter apply  Esc cancel ",
+    filetype = "loopbiotic-skills",
   })
   if not buf or not win then
     return

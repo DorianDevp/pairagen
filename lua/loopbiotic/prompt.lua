@@ -379,18 +379,71 @@ function M.title(kind, mode)
   return string.format(" Loopbiotic %s · %s · %s / %s ", kind, resolved_mode, agent, model)
 end
 
+-- Single-choice picker in the same subordinate Frame above PromptWindow as
+-- the Skills multiselect: Enter picks the cursor line, Esc/q cancel, and
+-- focus returns to the prompt either way. `entries` pair a display label
+-- with the value handed to `on_choice`; `opts.current` marks the entry that
+-- is active when the picker opens.
+local function open_select_picker(entries, opts, on_choice)
+  if not surfaces.prompt_open() then
+    return
+  end
+  local lines = {}
+  for index, entry in ipairs(entries) do
+    local marker = index == opts.current and "x" or " "
+    table.insert(lines, string.format("[%s] %s", marker, entry.label))
+  end
+  local buf, win = surfaces.open_prompt_picker(lines, {
+    title = opts.title,
+    footer = " Enter select  Esc cancel ",
+  })
+  if not buf or not win then
+    return
+  end
+  vim.bo[buf].modifiable = false
+  vim.wo[win].cursorline = true
+  if opts.current then
+    pcall(vim.api.nvim_win_set_cursor, win, { opts.current, 0 })
+  end
+  local function return_to_prompt()
+    surfaces.close_prompt_picker({ focus_prompt = true })
+    if opts.return_to_insert then
+      vim.schedule(function()
+        if surfaces.prompt_open() then
+          vim.cmd("startinsert")
+        end
+      end)
+    end
+  end
+  vim.keymap.set("n", "<CR>", function()
+    local row = vim.api.nvim_win_get_cursor(win)[1]
+    return_to_prompt()
+    if entries[row] then
+      on_choice(entries[row].value)
+    end
+  end, { buffer = buf, nowait = true, silent = true })
+  for _, lhs in ipairs({ "q", "<Esc>" }) do
+    vim.keymap.set("n", lhs, return_to_prompt, { buffer = buf, nowait = true, silent = true })
+  end
+end
+
 -- Choose the behavior contract for this PromptWindow. The picker is local UI:
 -- it preserves typed text and does not contact the backend until submit.
-function M.pick_mode()
-  vim.ui.select(M.mode_candidates(), {
-    prompt = "Loopbiotic mode",
-    format_item = function(mode)
-      return mode_labels[mode] or mode
-    end,
-  }, function(choice)
-    if not choice then
-      return
+function M.pick_mode(opts)
+  opts = opts or {}
+  local entries = {}
+  local current
+  for index, mode in ipairs(M.mode_candidates()) do
+    if mode == open_mode then
+      current = index
     end
+    table.insert(entries, { label = mode_labels[mode] or mode, value = mode })
+  end
+  open_select_picker(entries, {
+    title = " Loopbiotic Mode ",
+    current = current,
+    return_to_insert = opts.return_to_insert,
+  }, function(choice)
     open_mode = M.normalize_mode(choice)
     M.refresh_title()
   end)
@@ -409,7 +462,8 @@ function M.model_phase(mode)
   return "discovery"
 end
 
-function M.pick_model()
+function M.pick_model(opts)
+  opts = opts or {}
   local agent = config.agent()
   local identity = state.agent_identity
   local phase = M.model_phase(M.current_mode())
@@ -420,12 +474,22 @@ function M.pick_model()
     return
   end
 
-  local label = phase == "patch" and "patch model" or "discovery model"
-  vim.ui.select(candidates, { prompt = "Loopbiotic " .. label .. " (" .. agent .. ")" }, function(choice)
-    if not choice or choice == "" then
-      return
+  local active = M.resolved_model(M.phase_model_inputs(phase))
+  local entries = {}
+  local current
+  for index, name in ipairs(candidates) do
+    if name == active then
+      current = index
     end
+    table.insert(entries, { label = name, value = name })
+  end
 
+  local label = phase == "patch" and "Patch model" or "Discovery model"
+  open_select_picker(entries, {
+    title = " Loopbiotic " .. label .. " · " .. agent .. " ",
+    current = current,
+    return_to_insert = opts.return_to_insert,
+  }, function(choice)
     if phase == "patch" then
       require("loopbiotic").model(choice)
     else
@@ -476,6 +540,18 @@ function M.prepare(buf, win)
   vim.wo[win].signcolumn = "no"
 end
 
+-- Wrap a picker entry point so a picker opened from insert mode returns the
+-- prompt to insert mode after it closes.
+local function picker_binding(open)
+  return function()
+    local return_to_insert = vim.fn.mode():match("^[iR]") ~= nil
+    if return_to_insert then
+      vim.cmd("stopinsert")
+    end
+    open({ return_to_insert = return_to_insert })
+  end
+end
+
 function M.bind(buf, submit)
   vim.keymap.set({ "i", "n" }, "<C-s>", function()
     M.submit(buf, submit)
@@ -483,27 +559,29 @@ function M.bind(buf, submit)
 
   local models_key = config.values.keymaps.models
   if models_key and models_key ~= "" then
-    vim.keymap.set({ "i", "n" }, models_key, function()
-      M.pick_model()
-    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set(
+      { "i", "n" },
+      models_key,
+      picker_binding(M.pick_model),
+      { buffer = buf, nowait = true, silent = true }
+    )
   end
 
   local modes_key = config.values.keymaps.modes
   if modes_key and modes_key ~= "" then
-    vim.keymap.set({ "i", "n" }, modes_key, function()
-      M.pick_mode()
-    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set({ "i", "n" }, modes_key, picker_binding(M.pick_mode), { buffer = buf, nowait = true, silent = true })
   end
 
   local skills_key = config.values.keymaps.skills
   if skills_key and skills_key ~= "" then
-    vim.keymap.set({ "i", "n" }, skills_key, function()
-      local return_to_insert = vim.fn.mode():match("^[iR]") ~= nil
-      if return_to_insert then
-        vim.cmd("stopinsert")
-      end
-      require("loopbiotic.skills").open_picker({ return_to_insert = return_to_insert })
-    end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set(
+      { "i", "n" },
+      skills_key,
+      picker_binding(function(opts)
+        require("loopbiotic.skills").open_picker(opts)
+      end),
+      { buffer = buf, nowait = true, silent = true }
+    )
   end
 
   vim.keymap.set("n", "<CR>", function()
@@ -514,27 +592,34 @@ function M.bind(buf, submit)
     M.close()
   end, { buffer = buf, nowait = true, silent = true })
 
-  vim.keymap.set({ "i", "n" }, "<C-x>", function()
-    M.remove_context()
-  end, { buffer = buf, nowait = true, silent = true })
+  vim.keymap.set(
+    { "i", "n" },
+    "<C-x>",
+    picker_binding(M.remove_context),
+    { buffer = buf, nowait = true, silent = true }
+  )
 end
 
-function M.remove_context()
+function M.remove_context(opts)
+  opts = opts or {}
   local widgets = require("loopbiotic.widgets")
   local refs = widgets.list()
   if #refs == 0 then
     return
   end
-  vim.ui.select(refs, {
-    prompt = "Remove attached context",
-    format_item = function(ref)
-      return ref.label .. " · " .. vim.fn.fnamemodify(ref.file, ":.")
-    end,
+  local entries = {}
+  for _, ref in ipairs(refs) do
+    table.insert(entries, {
+      label = ref.label .. " · " .. vim.fn.fnamemodify(ref.file, ":."),
+      value = ref,
+    })
+  end
+  open_select_picker(entries, {
+    title = " Loopbiotic Context · remove ",
+    return_to_insert = opts.return_to_insert,
   }, function(ref)
-    if ref then
-      widgets.deselect(ref.id)
-      M.refresh_footer()
-    end
+    widgets.deselect(ref.id)
+    M.refresh_footer()
   end)
 end
 
