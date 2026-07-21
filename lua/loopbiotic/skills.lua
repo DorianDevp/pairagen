@@ -246,7 +246,9 @@ function M.open_picker(opts)
     state.selected_instruction_skills = before
     return_to_prompt()
   end
-  vim.keymap.set("n", { "q", "<Esc>" }, cancel, { buffer = buf, nowait = true, silent = true })
+  for _, lhs in ipairs({ "q", "<Esc>" }) do
+    vim.keymap.set("n", lhs, cancel, { buffer = buf, nowait = true, silent = true })
+  end
 end
 
 function M.reset()

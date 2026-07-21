@@ -196,6 +196,61 @@ return function(t)
     t.eq(vim.api.nvim_win_is_valid(picker), false, "picker closes with PromptWindow")
   end)
 
+  t.test("open_picker binds toggle, apply and cancel; cancel restores the selection", function()
+    local root = fixture()
+    local previous = vim.deepcopy(config.values.skills)
+    config.values.skills = {
+      autoload = { "AGENTS.md" },
+      discover_root_markdown = true,
+      max_file_bytes = 65536,
+      picker_height = 10,
+    }
+    state.reset()
+    state.session_id = nil
+    skills.reset()
+    skills.prepare(root)
+    surfaces.open_prompt({
+      row = 14,
+      col = 4,
+      outer_width = 60,
+      outer_height = 10,
+      inner_width = 52,
+      inner_height = 6,
+      padding_x = 4,
+      padding_y = 2,
+      title = " Prompt ",
+      footer = " footer ",
+    })
+
+    skills.open_picker()
+    local buf = state.surfaces.prompt.picker_buf
+    t.eq(type(buf), "number", "picker opened")
+
+    local function bound(lhs)
+      local wanted = vim.api.nvim_replace_termcodes(lhs, true, true, true)
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+        if vim.api.nvim_replace_termcodes(map.lhs, true, true, true) == wanted then
+          return map.callback
+        end
+      end
+    end
+    t.eq(type(bound("<Space>")), "function", "Space toggles")
+    t.eq(type(bound("<CR>")), "function", "Enter applies")
+    t.eq(type(bound("q")), "function", "q cancels")
+    t.eq(type(bound("<Esc>")), "function", "Esc cancels")
+
+    t.eq(skills.toggle("README.md"), true)
+    t.eq(skills.selected("README.md"), true)
+    bound("q")()
+    t.eq(skills.selected("README.md"), false, "cancel restores the pre-picker selection")
+    t.eq(state.surfaces.prompt.picker_win, nil, "cancel closes the picker")
+
+    surfaces.close_prompt({ focus_agent = false })
+    skills.reset()
+    config.values.skills = previous
+    vim.fn.delete(root, "rf")
+  end)
+
   t.test("keymaps.skills defaults to the PromptWindow multiselect", function()
     t.eq(config.values.keymaps.skills, "<C-g>")
   end)
