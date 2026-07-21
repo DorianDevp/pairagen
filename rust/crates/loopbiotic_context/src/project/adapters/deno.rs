@@ -80,6 +80,14 @@ fn find_deno_image(root: &Path) -> Option<(String, PathBuf)> {
                 let Ok(relative) = entry.path().strip_prefix(root).map(Path::to_path_buf) else {
                     continue;
                 };
+                // Same cap as every other root-fact read; a pathological
+                // Dockerfile must not stall the per-turn profile.
+                if entry
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.len() > super::super::facts::MAX_FACT_BYTES)
+                {
+                    continue;
+                }
                 let Ok(content) = fs::read_to_string(entry.path()) else {
                     continue;
                 };

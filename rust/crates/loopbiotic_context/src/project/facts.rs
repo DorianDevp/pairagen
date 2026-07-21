@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-const MAX_FACT_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const MAX_FACT_BYTES: u64 = 2 * 1024 * 1024;
 
 pub(super) struct RootFacts {
     pub root: PathBuf,
