@@ -101,9 +101,15 @@ function M.open(mode)
   -- backend can then pay its startup cost while the user is already typing;
   -- its response also supplies the concrete model used by the title/picker.
   require("loopbiotic.rpc").request("backend/warmup", {}, M.on_warmup)
-  resolve_hints(source)
 
-  if (config.values.flow or {}).enabled ~= false then
+  -- A directory listing has no cursor symbol: skip LSP hints and Flow, the
+  -- captured listing itself is the context of a file-operation prompt.
+  local directory_source = require("loopbiotic.context").directory_source(source.buf)
+  if not directory_source then
+    resolve_hints(source)
+  end
+
+  if not directory_source and (config.values.flow or {}).enabled ~= false then
     open_graph = require("loopbiotic.flow").start(source.buf, {
       source.value.cursor.line,
       math.max(source.value.cursor.column - 1, 0),

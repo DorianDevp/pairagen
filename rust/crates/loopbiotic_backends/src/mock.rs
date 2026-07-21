@@ -17,7 +17,13 @@ pub struct MockBackend;
 #[async_trait]
 impl BackendAdapter for MockBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
-        let card = if req.card_contract.allow_goal_completion
+        let card = if req.card_contract.expected_kind == Some(loopbiotic_protocol::CardKind::Patch)
+            && req.session.prompt.to_lowercase().contains("move")
+        {
+            // A patch turn asking to move files exercises the file-operation
+            // review loop end to end without a real model backend.
+            file_ops_card()
+        } else if req.card_contract.allow_goal_completion
             && req.card_contract.expected_kind == Some(loopbiotic_protocol::CardKind::Finding)
         {
             why_card()
@@ -174,6 +180,7 @@ fn goal_card(req: &BackendRequest) -> Card {
             warnings: vec![],
             goal_complete: false,
             plan: None,
+            file_ops: vec![],
             patches: vec![FilePatch {
                 id: format!("p_slice_{index}"),
                 file: (*file).into(),
@@ -221,6 +228,7 @@ fn rework_card(card: &PatchCard) -> Card {
         warnings: vec![],
         goal_complete: false,
         plan: card.plan.clone(),
+        file_ops: vec![],
         patches: vec![FilePatch {
             id: format!("{}_rework", patch.id),
             file: patch.file.clone(),
@@ -359,6 +367,41 @@ fn reply_card(text: String) -> Card {
     })
 }
 
+/// The fixed move proposal matching the smoke-test workspace: two invoice-list
+/// files grouped into their own directory, completing the goal on Accept.
+fn file_ops_card() -> Card {
+    Card::Patch(PatchCard {
+        id: "c_fileops".into(),
+        title: "Move the invoice list module".into(),
+        explanation: "Group the invoice-list files into their own directory.".into(),
+        warnings: vec![],
+        goal_complete: true,
+        plan: None,
+        patches: vec![],
+        file_ops: vec![
+            loopbiotic_protocol::FileOp {
+                id: "fo_1".into(),
+                kind: loopbiotic_protocol::FileOpKind::Move,
+                from: "src/invoice-list.ts".into(),
+                to: "src/invoice-list/invoice-list.ts".into(),
+            },
+            loopbiotic_protocol::FileOp {
+                id: "fo_2".into(),
+                kind: loopbiotic_protocol::FileOpKind::Move,
+                from: "src/invoice-list.spec.ts".into(),
+                to: "src/invoice-list/invoice-list.spec.ts".into(),
+            },
+        ],
+        actions: vec![
+            Action::Apply,
+            Action::Why,
+            Action::Retry,
+            Action::EditPrompt,
+            Action::Stop,
+        ],
+    })
+}
+
 fn patch_card(req: &BackendRequest) -> Card {
     let old_line = req.context.buffer_text.lines().next().unwrap_or_default();
     let replacement = if old_line == "payload = payload or {}" {
@@ -373,6 +416,7 @@ fn patch_card(req: &BackendRequest) -> Card {
         warnings: vec![],
         goal_complete: req.card_contract.allow_goal_completion,
         plan: None,
+        file_ops: vec![],
         patches: vec![FilePatch {
             id: "p_1".into(),
             file: relative_file(req).into(),

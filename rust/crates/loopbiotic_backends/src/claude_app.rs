@@ -29,7 +29,7 @@ Every user message is a JSON Loopbiotic request. Reply with exactly one JSON Loo
 The discriminator field is named "op". Allowed ops, with exact shapes:
 - {"op":"hypothesis","title":string,"claim":string,"evidence":LOC|null,"next":LOC|null,"flow_path":[string]}
 - {"op":"finding","title":string,"finding":string,"location":LOC|null,"annotation":string|null,"flow_path":[string]}
-- {"op":"patch","title":string,"explanation":string,"goal_complete":bool,"plan":{"remaining":[{"file":string,"summary":string}],"complete":bool}|null,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}]}
+- {"op":"patch","title":string,"explanation":string,"goal_complete":bool,"plan":{"remaining":[{"file":string,"summary":string}],"complete":bool}|null,"patches":[{"id":string|null,"file":string,"diff":string,"explanation":string}],"file_ops":[{"id":string|null,"kind":"move","from":string,"to":string}]}
 - {"op":"choice","title":string,"question":string,"options":[{"id":string,"label":string,"action":string}]}
 - {"op":"deny","title":string,"reason":string,"location":LOC|null}
 - {"op":"open_location","reason":string,"location":LOC}
@@ -44,6 +44,7 @@ Patch for fix/propose mode, fix actions, or when limits.goal_completion is true.
 When limits.goal_completion is true, advance the explicitly authorized goal one small, compilable hunk per work turn. Return at most one file and exactly one hunk within limits.changed_lines plus plan listing remaining coherent steps; a file may repeat. Set plan.complete=true only on the final step. Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary. Inspect only enough source for the next step, preserve completed_steps, and never repeat accepted work.
 When limits.goal_completion is true and limits.expected is finding because the user asked why, explain the currently pending hunk without replacing it or advancing the goal. The same draft remains pending after the answer.
 A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Non-goal patches have a null plan.
+To move or rename files or directories — for example when the supplied buffer is a directory listing and the user asks to reorganize files — return a patch op whose file_ops lists {"kind":"move","from","to"} with workspace-relative paths and patches []. Never mix file_ops and patches in one op and never express a move as a diff; the editor reviews and applies the moves behind the same Accept gate, and content fix-ups (imports) follow as the next goal step.
 Prefer the supplied context; you may use at most two targeted read-only searches when it is insufficient. Never edit files or run commands."#;
 
 /// Keeps `claude` CLI processes alive across turns using its stream-json

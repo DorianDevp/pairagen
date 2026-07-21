@@ -90,6 +90,9 @@ continues until completion, explicit cancellation, prompt interruption, or Stop.
 
 - The main prompt opens from Normal or Visual mode. A live selection may be
   captured as ordinary editor context.
+- The main prompt may also open from a Netrw directory listing. The listing is
+  captured as ordinary buffer context for a file-operation request; a directory
+  source resolves no LSP hints and starts no Flow graph.
 - PromptWindow and Reply PromptWindow always initialize with one valid mode.
   The main prompt uses its requested/configured mode; Reply starts from the
   active session's latest submitted mode.
@@ -407,6 +410,29 @@ If Netrw is unavailable or cannot open the safe parent, use a transient native
 confirmation frame showing the same normalized paths. Acceptance semantics and
 validation remain identical; the fallback cannot weaken the transaction.
 
+### File move or rename
+
+A `fix`/`propose` turn may propose filesystem operations instead of a diff: a
+patch card carrying bounded, workspace-relative `move` operations. The proposal
+is inert until accepted.
+
+1. Validate every operation against the live filesystem and editor: both paths
+   workspace-bound without symlink escape, the source exists, the target does
+   not, no unsaved buffer owns an affected path, operations do not overlap, and
+   missing target parents resolve inside the workspace.
+2. Open the existing parent of the move targets in Netrw, reusing the window
+   the prompt came from when it already shows a directory listing. AgentWindow
+   shows the operation manifest, agent comment, and `Accept` / `Reject`.
+3. Accept revalidates freshness, creates missing target directories, applies
+   the moves in order, and rolls the whole set back on any failure. Loaded
+   unmodified buffers are retargeted to the moved paths. The apply result
+   reports each vacated and created path and continues the authorized Goal, so
+   content fix-ups such as import updates arrive as ordinary reviewed patches.
+4. Reject moves nothing and follows the same paused-Goal PromptWindow flow.
+
+A single proposal never mixes content hunks and file operations; the backend
+rejects a mixed card and asks the model to sequence them as separate steps.
+
 ### Invariants for every proposal
 
 - no source mutation from a Widget selection or ordinary prompt submission;
@@ -437,6 +463,9 @@ validation remain identical; the fallback cannot weaken the transaction.
   and Quit until the user submits new intent or ends the session.
 - New paths are workspace-bound, collision-checked, inert until acceptance, and
   shown in Netrw context when possible.
+- File operations (moves/renames) are workspace-bound, validated at review and
+  again at Accept, applied transactionally with rollback, and inert until
+  explicit Accept.
 - User-selected `fix` or `propose` transitions directly to Patch Review on both
   the first submitted prompt and a submitted Reply.
 - Every PromptWindow has a visible, picker-controlled mode, and both session
@@ -458,8 +487,9 @@ validation remain identical; the fallback cannot weaken the transaction.
   frontend, but the backend wire schema remains Flow-specific (`flow_path`) and
   selected references are carried as provenance-tagged context hints rather than
   a dedicated `WidgetContextRef` protocol field.
-- Directory creation is supported when it is a parent of a proposed new file;
-  the backend cannot yet express a directory-only creation manifest. If Netrw
+- Directory creation is supported when it is a parent of a proposed new file
+  or of a file-operation target; the backend cannot yet express a
+  directory-only creation manifest. If Netrw
   cannot open, the exact path remains in AgentWindow but there is no separate
   native fallback confirmation Frame yet.
 - Accept-time freshness and path checks are implemented, but the frontend does

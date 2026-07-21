@@ -453,7 +453,14 @@ function M.source_buffer(preferred_buf)
   end
 
   local current = vim.api.nvim_get_current_buf()
-  if vim.bo[current].buftype == "" and vim.api.nvim_buf_get_name(current) ~= "" then
+  local current_name = vim.api.nvim_buf_get_name(current)
+  if vim.bo[current].buftype == "" and current_name ~= "" then
+    return current
+  end
+  -- A directory listing (Netrw) is a legitimate prompt source: the user is
+  -- steering file operations from the file tree, and its rendered listing is
+  -- the visible context of that intent.
+  if current_name ~= "" and vim.fn.isdirectory(current_name) == 1 then
     return current
   end
 
@@ -472,6 +479,13 @@ function M.source_buffer(preferred_buf)
   end
 
   return current
+end
+
+-- True when the buffer is a directory listing (e.g. Netrw). Such a source is
+-- a valid place to author intent, but has no LSP or call-hierarchy context.
+function M.directory_source(buf)
+  local name = buf and vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
+  return name ~= "" and vim.fn.isdirectory(name) == 1
 end
 
 function M.buffer_window(buf)

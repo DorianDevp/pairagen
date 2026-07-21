@@ -665,6 +665,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
              - Inspect only enough project context to produce that next step. Tool reads are valid patch source because Loopbiotic verifies the hunk before review.\n\
              - With the patch return plan: list the remaining coherent steps, each with its target file and one-line summary. A file may appear more than once. Set complete=true only when this hunk is the final step.\n\
              - Create a missing file incrementally before steps that reference it.\n\
+             - To move or rename files or directories, return a patch whose file_ops is [{{kind:\"move\",from,to}}] with workspace-relative paths and patches []. Never mix file_ops with hunks and never express a move as a diff; content fix-ups (imports) follow as the next step.\n\
              - Use open_location only when a required source cannot be inspected with read-only project tools.\n\
              - Set goal_complete=true only together with plan.complete=true.\n\
              - Return summary only when every requirement in the original goal is satisfied; cite the completed result.\n\
@@ -682,6 +683,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
              - If a safe step needs unseen references or more changed lines, limit this hunk to self-contained preparation such as adding only the new struct definition.\n\
              - Context and remove lines must be exact, contiguous source lines from the supplied buffer; never omit source lines between two context lines.\n\
              - Use the supplied buffer excerpt as the only patch source. Diagnostics and ranked context are evidence only; never patch a different file or unseen block.\n\
+             - To move or rename files or directories (for example when the buffer is a directory listing), return file_ops [{{kind:\"move\",from,to}}] with workspace-relative paths and patches []. Never mix file_ops with hunks and never express a move as a diff.\n\
              - Do not inspect the project or use tools.\n\
              - Implementation guidelines: {IMPLEMENTATION_GUIDELINES}",
             req.card_contract.max_changed_lines

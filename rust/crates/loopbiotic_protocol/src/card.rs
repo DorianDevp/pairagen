@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::patch::{FilePatch, PatchId};
+use crate::patch::{FileOp, FilePatch, PatchId};
 
 pub type CardId = String;
 
@@ -150,6 +150,11 @@ pub struct PatchCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<GoalPlan>,
     pub patches: Vec<FilePatch>,
+    /// Filesystem operations (moves/renames) reviewed behind the same
+    /// Accept/Reject gate. A card carries either patches or file_ops, never
+    /// both; follow-up content edits arrive as later goal steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_ops: Vec<FileOp>,
     pub actions: Vec<Action>,
 }
 
@@ -329,6 +334,7 @@ mod tests {
             goal_complete: false,
             plan,
             patches: vec![],
+            file_ops: vec![],
             actions: vec![Action::Apply],
         })
     }

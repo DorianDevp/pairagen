@@ -15,6 +15,7 @@
     "explanation",
     "goal_complete",
     "patches",
+    "file_ops",
     "question",
     "options",
     "reason",
@@ -111,6 +112,20 @@
           "file": { "type": "string" },
           "diff": { "type": "string" },
           "explanation": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "file_ops": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "required": ["kind", "from", "to"],
+        "properties": {
+          "id": { "type": ["string", "null"] },
+          "kind": { "enum": ["move"] },
+          "from": { "type": "string" },
+          "to": { "type": "string" }
         },
         "additionalProperties": false
       }

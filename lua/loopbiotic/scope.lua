@@ -35,7 +35,8 @@ function M.allows(action)
     return true
   end
   if action == "accept" or action == "reject" then
-    return surfaces.agent_view() == "review" and require("loopbiotic.diff").valid_preview()
+    return surfaces.agent_view() == "review"
+      and (require("loopbiotic.diff").valid_preview() or require("loopbiotic.fileops").pending())
   end
   return false
 end

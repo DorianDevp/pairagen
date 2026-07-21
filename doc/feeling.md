@@ -143,6 +143,11 @@ orientation. AgentWindow remains the source of the proposal and approval. A
 creation manifest must make nonexistent paths explicit because Netrw cannot show
 them as real entries before acceptance.
 
+A proposed move keeps the same honesty: the manifest names every source and
+target path exactly, Netrw shows the real tree, and nothing on disk changes
+until Accept. Steering the agent from the file tree should feel like the same
+calm review loop, not a faster side door around it.
+
 ## Wrapped and tab-affine feeling
 
 Wrapped AgentWindow should feel parked, not destroyed. It communicates:

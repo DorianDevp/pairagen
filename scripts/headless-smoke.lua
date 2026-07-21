@@ -211,6 +211,52 @@ if smoke_bin and smoke_bin ~= "" then
   rpc.stop()
   assert(not state.thinking_request_id, "rpc.stop left the thinking spinner active")
 
+  -- File-operation round trip: a fix prompt from a directory listing yields a
+  -- reviewable move manifest, and Accept applies it transactionally, reports
+  -- through patch/apply_result, and completes the goal.
+  loopbiotic.reset()
+  config.values.backend.command = vim.fn.fnamemodify(smoke_bin, ":p")
+  config.values.backend.args = { "--stdio" }
+  config.values.backend.agent = "mock"
+  local fileops_root = vim.fn.tempname()
+  vim.fn.mkdir(fileops_root .. "/src", "p")
+  vim.fn.writefile({ "export const list = 1" }, fileops_root .. "/src/invoice-list.ts")
+  vim.fn.writefile({ "test" }, fileops_root .. "/src/invoice-list.spec.ts")
+  local previous_cwd = vim.fn.getcwd()
+  vim.cmd("cd " .. vim.fn.fnameescape(fileops_root))
+  vim.cmd("edit " .. vim.fn.fnameescape(fileops_root .. "/src"))
+
+  loopbiotic.submit_prompt("Move these files to invoice-list", "fix")
+  local proposed = vim.wait(15000, function()
+    return state.session_id ~= nil
+      and state.card ~= nil
+      and state.card.kind == "patch"
+      and not state.thinking_request_id
+  end, 50)
+  assert(proposed, "file-operation round-trip timed out waiting for the move card")
+  assert(
+    type(state.card.file_ops) == "table" and #state.card.file_ops == 2,
+    "expected a patch card carrying two file operations"
+  )
+  assert(require("loopbiotic.fileops").pending(), "file operations were not validated for review")
+  assert(require("loopbiotic.surfaces").agent_view() == "review", "file operations did not enter review")
+
+  require("loopbiotic.fileops").accept()
+  local applied = vim.wait(15000, function()
+    return not state.thinking_request_id and state.card ~= nil and state.card.kind == "summary"
+  end, 50)
+  assert(applied, "file-operation accept did not complete the goal")
+  assert(
+    vim.fn.filereadable(fileops_root .. "/src/invoice-list/invoice-list.ts") == 1,
+    "accepted move did not create the target"
+  )
+  assert(vim.fn.filereadable(fileops_root .. "/src/invoice-list.ts") == 0, "accepted move left the source behind")
+  assert(not require("loopbiotic.fileops").pending(), "accept left a pending file-operation plan")
+
+  loopbiotic.stop()
+  vim.cmd("cd " .. vim.fn.fnameescape(previous_cwd))
+  vim.fn.delete(fileops_root, "rf")
+
   rpc.stop()
   loopbiotic.reset()
   print("Loopbiotic smoke round-trip passed")

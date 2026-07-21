@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Action, Card, ChoiceCard, ChoiceOption, DenyCard, ErrorCard, FilePatch, FindingCard, GoalPlan,
-    HypothesisCard, Location, LocationEvidence, NextMove, OpenLocationCard, PatchCard, SummaryCard,
+    Action, Card, ChoiceCard, ChoiceOption, DenyCard, ErrorCard, FileOp, FileOpKind, FilePatch,
+    FindingCard, GoalPlan, HypothesisCard, Location, LocationEvidence, NextMove, OpenLocationCard,
+    PatchCard, SummaryCard,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -33,7 +34,10 @@ pub enum AgentOp {
         goal_complete: Option<bool>,
         #[serde(default)]
         plan: Option<GoalPlan>,
+        #[serde(default)]
         patches: Vec<AgentPatch>,
+        #[serde(default)]
+        file_ops: Vec<AgentFileOp>,
     },
     Choice {
         title: String,
@@ -151,6 +155,22 @@ pub struct AgentPatch {
     pub explanation: String,
 }
 
+/// A filesystem operation proposed by the model inside a patch op. `kind`
+/// defaults to `move` so a bare `{from, to}` pair parses.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentFileOp {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default = "move_kind")]
+    pub kind: FileOpKind,
+    pub from: PathBuf,
+    pub to: PathBuf,
+}
+
+fn move_kind() -> FileOpKind {
+    FileOpKind::Move
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(from = "AgentChoiceInput")]
 pub struct AgentChoice {
@@ -247,6 +267,7 @@ impl AgentOp {
                 goal_complete,
                 plan,
                 patches,
+                file_ops,
             } => Card::Patch(PatchCard {
                 id,
                 title,
@@ -258,6 +279,11 @@ impl AgentOp {
                     .into_iter()
                     .enumerate()
                     .map(|(index, patch)| patch.file_patch(index + 1))
+                    .collect(),
+                file_ops: file_ops
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, op)| op.file_op(index + 1))
                     .collect(),
                 actions: vec![
                     Action::Apply,
@@ -362,6 +388,27 @@ impl AgentPatch {
             file: self.file,
             diff: self.diff,
             explanation: self.explanation,
+        }
+    }
+}
+
+impl AgentFileOp {
+    /// Card-side form of the op: 1-based fallback id and cleaned paths.
+    /// Public so structured-output parsers map identically to the raw route.
+    pub fn file_op(self, index: usize) -> FileOp {
+        // Drop mechanical `./` segments so the editor's workspace-relative
+        // apply report compares equal to the reviewed card paths.
+        fn clean(path: PathBuf) -> PathBuf {
+            path.components()
+                .filter(|part| !matches!(part, std::path::Component::CurDir))
+                .collect()
+        }
+
+        FileOp {
+            id: self.id.unwrap_or_else(|| format!("fo_{index}")),
+            kind: self.kind,
+            from: clean(self.from),
+            to: clean(self.to),
         }
     }
 }
@@ -579,6 +626,40 @@ mod tests {
             panic!("expected hypothesis card");
         };
         assert_eq!(card.flow_path, ["caller", "callee"]);
+    }
+
+    #[test]
+    fn maps_patch_op_file_ops_with_ids_and_clean_paths() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"patch","title":"Move into invoice-list","explanation":"Group the invoice list module.","file_ops":[{"from":"./src/invoice-list.ts","to":"src/invoice-list/invoice-list.ts"},{"kind":"move","from":"src/invoice-list.spec.ts","to":"src/invoice-list/invoice-list.spec.ts"}]}"#,
+        )
+        .unwrap();
+
+        let Card::Patch(card) = op.into_card("c_1") else {
+            panic!("expected patch card");
+        };
+        assert!(card.patches.is_empty());
+        assert_eq!(card.file_ops.len(), 2);
+        assert_eq!(card.file_ops[0].id, "fo_1");
+        assert_eq!(card.file_ops[0].kind, FileOpKind::Move);
+        assert_eq!(card.file_ops[0].from, PathBuf::from("src/invoice-list.ts"));
+        assert_eq!(
+            card.file_ops[1].to,
+            PathBuf::from("src/invoice-list/invoice-list.spec.ts")
+        );
+    }
+
+    #[test]
+    fn patch_op_without_file_ops_stays_compatible() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"patch","title":"T","explanation":"E","patches":[{"file":"src/work.ts","diff":"@@ -1,1 +1,1 @@\n-a\n+b\n","explanation":"E"}]}"#,
+        )
+        .unwrap();
+
+        let Card::Patch(card) = op.into_card("c_1") else {
+            panic!("expected patch card");
+        };
+        assert!(card.file_ops.is_empty());
     }
 
     #[test]

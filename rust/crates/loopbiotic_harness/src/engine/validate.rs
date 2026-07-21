@@ -239,6 +239,7 @@ pub(super) fn validate_apply_result(session: &Session, result: &PatchApplyResult
         .patches
         .iter()
         .map(|patch| patch.id.clone())
+        .chain(card.file_ops.iter().map(|op| op.id.clone()))
         .collect::<Vec<_>>();
     if result.patch_ids != expected_patch_ids {
         return Err(violation(
@@ -247,10 +248,17 @@ pub(super) fn validate_apply_result(session: &Session, result: &PatchApplyResult
         ));
     }
 
+    // A file operation changes two paths: the vacated source and the new
+    // target, reported in operation order.
     let expected_files = card
         .patches
         .iter()
         .map(|patch| patch.file.clone())
+        .chain(
+            card.file_ops
+                .iter()
+                .flat_map(|op| [op.from.clone(), op.to.clone()]),
+        )
         .collect::<Vec<_>>();
     if result.accepted && result.changed_files != expected_files {
         return Err(violation(
@@ -273,6 +281,77 @@ mod tests {
     use loopbiotic_protocol::{Action, FindingCard};
 
     use super::*;
+
+    fn session_with_file_ops_card() -> Session {
+        let mut session = Session::new(loopbiotic_protocol::StartSessionParams {
+            cwd: "/tmp/workspace".into(),
+            file: "src".into(),
+            cursor: loopbiotic_protocol::Cursor { line: 1, column: 1 },
+            selection: None,
+            prompt: "Move these files".into(),
+            mode: loopbiotic_protocol::Mode::Fix,
+            buffer_text: String::new(),
+            buffer_start_line: 1,
+            diagnostics: vec![],
+            hints: vec![],
+            call_hierarchy: None,
+            context_policy: Default::default(),
+            project_signals: Default::default(),
+            skills: vec![],
+        });
+        session
+            .cards
+            .push(Card::Patch(loopbiotic_protocol::PatchCard {
+                id: "c_ops".into(),
+                title: "Move".into(),
+                explanation: "Group the module.".into(),
+                warnings: vec![],
+                goal_complete: false,
+                plan: None,
+                patches: vec![],
+                file_ops: vec![loopbiotic_protocol::FileOp {
+                    id: "fo_1".into(),
+                    kind: loopbiotic_protocol::FileOpKind::Move,
+                    from: "src/a.ts".into(),
+                    to: "src/lib/a.ts".into(),
+                }],
+                actions: vec![Action::Apply],
+            }));
+        session
+    }
+
+    #[test]
+    fn apply_result_accepts_file_op_ids_and_both_paths() {
+        let session = session_with_file_ops_card();
+        let result = PatchApplyResult {
+            session_id: session.id.clone(),
+            card_id: "c_ops".into(),
+            accepted: true,
+            patch_ids: vec!["fo_1".into()],
+            changed_files: vec!["src/a.ts".into(), "src/lib/a.ts".into()],
+            error: None,
+            context: session.context.clone(),
+        };
+
+        validate_apply_result(&session, &result).unwrap();
+    }
+
+    #[test]
+    fn apply_result_rejects_mismatched_file_op_report() {
+        let session = session_with_file_ops_card();
+        let result = PatchApplyResult {
+            session_id: session.id.clone(),
+            card_id: "c_ops".into(),
+            accepted: true,
+            patch_ids: vec!["fo_1".into()],
+            changed_files: vec!["src/lib/a.ts".into()],
+            error: None,
+            context: session.context.clone(),
+        };
+
+        let error = validate_apply_result(&session, &result).unwrap_err();
+        assert!(error.to_string().contains("changed files"));
+    }
 
     #[test]
     fn rejects_card_with_invalid_location_coordinates() {

@@ -78,6 +78,11 @@ state after a rejected patch and while composing a follow-up to a completed
 response. The two surfaces retain distinct focus and ownership; PromptWindow
 does not replace or destroy AgentWindow.
 
+A Netrw directory listing is a valid prompt source: the visible listing is
+captured as the context of a file-operation request (moving or renaming files
+from the tree). A directory source contributes no LSP hints or Flow graph; the
+listing itself is the evidence.
+
 Current visual defaults remain a rounded surface near the source cursor, 96
 columns by 10 rows, with horizontal padding 4, vertical padding 2, and z-index
 200. These values are canonicalized in `lua/loopbiotic/config.lua`, not copied
@@ -180,7 +185,7 @@ recovery update that same processing View. They do not create a log surface or
 expose private reasoning text; read progress names the concrete local operation
 without rendering file contents before the validated card.
 
-## Diff and creation review
+## Diff, creation, and file-operation review
 
 The code diff remains in the ordinary editor surface while AgentWindow retains
 the agent comment and review controls. The editor is not a third Loopbiotic
@@ -192,6 +197,12 @@ Window.
   manifest containing the exact workspace-relative path.
 - A proposal that needs parent directories presents the directories and new file
   as one creation set.
+- A proposed file move or rename has no textual diff either: AgentWindow shows
+  an operation manifest — each `Move from -> to` plus target directories that
+  do not exist yet — with the agent comment and the same `Accept` / `Reject`
+  gate. Netrw grounds the review in the existing parent of the move targets,
+  reusing a window that already shows a directory listing when the prompt came
+  from one. Nothing on disk changes until Accept.
 
 Before reviewing a new file or directory, Loopbiotic opens the nearest existing
 parent directory with Neovim's built-in Netrw. Netrw provides spatial file-tree
@@ -330,10 +341,11 @@ contradictions are explicit:
   serialized to the existing validated context-hint wire format. The backend
   protocol does not yet expose a dedicated `WidgetContextRef` field.
 - New files and missing parent directories have a creation manifest, Netrw
-  context, collision revalidation, and transactional cleanup. A directory-only
-  proposal is not yet representable by the patch protocol, and failure to open
-  Netrw currently falls back to the AgentWindow manifest rather than a dedicated
-  subordinate confirmation Frame.
+  context, collision revalidation, and transactional cleanup; file moves and
+  renames have the same treatment through `file_ops`. A directory-only creation
+  proposal is still not representable by the patch protocol, and failure to
+  open Netrw currently falls back to the AgentWindow manifest rather than a
+  dedicated subordinate confirmation Frame.
 - Project Intelligence currently supplies a compact deterministic profile and
   inert Markdown instructions. It does not yet expose task-sliced area Views,
   native framework documentation probes, or versioned knowledge-pack status in

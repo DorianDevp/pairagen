@@ -95,6 +95,11 @@ pub(super) fn completed_patch_steps(session: &Session) -> Vec<String> {
     card.patches
         .iter()
         .map(|patch| format!("{}: {}", patch.file.display(), patch.explanation))
+        .chain(
+            card.file_ops
+                .iter()
+                .map(|op| format!("moved {} to {}", op.from.display(), op.to.display())),
+        )
         .collect()
 }
 
@@ -114,6 +119,15 @@ pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Resul
         .map(|plan| plan.complete)
         .unwrap_or(card.goal_complete);
     session.goal_slice_continues = plan.as_ref().is_some_and(|plan| !plan.complete);
+
+    // File operations review as one transactional card; there is no per-hunk
+    // slicing to queue.
+    if !card.file_ops.is_empty() {
+        let mut card = card;
+        card.goal_complete = completes;
+        session.pending_patch_cards.clear();
+        return Ok(Card::Patch(card));
+    }
 
     let mut cards = Vec::new();
     for patch in card.patches {
@@ -143,6 +157,7 @@ pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Resul
                     diff: loopbiotic_patch::UnifiedDiff { hunks: vec![hunk] }.render(),
                     explanation,
                 }],
+                file_ops: vec![],
                 actions: card.actions.clone(),
             });
         }

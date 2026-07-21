@@ -295,6 +295,7 @@ mod tests {
             goal_complete: false,
             plan: None,
             patches: vec![],
+            file_ops: vec![],
             actions: vec![Action::Apply],
         })
     }

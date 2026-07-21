@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use loopbiotic_protocol::{
-    Card, ContextBundle, FilePatch, MAX_CHANGED_LINES, MAX_HUNKS_PER_PATCH, MAX_PATCH_FILES,
-    ViolationClass,
+    Card, ContextBundle, FileOp, FilePatch, MAX_CHANGED_LINES, MAX_FILE_OPS, MAX_HUNKS_PER_PATCH,
+    MAX_PATCH_FILES, ViolationClass,
 };
 
 use crate::unified_diff::{DiffLine, UnifiedDiff};
@@ -229,6 +229,16 @@ impl PatchValidator {
             return Ok(());
         };
 
+        if !card.file_ops.is_empty() {
+            if !card.patches.is_empty() {
+                return Err(violation(
+                    ViolationClass::MissingField,
+                    "patch card cannot mix file patches and file_ops; move first, then edit content in the next goal step",
+                ));
+            }
+            return Self::validate_file_ops(&card.file_ops);
+        }
+
         if card.patches.is_empty() {
             return Err(violation(
                 ViolationClass::MissingField,
@@ -247,6 +257,80 @@ impl PatchValidator {
 
         for patch in &card.patches {
             Self::validate_file_patch_with_limits(patch, max_hunks_per_patch, max_changed_lines)?;
+        }
+
+        Ok(())
+    }
+
+    /// Filesystem operations carried by a patch card: workspace-relative,
+    /// traversal-free, bounded, and mutually independent. The editor
+    /// revalidates against the live filesystem before Accept applies them.
+    pub fn validate_file_ops(file_ops: &[FileOp]) -> Result<()> {
+        if file_ops.len() > MAX_FILE_OPS {
+            return Err(violation(
+                ViolationClass::MultiHunk,
+                format!(
+                    "patch card proposes {} file operations; maximum is {MAX_FILE_OPS}",
+                    file_ops.len(),
+                ),
+            ));
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for op in file_ops {
+            if op.id.trim().is_empty() {
+                return Err(violation(
+                    ViolationClass::MissingField,
+                    "file operation id is empty",
+                ));
+            }
+            for (label, path) in [("from", &op.from), ("to", &op.to)] {
+                if path.as_os_str().is_empty() {
+                    return Err(violation(
+                        ViolationClass::MissingField,
+                        format!("file operation {label} path is empty"),
+                    ));
+                }
+                if path.is_absolute() {
+                    return Err(violation(
+                        ViolationClass::WrongFile,
+                        format!(
+                            "file operation {label} path must be workspace-relative: {}",
+                            path.display()
+                        ),
+                    ));
+                }
+                if path
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                {
+                    return Err(violation(
+                        ViolationClass::WrongFile,
+                        format!(
+                            "file operation {label} path escapes the workspace: {}",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+            if op.from == op.to {
+                return Err(violation(
+                    ViolationClass::Other,
+                    format!("file operation moves {} onto itself", op.from.display()),
+                ));
+            }
+            if op.to.starts_with(&op.from) {
+                return Err(violation(
+                    ViolationClass::Other,
+                    format!("file operation moves {} into itself", op.from.display()),
+                ));
+            }
+            if !seen.insert(op.from.clone()) || !seen.insert(op.to.clone()) {
+                return Err(violation(
+                    ViolationClass::DuplicateStep,
+                    "file operations reuse the same path",
+                ));
+            }
         }
 
         Ok(())
@@ -676,6 +760,95 @@ mod tests {
 
     use super::*;
 
+    fn file_op(id: &str, from: &str, to: &str) -> FileOp {
+        FileOp {
+            id: id.into(),
+            kind: loopbiotic_protocol::FileOpKind::Move,
+            from: PathBuf::from(from),
+            to: PathBuf::from(to),
+        }
+    }
+
+    fn ops_card(file_ops: Vec<FileOp>, patches: Vec<FilePatch>) -> Card {
+        Card::Patch(loopbiotic_protocol::PatchCard {
+            id: "c_ops".into(),
+            title: "Move files".into(),
+            explanation: "Group the module.".into(),
+            warnings: vec![],
+            goal_complete: false,
+            plan: None,
+            patches,
+            file_ops,
+            actions: vec![loopbiotic_protocol::Action::Apply],
+        })
+    }
+
+    #[test]
+    fn accepts_a_file_ops_only_patch_card() {
+        let card = ops_card(vec![file_op("fo_1", "src/a.ts", "src/lib/a.ts")], vec![]);
+
+        PatchValidator::validate_card(&card).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_card_mixing_patches_and_file_ops() {
+        let card = ops_card(
+            vec![file_op("fo_1", "src/a.ts", "src/lib/a.ts")],
+            vec![FilePatch {
+                id: "p_1".into(),
+                file: PathBuf::from("src/a.ts"),
+                diff: "@@ -1,1 +1,1 @@\n-old\n+new\n".into(),
+                explanation: "E".into(),
+            }],
+        );
+
+        let error = PatchValidator::validate_card(&card).unwrap_err();
+        assert!(error.to_string().contains("cannot mix"));
+    }
+
+    #[test]
+    fn rejects_file_ops_that_escape_or_overlap() {
+        for (from, to, fragment) in [
+            ("/abs/a.ts", "src/a.ts", "workspace-relative"),
+            ("src/a.ts", "../outside.ts", "escapes the workspace"),
+            ("src/a.ts", "src/a.ts", "onto itself"),
+            ("src/dir", "src/dir/inner", "into itself"),
+        ] {
+            let card = ops_card(vec![file_op("fo_1", from, to)], vec![]);
+            let error = PatchValidator::validate_card(&card).unwrap_err();
+            assert!(
+                error.to_string().contains(fragment),
+                "{from} -> {to}: {error}"
+            );
+        }
+
+        let duplicated = ops_card(
+            vec![
+                file_op("fo_1", "src/a.ts", "src/lib/a.ts"),
+                file_op("fo_2", "src/b.ts", "src/lib/a.ts"),
+            ],
+            vec![],
+        );
+        let error = PatchValidator::validate_card(&duplicated).unwrap_err();
+        assert!(error.to_string().contains("reuse the same path"));
+    }
+
+    #[test]
+    fn rejects_too_many_file_ops() {
+        let ops = (0..MAX_FILE_OPS + 1)
+            .map(|index| {
+                file_op(
+                    &format!("fo_{index}"),
+                    &format!("src/file{index}.ts"),
+                    &format!("src/lib/file{index}.ts"),
+                )
+            })
+            .collect();
+
+        let error = PatchValidator::validate_card(&ops_card(ops, vec![])).unwrap_err();
+        assert!(error.to_string().contains("maximum is"));
+    }
+
     #[test]
     fn rejects_absolute_file() {
         let patch = FilePatch {
@@ -769,6 +942,7 @@ mod tests {
                 diff,
                 explanation: "Indent the block.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
 
@@ -816,6 +990,7 @@ mod tests {
                 diff: "@@ -1,0 +1,3 @@\n+<?php\n+\n+final class NewException {}\n".into(),
                 explanation: "Create the exception.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
         let context = ContextBundle {
@@ -851,6 +1026,7 @@ mod tests {
                 diff: "@@ -1,0 +1,1 @@\n+new\n".into(),
                 explanation: "Insert a line.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
         let context = ContextBundle {
@@ -886,6 +1062,7 @@ mod tests {
                 diff: "@@ -51,1 +51,1 @@\n-old\n+new\n".into(),
                 explanation: "Rename one line.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
         let context = ContextBundle {
@@ -923,6 +1100,7 @@ mod tests {
                 diff: "@@ -2,1 +2,1 @@\n-stale\n+new\n".into(),
                 explanation: "Rename one line.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
         let context = ContextBundle {
@@ -959,6 +1137,7 @@ mod tests {
                 diff: "@@ -52,2 +52,2 @@\n marker\n-old\n+new\n".into(),
                 explanation: "Rename one line.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
         let context = ContextBundle {
@@ -1012,6 +1191,7 @@ mod tests {
             goal_complete: false,
             plan: None,
             patches: vec![raw],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
 
@@ -1042,6 +1222,7 @@ mod tests {
                 diff: "@@ -1,2 +1,2 @@\n guard  \n-    old\n+    new\n".into(),
                 explanation: "Fix.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
         let context = ContextBundle {
@@ -1086,6 +1267,7 @@ mod tests {
                 diff: "@@ -9,1 +9,1 @@\n-old\n+new\n".into(),
                 explanation: "Rename one line.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
         let context = ContextBundle {
@@ -1116,6 +1298,7 @@ mod tests {
             goal_complete: false,
             plan: None,
             patches: vec![patch],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         })
     }
@@ -1362,6 +1545,7 @@ mod tests {
                     .into(),
                 explanation: "Rename the local binding.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
 
@@ -1391,6 +1575,7 @@ mod tests {
                     .into(),
                 explanation: "Rename the binding and its use.".into(),
             }],
+            file_ops: vec![],
             actions: vec![loopbiotic_protocol::Action::Apply],
         });
 

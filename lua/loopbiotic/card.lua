@@ -17,6 +17,7 @@ local util = require("loopbiotic.util")
 ---@field flow_path? string[] ordered ids from the editor-resolved Flow graph
 ---@field explanation? string patch cards
 ---@field patches? { id: string, file: string, diff: string }[] patch cards
+---@field file_ops? { id?: string, kind: string, from: string, to: string }[] patch cards proposing moves
 ---@field warnings? string[] patch cards
 ---@field changed_files? string[]
 ---@field summary? string summary cards
@@ -39,6 +40,9 @@ function M.show(card, opts)
     -- progress tick) arrived must not steal the user's focus into the diff.
     diff.restore_source(nil, { focus = opts.enter == true })
   end
+  if card.kind ~= "patch" and require("loopbiotic.fileops").pending() then
+    require("loopbiotic.fileops").clear()
+  end
   if state.details_card ~= card then
     state.details_card = card
     state.details_expanded = false
@@ -47,12 +51,22 @@ function M.show(card, opts)
   surfaces.set_agent_working(card.kind == "working")
 
   if card.kind == "patch" then
-    if diff.valid_preview() then
-      diff.controls(card, opts)
-      return
-    end
-    if diff.show(card, opts) then
-      return
+    local fileops = require("loopbiotic.fileops")
+    if fileops.present(card) then
+      -- A patch card may carry file operations instead of diff hunks; they
+      -- review through the same Accept/Reject gate as a patch. An invalid
+      -- proposal falls through to the inert card rendering below.
+      if fileops.show(card, opts) then
+        return
+      end
+    else
+      if diff.valid_preview() then
+        diff.controls(card, opts)
+        return
+      end
+      if diff.show(card, opts) then
+        return
+      end
     end
   end
 

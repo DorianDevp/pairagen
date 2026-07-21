@@ -315,6 +315,7 @@ function M.submit_reply(text, mode, selected_skills)
   if diff.valid_preview() then
     diff.restore_source()
   end
+  require("loopbiotic.fileops").clear()
 
   local session_id = state.session_id
   mode = prompt.normalize_mode(mode or state.session_mode or config.values.backend.mode)
@@ -358,6 +359,7 @@ function M.stop()
   -- Tear down the UI immediately and notify the daemon in the background;
   -- never show Thinking or a redundant "Stopped" receipt.
   require("loopbiotic.diff").restore_source()
+  require("loopbiotic.fileops").clear()
   thinking.stop(true)
   surfaces.close_all()
 
@@ -434,6 +436,7 @@ end
 
 function M.reset()
   require("loopbiotic.diff").restore_source()
+  require("loopbiotic.fileops").clear()
   thinking.stop(true)
   surfaces.close_all()
   rpc.stop()

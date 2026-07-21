@@ -1088,6 +1088,7 @@ impl BackendAdapter for SingleFileNoPlanBackend {
                     diff: "@@ -1,1 +1,1 @@\n-first\n+FIRST\n".into(),
                     explanation: "Updates the only required location.".into(),
                 }],
+                file_ops: vec![],
                 actions: vec![Action::Apply, Action::Why, Action::Retry, Action::Stop],
             }),
             raw_output: None,
@@ -1152,6 +1153,7 @@ impl BackendAdapter for BatchGoalBackend {
                         .into(),
                     explanation: "Adds a declaration and separately replaces its use.".into(),
                 }],
+                file_ops: vec![],
                 actions: vec![Action::Apply, Action::Why, Action::Retry, Action::Stop],
             }),
             BackendAction::ContractRetry(reason) => {
@@ -1173,6 +1175,7 @@ impl BackendAdapter for BatchGoalBackend {
                         diff: "@@ -1,1 +1,2 @@\n+interface Work {}\n first\n".into(),
                         explanation: "Introduces the interface before any use.".into(),
                     }],
+                    file_ops: vec![],
                     actions: vec![Action::Apply, Action::Why, Action::Retry, Action::Stop],
                 })
             }
@@ -1236,6 +1239,7 @@ impl BackendAdapter for MultiFileGoalBackend {
                         explanation: "Update the consumer.".into(),
                     },
                 ],
+                file_ops: vec![],
                 actions: vec![Action::Apply, Action::Why, Action::Retry, Action::Stop],
             }),
             raw_output: None,
@@ -1483,6 +1487,7 @@ impl BackendAdapter for BadPatchBackend {
                     diff: "not a unified diff".into(),
                     explanation: "Broken.".into(),
                 }],
+                file_ops: vec![],
                 actions: vec![Action::Apply, Action::Retry, Action::Stop],
             }),
         };
@@ -1539,6 +1544,7 @@ impl BackendAdapter for RepairingPatchBackend {
                         diff: "@@ -1,1 +1,1 @@\n-stale\n+new\n".into(),
                         explanation: "Stale attempt.".into(),
                     }],
+                    file_ops: vec![],
                     actions: vec![Action::Apply, Action::Retry, Action::Stop],
                 })
             }
@@ -1557,6 +1563,7 @@ impl BackendAdapter for RepairingPatchBackend {
                         diff: "@@ -1,1 +1,1 @@\n-placeholder\n+repaired\n".into(),
                         explanation: "Repair one line.".into(),
                     }],
+                    file_ops: vec![],
                     actions: vec![Action::Apply, Action::Retry, Action::Stop],
                 })
             }
@@ -1629,6 +1636,7 @@ impl BackendAdapter for UnparsedOutputBackend {
                         diff: "@@ -1,1 +1,1 @@\n-placeholder\n+repaired\n".into(),
                         explanation: "Repair one line.".into(),
                     }],
+                    file_ops: vec![],
                     actions: vec![Action::Apply, Action::Retry, Action::Stop],
                 })
             }
@@ -2000,6 +2008,7 @@ impl BackendAdapter for NavigatingBackend {
                         diff: format!("@@ -1,1 +1,1 @@\n-{old_line}\n+const size = 16\n"),
                         explanation: "Shrinks the icon.".into(),
                     }],
+                    file_ops: vec![],
                     actions: vec![
                         Action::Apply,
                         Action::Retry,

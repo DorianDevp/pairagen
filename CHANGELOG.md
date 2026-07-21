@@ -6,6 +6,20 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Agents can now be steered from a Netrw directory listing and can propose
+  file moves/renames. A directory buffer is a valid PromptWindow source, and a
+  `fix`/`propose` turn may return a patch card carrying workspace-relative
+  `file_ops` (`{kind:"move",from,to}`) instead of a diff. The operations render
+  as a review manifest in AgentWindow with Netrw context and the usual
+  Accept/Reject gate; Accept applies them transactionally (missing target
+  directories created, rollback on failure, loaded buffers retargeted to the
+  moved paths) and continues the Goal, so import fix-ups follow as ordinary
+  reviewed patches. The op is part of the shared contract for every agent
+  backend (raw and structured-output schemas included); a card mixing hunks
+  and file operations is rejected with a repair instruction.
+
 ### Changed
 
 - The PromptWindow mode (`<C-k>`), model (`<C-l>`), and attached-context

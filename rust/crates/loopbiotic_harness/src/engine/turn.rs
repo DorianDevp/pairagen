@@ -407,6 +407,7 @@ impl Engine {
                 goal_complete: card.goal_complete,
                 plan: None,
                 patches: vec![card.patches[index].clone()],
+                file_ops: vec![],
                 actions: card.actions.clone(),
             });
             PatchNormalizer::normalize_card(&mut single, &source)
@@ -623,6 +624,7 @@ mod tests {
                 diff: "@@ -1,1 +1,1 @@\n-old\n+new\n".into(),
                 explanation: "Extract the local helper used for payload validation".into(),
             }],
+            file_ops: vec![],
             actions: vec![Action::Apply],
         });
 

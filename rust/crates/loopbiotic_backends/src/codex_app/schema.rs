@@ -99,6 +99,7 @@ fn any_op_schema(contract: &crate::CardContract) -> Value {
             "explanation",
             "goal_complete",
             "patches",
+            "file_ops",
             "question",
             "options",
             "reason",
@@ -119,6 +120,7 @@ fn any_op_schema(contract: &crate::CardContract) -> Value {
             "explanation": {"type": ["string", "null"]},
             "goal_complete": {"type": ["boolean", "null"]},
             "patches": {"type": ["array", "null"]},
+            "file_ops": file_ops_schema(),
             "question": {"type": ["string", "null"]},
             "options": {
                 "type": ["array", "null"],
@@ -265,17 +267,41 @@ fn finding_schema() -> Value {
     )
 }
 
+/// Filesystem operations a patch op may carry instead of hunks. Null for an
+/// ordinary content patch.
+fn file_ops_schema() -> Value {
+    json!({
+        "type": ["array", "null"],
+        "maxItems": loopbiotic_protocol::MAX_FILE_OPS,
+        "items": object_schema(
+            &["kind", "from", "to"],
+            json!({
+                "kind": {"type": "string", "enum": ["move"]},
+                "from": {"type": "string"},
+                "to": {"type": "string"}
+            })
+        )
+    })
+}
+
 fn patch_schema(contract: &crate::CardContract) -> Value {
     object_schema(
-        &["op", "title", "explanation", "goal_complete", "patches"],
+        &[
+            "op",
+            "title",
+            "explanation",
+            "goal_complete",
+            "patches",
+            "file_ops",
+        ],
         json!({
             "op": {"type": "string", "enum": ["patch"]},
             "title": {"type": "string"},
             "explanation": {"type": "string"},
             "goal_complete": {"type": "boolean"},
+            "file_ops": file_ops_schema(),
             "patches": {
                 "type": "array",
-                "minItems": 1,
                 "maxItems": contract.max_patch_files,
                 "items": object_schema(
                     &["id", "file", "explanation", "hunks"],

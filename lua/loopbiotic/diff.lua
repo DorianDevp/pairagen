@@ -438,9 +438,17 @@ function M.reject()
     state.goal.next_step = nil
   end
 
+  M.show_paused("Accepted source was restored. The Goal is paused.")
+  M.acknowledge_rejection({ patch.id })
+  require("loopbiotic.prompt").reply()
+end
+
+-- The paused/rejected View shared by patch and file-operation rejection: the
+-- rejected proposal is no longer actionable, only Reply and Quit remain.
+function M.show_paused(detail)
   local lines = {
     "Proposal rejected",
-    "Accepted source was restored. The Goal is paused.",
+    detail or "The Goal is paused.",
     "",
     "[m] Reply   [q] Quit",
   }
@@ -461,9 +469,6 @@ function M.reject()
       bind(buf, { "q" }, require("loopbiotic").stop)
     end,
   })
-
-  M.acknowledge_rejection({ patch.id })
-  require("loopbiotic.prompt").reply()
 end
 
 function M.acknowledge_rejection(patch_ids)

@@ -15,7 +15,10 @@ struct StructuredPatchOp {
     goal_complete: Option<bool>,
     #[serde(default)]
     plan: Option<loopbiotic_protocol::GoalPlan>,
+    #[serde(default)]
     patches: Vec<StructuredFilePatch>,
+    #[serde(default)]
+    file_ops: Vec<loopbiotic_protocol::AgentFileOp>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +85,14 @@ fn parse_structured_patch(output: &str) -> Result<Card> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    // Reuse the shared op mapping so ids and path normalization stay
+    // identical to the raw AgentOp route.
+    let file_ops = op
+        .file_ops
+        .into_iter()
+        .enumerate()
+        .map(|(index, file_op)| file_op.file_op(index + 1))
+        .collect();
 
     Ok(Card::Patch(loopbiotic_protocol::PatchCard {
         id: "c_agent".into(),
@@ -91,6 +102,7 @@ fn parse_structured_patch(output: &str) -> Result<Card> {
         goal_complete: op.goal_complete.unwrap_or(false),
         plan: op.plan,
         patches,
+        file_ops,
         actions: vec![
             Action::Apply,
             Action::Why,
