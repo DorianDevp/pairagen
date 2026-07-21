@@ -273,7 +273,7 @@ function M.controls(card, opts)
   })
 end
 
-function M.bind_controls(buf, win, card, lines)
+function M.bind_controls(buf, _win, card, lines)
   local keys = require("loopbiotic.config").values.keymaps
   for index, line in ipairs(lines) do
     local group = line:match("^Goal") and "LoopbioticGoal" or line:match("^%[") and "LoopbioticAction"

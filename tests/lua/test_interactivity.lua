@@ -145,9 +145,12 @@ return function(t)
     state.session_id = "s_scope"
     card.show({ id = "working", kind = "working", turn_id = "turn", message = "Busy", actions = {} })
     local calls = 0
-    t.eq(scope.run("reply", function()
-      calls = calls + 1
-    end), false)
+    t.eq(
+      scope.run("reply", function()
+        calls = calls + 1
+      end),
+      false
+    )
     t.eq(calls, 0, "callback was not activated")
     cleanup()
   end)

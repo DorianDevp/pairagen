@@ -8,10 +8,6 @@ local function valid_win(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
 
-local function valid_buf(buf)
-  return buf ~= nil and vim.api.nvim_buf_is_valid(buf)
-end
-
 local function current_tab()
   return vim.api.nvim_get_current_tabpage()
 end

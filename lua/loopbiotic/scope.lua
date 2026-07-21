@@ -9,8 +9,7 @@ end
 
 function M.allows(action)
   if action == "prompt" then
-    return not surfaces.prompt_open()
-      and not (surfaces.agent_view() == "review" and surfaces.agent_actionable())
+    return not surfaces.prompt_open() and not (surfaces.agent_view() == "review" and surfaces.agent_actionable())
   end
   if action == "reset" then
     return true

@@ -1,5 +1,4 @@
 local config = require("loopbiotic.config")
-local navigation = require("loopbiotic.navigation")
 local state = require("loopbiotic.state")
 local surfaces = require("loopbiotic.surfaces")
 local ui = require("loopbiotic.ui")
@@ -541,7 +540,6 @@ function M.bind(buf, card)
       M.toggle_details(card)
     end, { buffer = buf, nowait = true, silent = true })
   end
-
 end
 
 function M.anchor(card)

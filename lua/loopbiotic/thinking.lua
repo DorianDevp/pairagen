@@ -127,7 +127,6 @@ function M.render()
       title = drafting and " Loopbiotic: Drafting " or " Loopbiotic: Working ",
     },
   })
-
 end
 
 function M.current(request_id)

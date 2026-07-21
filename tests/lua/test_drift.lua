@@ -10,7 +10,8 @@ return function(t)
       kind = "patch",
       patches = { { id = "patch", file = file, diff = patch } },
       actions = { "retry" },
-    }, file
+    },
+      file
   end
 
   local function inert_error(card, expected)

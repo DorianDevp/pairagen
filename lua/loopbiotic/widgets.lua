@@ -120,7 +120,13 @@ function M.summary()
   for _, ref in ipairs(refs) do
     files[ref.file] = true
   end
-  return string.format("Context %d ref%s · %d file%s", #refs, #refs == 1 and "" or "s", vim.tbl_count(files), vim.tbl_count(files) == 1 and "" or "s")
+  return string.format(
+    "Context %d ref%s · %d file%s",
+    #refs,
+    #refs == 1 and "" or "s",
+    vim.tbl_count(files),
+    vim.tbl_count(files) == 1 and "" or "s"
+  )
 end
 
 function M.attach(context)

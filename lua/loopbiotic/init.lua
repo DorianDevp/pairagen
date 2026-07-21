@@ -268,7 +268,6 @@ function M.submit_prompt(text, mode, source, selected_skills)
 end
 
 local function send_session_reply(params, request_id, mode)
-  local session_id = params.session_id
   rpc.request("session/reply", params, function(message)
     if not thinking.current(request_id) then
       return

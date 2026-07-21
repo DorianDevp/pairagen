@@ -499,7 +499,11 @@ return function(t)
     local snapshot = surfaces.snapshot()
     t.eq(snapshot.prompt.mode, "open")
     t.eq(snapshot.agent.mode, "closed", "Flow did not create an AgentWindow before a response")
-    t.eq(vim.api.nvim_list_wins() and #vim.api.nvim_list_wins() >= 3, true, "PromptWindow uses only its technical frames")
+    t.eq(
+      vim.api.nvim_list_wins() and #vim.api.nvim_list_wins() >= 3,
+      true,
+      "PromptWindow uses only its technical frames"
+    )
     prompt.close()
   end)
 

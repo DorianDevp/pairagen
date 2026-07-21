@@ -806,11 +806,15 @@ function M.lines(graph, width)
     else
       local location = entry.location
       local label = entry.kind == "call" and "call" or "ref "
-      local ref_id = string.format("flow:%s:%s:%d:%d", entry.kind, location.file, location.start_line, location.start_column)
+      local ref_id =
+        string.format("flow:%s:%s:%d:%d", entry.kind, location.file, location.start_line, location.start_column)
       local selected = require("loopbiotic.state").pending_widget_context[ref_id] and "[x]" or "[ ]"
       table.insert(
         lines,
-        trim(string.format("%s %s  %s:%d:%d", selected, label, location.file, location.start_line, location.start_column), width)
+        trim(
+          string.format("%s %s  %s:%d:%d", selected, label, location.file, location.start_line, location.start_column),
+          width
+        )
       )
     end
   end
