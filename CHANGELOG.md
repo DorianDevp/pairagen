@@ -16,6 +16,10 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Restarting the backend (stop mid-turn, agent or model switch) no longer
+  races the old daemon's exit event: a stale process exiting after the fresh
+  one spawned could clear the new job's state, fail its queued requests, and
+  surface a bogus "backend protocol mismatch … reports legacy" error.
 - Split-window layouts no longer throw the cursor into the first (top-left)
   split: closing a focused float (PromptWindow after submit, AgentWindow on
   quit) returns the cursor to the window it was opened from, card anchoring

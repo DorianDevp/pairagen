@@ -84,13 +84,26 @@ function M.start(backend_command)
     env = config.backend_env(),
     stdout_buffered = false,
     stderr_buffered = false,
-    on_stdout = function(_, data)
+    on_stdout = function(job, data)
+      if M.job ~= job then
+        return
+      end
       M.on_data(data)
     end,
-    on_stderr = function(_, data)
+    on_stderr = function(job, data)
+      if M.job ~= job then
+        return
+      end
       M.on_stderr(data)
     end,
-    on_exit = function(_, code)
+    on_exit = function(job, code)
+      if M.job ~= job then
+        -- A previous backend process exiting after a restart (stop mid-turn,
+        -- agent/model switch) must not clobber the fresh job's state or fail
+        -- its queued requests.
+        log.event("backend_exit", { code = code, stale = true })
+        return
+      end
       log.event("backend_exit", { code = code })
       if code ~= 0 and code ~= 143 then
         log.write("backend exited", { code = code })
