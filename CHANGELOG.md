@@ -8,6 +8,20 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Model output that is not parseable as a Loopbiotic op (for example JSON with
+  an unescaped quote inside a string value) is now repaired through the normal
+  retry loop: the model is asked to re-emit one strict JSON object before the
+  error card is shown. The error card with the raw output still appears after
+  three failed attempts.
+- The skills picker no longer errors on open; `q`/`<Esc>` cancel it and restore
+  the previous selection as the footer promises.
+- The PromptWindow title now names the model of the phase the current mode
+  runs: discovery modes show the discovery model instead of the patch model,
+  and an explicit model change updates the title immediately.
+- The OpenAI-compatible backend now runs each turn under the shared
+  `LOOPBIOTIC_TURN_TIMEOUT_SECS` deadline, no longer leaks cancellation state
+  when a speculative turn is aborted, caps workspace file reads, and surfaces
+  the raw model output when a local model answers in prose.
 - Empty or malformed model-preference state now supplies both patch and
   discovery model maps instead of crashing backend setup.
 - OpenAI-compatible local models now return the same typed patch hunks as
