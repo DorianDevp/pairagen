@@ -235,7 +235,9 @@ The reproducible real-model A/B runner compares no profile/Skills, profile only,
 and profile plus selected Skills across the fixtures in
 `tests/fixtures/project-intelligence`. See the
 [2026-07-20 benchmark](doc/benchmarks/project-intelligence-2026-07-20.md) for
-methodology and measured tradeoffs, or run:
+methodology and measured tradeoffs. A planned follow-up case is specified in
+[the Angular reactivity benchmark](doc/benchmarks/angular-reactivity-signal-forms.md).
+To reproduce, run:
 
 ```sh
 scripts/project-intelligence-report.sh --repeat 3 --out results.jsonl
@@ -476,7 +478,9 @@ the agent prompt.
 from AgentWindow; the user still reviews and submits the prompt snapshot.
 
 The future optional classical-ML ranking design is documented in [`doc/ml.md`](doc/ml.md).
-The current implementation does not train or run an ML model.
+The current implementation does not train or run an ML model. The planned
+VS Code client design is documented in [`doc/vscode.md`](doc/vscode.md); no
+VS Code code exists yet.
 
 ## Commands
 
