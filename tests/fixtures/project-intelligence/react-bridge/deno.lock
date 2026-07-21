@@ -1,0 +1,8 @@
+{
+  "specifiers": {
+    "npm:@angular/core@22.0.6": "22.0.6_rxjs@7.8.2",
+    "npm:nx@23.1.0": "23.1.0",
+    "npm:react@18.3.1": "18.3.1",
+    "npm:typescript@6.0": "6.0.3"
+  }
+}

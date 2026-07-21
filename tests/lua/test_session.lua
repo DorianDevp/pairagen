@@ -45,6 +45,23 @@ return function(t)
     state.reset()
   end)
 
+  t.test("apply_turn_result records the actual model per phase", function()
+    state.reset()
+    with_stubbed_show(function()
+      session.apply_turn_result(turn_result())
+      t.eq(state.backend_models.discovery, "reported-model", "finding records the discovery phase")
+      t.eq(state.backend_models.patch, nil, "patch phase untouched")
+
+      local patch_result = turn_result()
+      patch_result.model = "patch-model"
+      patch_result.card = { id = "c2", kind = "patch", title = "Patch" }
+      session.apply_turn_result(patch_result)
+      t.eq(state.backend_models.patch, "patch-model", "patch card records the patch phase")
+      t.eq(state.backend_models.discovery, "reported-model", "discovery record kept")
+    end)
+    state.reset()
+  end)
+
   t.test("apply_turn_result keeps the previous goal and model when absent", function()
     state.reset()
     state.goal = { statement = "existing goal" }
@@ -83,6 +100,45 @@ return function(t)
       session.apply_turn_result(turn_result(), { update_model = false })
       t.eq(state.backend_model, "existing-model", "backend_model")
       t.eq(state.token_usage.total_tokens, 20, "token_usage")
+    end)
+    state.reset()
+  end)
+
+  t.test("accepted patch completion replaces Working in AgentWindow", function()
+    state.reset()
+    state.card = { id = "working", kind = "working" }
+    local result = turn_result()
+    result.goal = { statement = "updated goal", status = "complete" }
+    result.card = {
+      id = "complete",
+      kind = "summary",
+      title = "Goal complete",
+      summary = "The accepted change completed the goal.",
+    }
+
+    with_stubbed_show(function(shown)
+      session.apply_turn_result(result)
+      t.eq(#shown, 1, "completion remains visible in the same AgentWindow")
+      t.eq(shown[1].id, "complete")
+      t.eq(state.goal.status, "complete", "goal completion is retained")
+    end)
+    state.reset()
+  end)
+
+  t.test("accepted patch still surfaces the next unresolved change", function()
+    state.reset()
+    local result = turn_result()
+    result.card = {
+      id = "next-patch",
+      kind = "patch",
+      explanation = "Continue with the next unresolved part.",
+      patches = {},
+    }
+
+    with_stubbed_show(function(shown)
+      session.apply_turn_result(result)
+      t.eq(#shown, 1, "next patch remains reviewable")
+      t.eq(shown[1].id, "next-patch")
     end)
     state.reset()
   end)

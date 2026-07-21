@@ -1,0 +1,6 @@
+{
+  "name": "feature-host",
+  "sourceRoot": "libs/editor/feature-host/src",
+  "projectType": "library",
+  "implicitDependencies": ["editor-contract", "editor-react"]
+}

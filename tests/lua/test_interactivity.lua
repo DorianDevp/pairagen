@@ -2,8 +2,9 @@ return function(t)
   local card = require("loopbiotic.card")
   local config = require("loopbiotic.config")
   local diff = require("loopbiotic.diff")
+  local scope = require("loopbiotic.scope")
   local state = require("loopbiotic.state")
-  local ui = require("loopbiotic.ui")
+  local surfaces = require("loopbiotic.surfaces")
 
   local function mapped(buf, lhs)
     for _, mapping in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
@@ -18,227 +19,317 @@ return function(t)
   end
 
   local function cleanup()
-    ui.close(state.card_win)
-    state.card_win = nil
-    for _, buf in ipairs({ state.card_buf, state.diff_buf, state.source_buf }) do
-      if buf and vim.api.nvim_buf_is_valid(buf) then
-        pcall(vim.api.nvim_buf_delete, buf, { force = true })
-      end
-    end
+    require("loopbiotic.thinking").stop(false)
+    surfaces.close_all()
+    vim.cmd("silent! tabonly")
     state.reset()
   end
 
-  t.test("resume focuses the visible action window", function()
-    state.reset()
-    local source = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_win_set_buf(0, source)
-    state.session_id = "s_focus"
-    state.source_buf = source
+  local function source()
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_win_set_buf(0, buf)
+    state.source_buf = buf
     state.source_cursor = { 1, 0 }
+    return buf
+  end
 
-    card.show({
-      id = "c_focus",
-      kind = "finding",
-      title = "A finding",
-      finding = "Keep the editor interactive.",
-      actions = { "follow", "goal", "stop" },
-    })
-    t.eq(vim.api.nvim_get_current_buf(), source, "card does not steal focus")
+  t.test("AgentWindow is a singleton and response rendering does not steal focus", function()
+    cleanup()
+    local source_buf = source()
+    state.session_id = "s_singleton"
+    card.show({ id = "one", kind = "finding", title = "One", finding = "First", actions = {} })
+    local first = surfaces.snapshot().agent
+    t.eq(vim.api.nvim_get_current_buf(), source_buf, "async render preserves source focus")
 
+    card.show({ id = "two", kind = "finding", title = "Two", finding = "Second", actions = {} })
+    local second = surfaces.snapshot().agent
+    t.eq(second.buf, first.buf, "same AgentWindow buffer is reused")
+    t.eq(second.win, first.win, "same AgentWindow frame is reused")
     require("loopbiotic").resume()
-
-    t.eq(vim.api.nvim_get_current_win(), state.card_win, "resume enters card")
-    t.eq(mapped(state.card_buf, "f"), true, "follow shortcut")
-    t.eq(mapped(state.card_buf, "G"), true, "goal shortcut")
+    t.eq(vim.api.nvim_get_current_win(), second.win, "resume focuses AgentWindow")
     cleanup()
   end)
 
-  t.test("working card exposes a local cancel shortcut", function()
-    state.reset()
-    local source = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_win_set_buf(0, source)
-    state.session_id = "s_working"
-    state.source_buf = source
-    state.source_cursor = { 1, 0 }
+  t.test("submitted prompt exists before the first stable Working render", function()
+    cleanup()
+    local source_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_win_set_buf(0, source_buf)
+    vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "local answer = 42" })
+    local captured = require("loopbiotic.context").capture(nil, { skip_lsp = true })
+    state.source_buf = nil
+    state.source_cursor = nil
 
+    local rpc = require("loopbiotic.rpc")
+    local context = require("loopbiotic.context")
+    local thinking = require("loopbiotic.thinking")
+    local ui = require("loopbiotic.ui")
+    local original_request = rpc.request
+    local original_workspace_hints = context.workspace_hints
+    local original_render = surfaces.render_agent
+    local first_render
+    local sent
+    local events = {}
+
+    rpc.request = function(method, params)
+      table.insert(events, method)
+      sent = { method = method, params = params }
+    end
+    context.workspace_hints = function()
+      return {}
+    end
+    surfaces.render_agent = function(lines, opts)
+      table.insert(events, "AgentWindow:working")
+      if not first_render then
+        first_render = {
+          source_buf = state.source_buf,
+          goal = state.goal and state.goal.statement,
+          anchor = vim.deepcopy(opts.window.anchor),
+        }
+      end
+      return original_render(lines, opts)
+    end
+
+    local ok, err = pcall(require("loopbiotic").submit_prompt, "Explain answer", "investigate", captured)
+    rpc.request = original_request
+    context.workspace_hints = original_workspace_hints
+    surfaces.render_agent = original_render
+    if not ok then
+      cleanup()
+      error(err, 0)
+    end
+
+    t.eq(first_render.source_buf, source_buf, "source precedes Working")
+    t.eq(first_render.goal, "Explain answer", "prompt precedes Working")
+    t.eq(type(first_render.anchor), "table", "first render has its source anchor")
+    t.eq(sent.method, "session/start")
+    t.eq(sent.params.prompt, "Explain answer")
+    t.eq(events, { "AgentWindow:working", "session/start" }, "action -> reaction -> transport")
+
+    local agent = surfaces.snapshot().agent
+    local before = vim.api.nvim_win_get_config(agent.win)
+    thinking.tick(state.thinking_request_id)
+    local after = vim.api.nvim_win_get_config(agent.win)
+    t.eq(
+      { ui.number(after.row), ui.number(after.col) },
+      { ui.number(before.row), ui.number(before.col) },
+      "progress render keeps the initial geometry"
+    )
+    cleanup()
+  end)
+
+  t.test("working AgentWindow has no Reply or Cancel action", function()
+    cleanup()
+    source()
+    state.session_id = "s_working"
     card.show({
-      id = "c_working",
+      id = "working",
       kind = "working",
-      turn_id = "t_1",
-      title = "Agent still working",
-      phase = "reviewing",
-      message = "Reading one relevant block.",
-      deadline_ms = 10000,
-      elapsed_ms = 10000,
+      turn_id = "turn",
+      title = "Working",
+      phase = "drafting",
+      message = "Still working",
       actions = { "cancel_turn", "stop" },
     })
-
-    t.eq(mapped(state.card_buf, "c"), true, "cancel shortcut")
-    t.eq(mapped(state.card_buf, "q"), true, "stop shortcut")
+    local agent = surfaces.snapshot().agent
+    t.eq(scope.allows("reply"), false, "reply is out of scope")
+    t.eq(mapped(agent.buf, "m"), false, "no local Reply")
+    t.eq(mapped(agent.buf, "c"), false, "no local Cancel")
+    t.eq(mapped(agent.buf, "h"), false, "no hidden Wrap alias")
+    t.eq(mapped(agent.buf, "q"), true, "Quit remains local")
     cleanup()
   end)
 
-  t.test("draft control card binds every configured shortcut it prints", function()
-    state.reset()
-    local draft = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(draft, 0, -1, false, { "changed" })
-    vim.api.nvim_win_set_buf(0, draft)
-    state.session_id = "s_draft"
-    state.diff_buf = draft
-    state.diff_win = vim.api.nvim_get_current_win()
-    state.diff_cursor = { 1, 0 }
-    state.diff_first_row = 0
-    state.goal = { statement = "Keep review interactive", completed_steps = {} }
-
-    diff.controls({
-      id = "c_patch",
-      kind = "patch",
-      title = "Small hunk",
-      explanation = "Change one coherent block.",
-      actions = { "apply", "why", "retry", "stop" },
-    })
-
-    local keys = config.values.keymaps
-    for _, lhs in ipairs({
-      keys.draft_accept,
-      keys.draft_reject,
-      keys.draft_retry,
-      keys.why,
-      keys.go_to,
-    }) do
-      t.eq(mapped(state.card_buf, lhs), true, "missing draft shortcut " .. lhs)
-    end
+  t.test("out-of-scope pm is a silent no-op while the agent works", function()
+    cleanup()
+    source()
+    state.session_id = "s_scope"
+    card.show({ id = "working", kind = "working", turn_id = "turn", message = "Busy", actions = {} })
+    local calls = 0
+    t.eq(
+      scope.run("reply", function()
+        calls = calls + 1
+      end),
+      false
+    )
+    t.eq(calls, 0, "callback was not activated")
     cleanup()
   end)
 
-  t.test("reply restores the source and abandons the live draft preview", function()
-    state.reset()
-    local loopbiotic = require("loopbiotic")
+  t.test("opening PromptWindow during work cancels the real turn and installs a submit barrier", function()
+    cleanup()
+    source()
+    state.session_id = "s_interrupt"
+    card.show({ id = "working", kind = "working", turn_id = "turn-1", message = "Busy", actions = {} })
     local rpc = require("loopbiotic.rpc")
-    local source = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(source, 0, -1, false, { "original" })
-    local source_tick = vim.api.nvim_buf_get_changedtick(source)
-    local draft = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(draft, 0, -1, false, { "changed" })
-    local draft_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(draft_win, draft)
-    local card_buf, card_win = ui.float({ "Draft controls" }, { enter = true })
-
-    state.session_id = "s_reply_draft"
-    state.source_buf = source
-    state.source_cursor = { 1, 0 }
-    state.card = { id = "c_patch", kind = "patch", actions = { "apply", "why", "retry", "stop" } }
-    state.card_buf = card_buf
-    state.card_win = card_win
-    state.diff_buf = draft
-    state.diff_win = draft_win
-    state.diff_source_buf = source
-    state.diff_source_tick = source_tick
-
-    local previous_thinking = config.values.thinking.enabled
     local original_request = rpc.request
-    local sent
-    config.values.thinking.enabled = false
-    rpc.request = function(method, params)
-      sent = { method = method, params = params }
-      return 1
-    end
-
-    local ok, err = pcall(function()
-      loopbiotic.reply("Explain the tradeoff before changing this.")
-      t.eq(sent.method, "session/reply", "reply request")
-      t.eq(vim.api.nvim_get_current_buf(), source, "source restored")
-      t.eq(vim.api.nvim_buf_is_valid(draft), false, "draft wiped")
-      t.eq(state.diff_buf, nil, "preview state cleared")
-      t.eq(state.card_win, nil, "draft controls closed")
-    end)
-
-    rpc.request = original_request
-    config.values.thinking.enabled = previous_thinking
-    if vim.api.nvim_buf_is_valid(source) then
-      vim.api.nvim_buf_delete(source, { force = true })
-    end
-    state.reset()
-    if not ok then
-      error(err, 0)
-    end
-  end)
-
-  t.test("a non-patch result restores any preview left by an async turn", function()
-    state.reset()
-    local source = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(source, 0, -1, false, { "original" })
-    local draft = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(draft, 0, -1, false, { "changed" })
-    local draft_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(draft_win, draft)
-    local old_card_buf, old_card_win = ui.float({ "Draft controls" }, { enter = true })
-
-    state.session_id = "s_async_result"
-    state.source_buf = source
-    state.source_cursor = { 1, 0 }
-    state.card_buf = old_card_buf
-    state.card_win = old_card_win
-    state.diff_buf = draft
-    state.diff_win = draft_win
-    state.diff_source_buf = source
-    state.diff_source_tick = vim.api.nvim_buf_get_changedtick(source)
-
-    card.show({
-      id = "c_finding",
-      kind = "finding",
-      title = "Explain before editing",
-      finding = "The pending draft was superseded by conversation.",
-      actions = { "fix", "stop" },
-    })
-
-    t.eq(vim.api.nvim_get_current_buf(), source, "source restored")
-    t.eq(vim.api.nvim_buf_is_valid(draft), false, "draft wiped")
-    t.eq(state.diff_buf, nil, "preview state cleared")
-    t.eq(vim.api.nvim_win_is_valid(state.card_win), true, "finding rendered")
-
-    ui.close(state.card_win)
-    state.card_win = nil
-    if vim.api.nvim_buf_is_valid(source) then
-      vim.api.nvim_buf_delete(source, { force = true })
-    end
-    state.reset()
-  end)
-
-  t.test("background-tab action floats are deferred instead of remotely freed", function()
-    local origin_tab = vim.api.nvim_get_current_tabpage()
-    local origin_win = vim.api.nvim_get_current_win()
-    local draft = vim.api.nvim_create_buf(false, true)
-    vim.bo[draft].buftype = "nofile"
-    vim.bo[draft].bufhidden = "wipe"
-    vim.api.nvim_win_set_buf(origin_win, draft)
-    local old_buf, old_win = ui.float({ "Draft controls" }, { enter = true })
-
-    vim.cmd("tabnew")
-    local new_buf, new_win = ui.render(old_buf, old_win, { "Conversation" }, { enter = false })
-
-    local ok, err = pcall(function()
-      t.eq(vim.api.nvim_win_is_valid(old_win), true, "old float remains allocated")
-      t.eq(vim.api.nvim_tabpage_get_win(origin_tab), old_win, "origin pointer remains valid")
-      t.eq(vim.api.nvim_win_get_tabpage(new_win), vim.api.nvim_get_current_tabpage(), "new float follows tab")
-    end)
-
-    ui.close(new_win)
-    vim.api.nvim_set_current_tabpage(origin_tab)
-    ui.cleanup_deferred()
-    t.eq(vim.api.nvim_win_is_valid(old_win), false, "old float closes on its own tab")
-    t.eq(vim.api.nvim_tabpage_get_win(origin_tab), origin_win, "normal origin window restored")
-    vim.cmd("tabonly")
-    local replacement = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_win_set_buf(0, replacement)
-    for _, buf in ipairs({ draft, old_buf, new_buf }) do
-      if vim.api.nvim_buf_is_valid(buf) then
-        vim.api.nvim_buf_delete(buf, { force = true })
+    local cancellation
+    rpc.request = function(method, params, callback)
+      if method == "session/action" then
+        cancellation = { params = params, callback = callback }
       end
     end
-
+    local ok, err = pcall(require("loopbiotic").prompt)
+    rpc.request = original_request
     if not ok then
       error(err, 0)
     end
+    t.eq(cancellation.params.action, "cancel_turn")
+    t.eq(state.cancelled_turn_id, "turn-1")
+    t.eq(state.turn_barrier, true)
+    t.eq(surfaces.prompt_open(), true)
+    t.eq(surfaces.agent_view(), "interrupted")
+    cancellation.callback({ result = { goal = { status = "paused" } } })
+    t.eq(state.turn_barrier, false)
+    t.eq(state.goal.status, "paused")
+    cleanup()
+  end)
+
+  t.test("wrapped and off-tab AgentWindow retains one owner tab", function()
+    cleanup()
+    source()
+    state.session_id = "s_tabs"
+    card.show({ id = "one", kind = "finding", title = "One", finding = "First", actions = {} })
+    local owner = vim.api.nvim_get_current_tabpage()
+    require("loopbiotic").hide()
+    t.eq(surfaces.agent_mode(), "wrapped")
+
+    vim.cmd("tabnew")
+    local foreign = vim.api.nvim_get_current_tabpage()
+    card.show({ id = "two", kind = "finding", title = "Two", finding = "Updated off-tab", actions = {} })
+    t.eq(surfaces.agent_owner_tab(), owner, "async update cannot migrate ownership")
+    t.eq(vim.api.nvim_get_current_tabpage(), foreign)
+
+    require("loopbiotic").resume()
+    t.eq(vim.api.nvim_get_current_tabpage(), owner, "pr restores owner tab")
+    t.eq(surfaces.agent_mode(), "visible", "pr unwraps")
+    cleanup()
+  end)
+
+  t.test("PromptWindow can coexist with AgentWindow and close returns focus", function()
+    cleanup()
+    source()
+    state.session_id = "s_prompt"
+    card.show({ id = "one", kind = "finding", title = "One", finding = "First", actions = {} })
+    require("loopbiotic.prompt").open_for({
+      title = " Prompt test ",
+      footer = " test ",
+      return_to_agent = true,
+      submit = function() end,
+    })
+    t.eq(surfaces.prompt_open(), true)
+    t.eq(surfaces.agent_mode(), "visible")
+    require("loopbiotic.prompt").close()
+    t.eq(vim.api.nvim_get_current_win(), surfaces.snapshot().agent.win)
+    cleanup()
+  end)
+
+  t.test("Reply PromptWindow submits one immutable selected mode", function()
+    cleanup()
+    source()
+    state.session_id = "s_mode"
+    local prompt = require("loopbiotic.prompt")
+    prompt.reply("review")
+    local prompt_buf = surfaces.snapshot().prompt.buf
+    vim.api.nvim_buf_set_lines(prompt_buf, 0, -1, false, { "Check this contract" })
+    local submitted
+
+    prompt.submit(prompt_buf, function(text, mode)
+      submitted = { text = text, mode = mode }
+    end)
+
+    t.eq(submitted, { text = "Check this contract", mode = "review" })
+    t.eq(state.prompt_stash_mode, "review")
+    cleanup()
+  end)
+
+  t.test("Review prints and binds only the mutation decision plus local navigation", function()
+    cleanup()
+    local draft = source()
+    state.session_id = "s_review"
+    state.diff_buf = draft
+    state.diff_win = vim.api.nvim_get_current_win()
+    state.diff_source_buf = vim.api.nvim_create_buf(false, true)
+    state.diff_source_tick = vim.api.nvim_buf_get_changedtick(state.diff_source_buf)
+    diff.controls({ id = "patch", kind = "patch", explanation = "One change", actions = { "retry", "why" } })
+    local agent = surfaces.snapshot().agent
+    t.eq(mapped(agent.buf, config.values.keymaps.draft_accept), true)
+    t.eq(mapped(agent.buf, config.values.keymaps.draft_reject), true)
+    t.eq(mapped(agent.buf, config.values.keymaps.go_to), true, "Review binds local navigation")
+    t.eq(mapped(agent.buf, config.values.keymaps.details), false, "short explanation offers no details toggle")
+    t.eq(mapped(agent.buf, "m"), false, "Review has no Reply before a decision")
+    t.eq(mapped(agent.buf, "t"), false, "Review has no Retry")
+
+    diff.controls({
+      id = "patch",
+      kind = "patch",
+      explanation = string.rep("A long explanation that overflows the control line ", 3),
+      actions = { "retry", "why" },
+    })
+    t.eq(mapped(agent.buf, config.values.keymaps.details), true, "overflowing explanation binds the details toggle")
+    cleanup()
+  end)
+
+  t.test("Reject is token-free, restores source, pauses AgentWindow and opens Reply", function()
+    cleanup()
+    local source_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "accepted" })
+    local draft = source()
+    vim.api.nvim_buf_set_lines(draft, 0, -1, false, { "proposed" })
+    state.session_id = "s_reject"
+    state.card = { id = "card", kind = "patch", patches = { { id = "patch", file = "x" } } }
+    state.goal = { statement = "goal", status = "active" }
+    state.diff_buf = draft
+    state.diff_win = vim.api.nvim_get_current_win()
+    state.diff_source_buf = source_buf
+    state.diff_source_tick = vim.api.nvim_buf_get_changedtick(source_buf)
+    diff.controls(state.card)
+
+    local rpc = require("loopbiotic.rpc")
+    local prompt = require("loopbiotic.prompt")
+    local original_request = rpc.request
+    local original_reply = prompt.reply
+    local sent
+    local opened = false
+    rpc.request = function(method, params)
+      sent = { method = method, params = params }
+    end
+    prompt.reply = function()
+      opened = true
+    end
+    local ok, err = pcall(diff.reject)
+    rpc.request = original_request
+    prompt.reply = original_reply
+    if not ok then
+      error(err, 0)
+    end
+
+    t.eq(sent.method, "patch/apply_result")
+    t.eq(sent.params.accepted, false)
+    t.eq(state.thinking_request_id, nil, "Reject starts no model phase")
+    t.eq(state.goal.status, "paused")
+    t.eq(surfaces.agent_view(), "paused")
+    t.eq(opened, true, "Reply PromptWindow route opens")
+    t.eq(vim.api.nvim_get_current_buf(), source_buf, "accepted source restored")
+    cleanup()
+  end)
+
+  t.test("Stop closes both singleton surfaces before backend acknowledgement", function()
+    cleanup()
+    source()
+    state.session_id = "s_stop"
+    card.show({ id = "one", kind = "finding", title = "One", finding = "First", actions = {} })
+    local rpc = require("loopbiotic.rpc")
+    local original_request = rpc.request
+    local sent
+    rpc.request = function(method, params)
+      sent = { method = method, params = params }
+    end
+    require("loopbiotic").stop()
+    rpc.request = original_request
+    t.eq(sent.method, "session/stop")
+    t.eq(state.session_id, nil)
+    t.eq(surfaces.agent_mode(), "closed")
+    t.eq(surfaces.prompt_open(), false)
+    cleanup()
   end)
 end

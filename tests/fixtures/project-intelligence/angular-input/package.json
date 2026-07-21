@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "@angular/core": "22.0.6"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.0"
+  }
+}

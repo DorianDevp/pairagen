@@ -8,6 +8,28 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Model output that is not parseable as a Loopbiotic op (for example JSON with
+  an unescaped quote inside a string value) is now repaired through the normal
+  retry loop: the model is asked to re-emit one strict JSON object before the
+  error card is shown. The error card with the raw output still appears after
+  three failed attempts.
+- The skills picker no longer errors on open; `q`/`<Esc>` cancel it and restore
+  the previous selection as the footer promises.
+- The PromptWindow title now names the model of the phase the current mode
+  runs: discovery modes show the discovery model instead of the patch model,
+  and an explicit model change updates the title immediately.
+- The OpenAI-compatible backend now runs each turn under the shared
+  `LOOPBIOTIC_TURN_TIMEOUT_SECS` deadline, no longer leaks cancellation state
+  when a speculative turn is aborted, caps workspace file reads, and surfaces
+  the raw model output when a local model answers in prose.
+- Empty or malformed model-preference state now supplies both patch and
+  discovery model maps instead of crashing backend setup.
+- OpenAI-compatible local models now return the same typed patch hunks as
+  Codex. Rust renders and validates the unified diff, so weak models no longer
+  have to reproduce fragile diff syntax themselves.
+- The Codex model picker now reads the authenticated app-server `model/list`
+  catalog and its default model. A discovery-only model is no longer presented
+  as the entire set of selectable patch models.
 - Navigating to a card or draft no longer throws "Cursor position outside
   buffer" when the target line does not exist yet — for example a patch hunk
   that appends to the end of a short file, or an agent-supplied location past
@@ -49,10 +71,13 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Auto sessions are conversational-first. Their first response and normal
-  replies cannot return patches or completion summaries; persistent goal
-  execution starts only from the explicit `Goal` action. Sending a message
-  pauses an active goal and answers conversationally.
+- The real-model A/B runner flushes each result to JSONL immediately, preserving
+  completed samples when a long local benchmark is interrupted.
+- Every Prompt and Reply carries a visible user-selected mode. Automatic intent
+  routing was removed: fix/propose require Patch, explain/review require Finding,
+  and investigate requires Hypothesis. Slash-prefixed text no longer overrides
+  that visible mode. Persistent multi-step goal execution remains explicit, and
+  every patch stays behind local Accept/Reject review.
 - Goal work is limited to one file, one coherent hunk, and 32 changed lines
   per turn. Only explicit goals may speculate on the next patch; ordinary
   speculation is read-only post-accept conversation.
@@ -69,6 +94,30 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The LM Studio/OpenAI-compatible backend now uses streaming Responses with
+  provider-stored session chains, optional private reasoning, real cancellation,
+  and Rust-owned bounded workspace read/search/list tools. Tools are available
+  only for discovery and explicit Goals, never execute commands or mutate
+  source, and remain independent of MCP and instruction Skills.
+- A controlled real-model Project Intelligence A/B runner now compares the
+  feature-disabled baseline, marker-derived ProjectProfile, and ProjectProfile
+  plus selected Skills. It includes Angular 22, TypeScript 6, React, Nx, and
+  Rust fixtures, deterministic rubrics, token/latency/retry telemetry, and an
+  OpenAI-compatible LM Studio backend for safe sequential local-model runs.
+- PromptWindow now has a session-scoped Markdown Skills multiselect. Configured
+  files such as `AGENTS.md` autoload as locked inert instructions; optional root
+  Markdown files are explicitly selected, remain visible through Reply, and are
+  content-addressed and bounded before reaching the backend. A deterministic
+  ProjectProfile is built in Rust by marker-activated technology adapters and
+  supplies exact lockfile versions, Nx/Cargo workspace areas and dependencies,
+  commands, Compose infrastructure, and active Neovim LSP capabilities without
+  MCP or a model discovery turn. Protocol version is now 12.
+- Prompts resolve a session-pinned static Flow graph through LSP call hierarchy
+  without opening UI or changing geometry. The explorer is an explicit `F`
+  toggle with lazy caller/callee expansion, exact call-site/reference
+  navigation and responsive split/single-pane layouts. Callstack answers carry
+  a structured `flow_path` and render it directly in the card UI. The bounded
+  normalized graph is sent to every backend without agent-side rediscovery.
 - Conversation turns have a 10-second visible-response budget and work turns
   a 20-second budget. Slow turns yield a focusable `Working` card, continue in
   the background, and can be interrupted through the real Codex
@@ -87,7 +136,7 @@ The project follows [Semantic Versioning](https://semver.org/).
   backend, the concrete model the next turn will use (configured, or resolved
   from the backend — the Claude CLI announces it at process start, Ollama
   always knows it), and the models the backend can enumerate (Ollama's local
-  tags). Protocol version is now 10.
+  tags).
 - The prompt window title names the active agent and resolved model (never
   "default"), refreshing as soon as warmup resolves it, and `Ctrl-l`
   (`keymaps.models`) opens a model picker fed by the backend-enumerated

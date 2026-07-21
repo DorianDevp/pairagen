@@ -3,7 +3,7 @@
   "prompt": "The meeting-room scheduler misbehaves in several ways. Rescheduling an existing booking leaves its end time blank, so the slot no longer has a valid finish, and rescheduling an id that was never booked throws an error instead of doing nothing. Meetings that sit back-to-back (one ending exactly when the next begins) are rejected as if they conflict. Generating the room-usage report throws once every room has been tallied. The project also no longer compiles.",
   "entry": "reducer.ts",
   "cursor": { "line": 8, "column": 1 },
-  "mode": "auto",
+  "mode": "investigate",
   "target_steps": 6,
   "diagnostics": [
     {

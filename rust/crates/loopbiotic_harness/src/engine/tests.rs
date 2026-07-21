@@ -11,9 +11,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use async_trait::async_trait;
 use loopbiotic_backends::{
     BackendAction, BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, MockBackend,
+    UNPARSED_OUTPUT_CARD_ID,
 };
 use loopbiotic_protocol::{
-    BackendInfo, Cursor, FilePatch, FindingCard, HypothesisCard, Mode, PatchCard,
+    BackendInfo, Cursor, ErrorCard, FilePatch, FindingCard, HypothesisCard, Mode, PatchCard,
 };
 
 use super::*;
@@ -30,7 +31,10 @@ pub(super) fn params() -> StartSessionParams {
         buffer_start_line: 1,
         diagnostics: vec![],
         hints: vec![],
+        call_hierarchy: None,
         context_policy: Default::default(),
+        project_signals: Default::default(),
+        skills: vec![],
     }
 }
 
@@ -46,6 +50,7 @@ fn editor_context(buffer_text: &str) -> ContextBundle {
         hints: vec![],
         artifacts: vec![],
         report: None,
+        call_hierarchy: None,
     }
 }
 
@@ -57,6 +62,7 @@ fn discovery_response(backend: &str) -> BackendResponse {
             claim: "The request is understood; goal execution remains opt-in.".into(),
             evidence: None,
             next_move: None,
+            flow_path: vec![],
             actions: vec![Action::Follow, Action::Fix, Action::Goal, Action::Stop],
         }),
         raw_output: None,
@@ -95,11 +101,20 @@ async fn rejects_apply_before_patch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn explicit_goal_rejects_a_multi_hunk_batch() {
+async fn explicit_goal_repairs_two_change_blocks_to_declaration_first() {
     let backend = Arc::new(BatchGoalBackend::default());
+    let reads = Arc::new(AtomicUsize::new(0));
     let mut engine = Engine::new(backend.clone());
+    let observed_reads = reads.clone();
+    engine.set_source_context_provider(Arc::new(move |_file, _session_id| {
+        let observed_reads = observed_reads.clone();
+        Box::pin(async move {
+            observed_reads.fetch_add(1, Ordering::SeqCst);
+            None
+        })
+    }));
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     goal.buffer_text = "first\nmiddle\nlast".into();
     let start = engine.start(goal).await.unwrap();
     assert!(matches!(start.card, Card::Hypothesis(_)));
@@ -109,10 +124,25 @@ async fn explicit_goal_rejects_a_multi_hunk_batch() {
         .await
         .unwrap();
 
-    assert!(matches!(result.card, Card::Error(_)));
-    assert!(result.attempts.iter().all(|attempt| {
-        attempt.violation_class == Some(loopbiotic_protocol::ViolationClass::MultiHunk)
-    }));
+    let Card::Patch(card) = result.card else {
+        panic!("expected a repaired declaration-first patch");
+    };
+    assert_eq!(
+        card.patches[0].diff,
+        "@@ -1,1 +1,2 @@\n+interface Work {}\n first\n"
+    );
+    assert_eq!(result.attempts.len(), 2);
+    assert_eq!(result.attempts[0].outcome, "contract_retry");
+    assert_eq!(
+        result.attempts[0].violation_class,
+        Some(loopbiotic_protocol::ViolationClass::MultiHunk)
+    );
+    assert_eq!(result.attempts[1].outcome, "accepted");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "current-file validation must reuse the fresh action context"
+    );
     assert!(engine.continuations.is_empty());
 }
 
@@ -137,7 +167,7 @@ async fn explicit_goal_rejects_a_multi_file_batch() {
         })
     }));
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     goal.buffer_text = "first".into();
 
     let start = engine.start(goal).await.unwrap();
@@ -161,7 +191,7 @@ async fn explicit_goal_reject_stops_without_another_model_turn() {
     let backend = Arc::new(MockBackend);
     let mut engine = Engine::new(backend);
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     let start = engine.start(goal).await.unwrap();
     let first = engine
         .action(&start.session_id, Action::Goal)
@@ -204,7 +234,7 @@ async fn why_explains_and_restores_the_same_pending_hunk() {
     let backend = Arc::new(MockBackend);
     let mut engine = Engine::new(backend);
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     let start = engine.start(goal).await.unwrap();
     let first = engine
         .action(&start.session_id, Action::Goal)
@@ -300,7 +330,7 @@ async fn rejected_apply_waits_for_explicit_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn accepted_non_goal_patch_auto_continues_with_conversation() {
+async fn accepted_non_goal_patch_continues_until_the_goal_is_resolved() {
     let backend = Arc::new(CountingBackend::default());
     let mut engine = Engine::new(backend.clone());
     let start = engine.start(params()).await.unwrap();
@@ -315,24 +345,27 @@ async fn accepted_non_goal_patch_auto_continues_with_conversation() {
         .await
         .unwrap();
 
-    assert!(matches!(result.card, Card::Finding(_)));
-    assert_eq!(result.goal.status, loopbiotic_protocol::GoalStatus::Idle);
+    assert!(matches!(result.card, Card::Summary(_)));
+    assert_eq!(
+        result.goal.status,
+        loopbiotic_protocol::GoalStatus::Complete
+    );
     assert_eq!(
         engine.get(&result.session_id).unwrap().state,
-        SessionState::CardShown
+        SessionState::Summary
     );
     let calls = backend.calls.lock().unwrap().clone();
     assert!(
         calls
             .iter()
-            .any(|call| call.starts_with("progress:PostAccept")),
-        "accept did not trigger conversational follow-up: {calls:?}"
+            .any(|call| call.starts_with("progress:User(Goal)")),
+        "accept did not continue solving the goal: {calls:?}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cancelling_post_accept_work_keeps_the_patch_accepted() {
-    let backend = Arc::new(HangingPostAcceptBackend);
+async fn cancelling_accept_continuation_keeps_the_patch_accepted() {
+    let backend = Arc::new(HangingAcceptContinuationBackend);
     let mut engine = Engine::new(backend);
     let start = engine.start(params()).await.unwrap();
     let patch = engine.action(&start.session_id, Action::Fix).await.unwrap();
@@ -347,7 +380,7 @@ async fn cancelling_post_accept_work_keeps_the_patch_accepted() {
         tokio::time::timeout(std::time::Duration::from_millis(25), &mut turn)
             .await
             .is_err(),
-        "post-accept backend unexpectedly completed"
+        "accepted-patch continuation unexpectedly completed"
     );
     drop(turn);
 
@@ -359,8 +392,11 @@ async fn cancelling_post_accept_work_keeps_the_patch_accepted() {
     let Card::Finding(card) = cancelled.card else {
         panic!("accepted patch was restored as pending");
     };
-    assert_eq!(card.title, "Local step accepted");
-    assert_eq!(cancelled.goal.status, loopbiotic_protocol::GoalStatus::Idle);
+    assert_eq!(card.title, "Continuation cancelled");
+    assert_eq!(
+        cancelled.goal.status,
+        loopbiotic_protocol::GoalStatus::Paused
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -470,6 +506,58 @@ async fn repairs_invalid_patch_before_showing_it_to_user() {
     assert_eq!(result.attempts[1].outcome, "accepted");
     assert_eq!(result.attempts[1].violation_class, None);
     assert_eq!(result.turn_token_usage.total_tokens, 30);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retries_unparseable_backend_output_before_showing_the_error() {
+    let backend = Arc::new(UnparsedOutputBackend::default());
+    let mut engine = Engine::new(backend);
+    let start = engine.start(params()).await.unwrap();
+
+    let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+    let Card::Patch(card) = result.card else {
+        panic!("expected the re-emitted patch card");
+    };
+    assert_eq!(
+        card.patches[0].diff,
+        "@@ -1,1 +1,1 @@\n-placeholder\n+repaired\n"
+    );
+    assert_eq!(result.attempts.len(), 2);
+    assert_eq!(result.attempts[0].outcome, "contract_retry");
+    assert_eq!(
+        result.attempts[0].violation_class,
+        Some(loopbiotic_protocol::ViolationClass::UnparsedOutput)
+    );
+    assert!(
+        result.attempts[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("expected value")
+    );
+    assert_eq!(result.attempts[1].outcome, "accepted");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_the_unparsed_error_card_after_exhausting_retries() {
+    let backend = Arc::new(AlwaysUnparsedBackend);
+    let mut engine = Engine::new(backend);
+    let start = engine.start(params()).await.unwrap();
+
+    let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+    let Card::Error(card) = result.card else {
+        panic!("expected the unparsed-output error card to stand");
+    };
+    assert!(card.message.contains("Raw output"));
+    assert_eq!(result.attempts.len(), 3);
+    assert_eq!(result.attempts[0].outcome, "contract_retry");
+    assert_eq!(result.attempts[1].outcome, "contract_retry");
+    assert_eq!(result.attempts[2].outcome, "rejected");
+    assert!(result.attempts.iter().all(|attempt| {
+        attempt.violation_class == Some(loopbiotic_protocol::ViolationClass::UnparsedOutput)
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -585,7 +673,7 @@ async fn replies_inside_session() {
     let mut engine = Engine::new(backend);
     let start = engine.start(params()).await.unwrap();
     let result = engine
-        .reply(&start.session_id, "that is not it".into())
+        .reply(&start.session_id, "that is not it".into(), Mode::Explain)
         .await
         .unwrap();
 
@@ -594,6 +682,51 @@ async fn replies_inside_session() {
     };
 
     assert!(card.finding.contains("that is not it"));
+}
+
+#[test]
+fn selected_instruction_skills_replace_the_session_snapshot_locally() {
+    let backend = Arc::new(MockBackend);
+    let mut engine = Engine::new(backend);
+    let (session_id, _) = engine.reserve_start(params());
+    let skill = loopbiotic_protocol::InstructionSkill {
+        name: "ANGULAR.md".into(),
+        path: "ANGULAR.md".into(),
+        content: "Use Angular 22 APIs.".into(),
+        provenance: "workspace_root".into(),
+        auto: false,
+        sha256: "abc".into(),
+    };
+
+    engine
+        .update_skills(&session_id, vec![skill.clone()])
+        .unwrap();
+
+    assert_eq!(engine.get(&session_id).unwrap().skills, vec![skill]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reply_prompt_mode_controls_the_backend_contract() {
+    let backend = Arc::new(MockBackend);
+    let mut engine = Engine::new(backend);
+    let mut start_params = params();
+    start_params.mode = Mode::Investigate;
+    let start = engine.start(start_params).await.unwrap();
+    let generation = engine.begin_turn(&start.session_id).unwrap();
+
+    let result = engine
+        .reply_with_progress_generation(
+            &start.session_id,
+            generation,
+            "Napraw to".into(),
+            Mode::Fix,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(result.card, Card::Patch(_)));
+    assert_eq!(engine.get(&start.session_id).unwrap().mode, Mode::Fix);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -615,6 +748,7 @@ async fn action_uses_refreshed_editor_context() {
         hints: vec![],
         artifacts: vec![],
         report: None,
+        call_hierarchy: None,
     };
 
     engine.update_context(&start.session_id, context).unwrap();
@@ -666,7 +800,7 @@ async fn sliced_goal_speculates_and_consumes_each_next_slice_on_accept() {
     let mut engine = Engine::new(backend.clone());
     engine.set_source_context_provider(sliced_goal_provider());
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
 
     let start = engine.start(goal).await.unwrap();
     let first = engine
@@ -771,7 +905,7 @@ async fn rejected_slice_cancels_speculation_and_waits_for_explicit_retry() {
     let mut engine = Engine::new(backend.clone());
     engine.set_source_context_provider(sliced_goal_provider());
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     let discovery = engine.start(goal).await.unwrap();
     let start = engine
         .action(&discovery.session_id, Action::Goal)
@@ -844,7 +978,7 @@ async fn user_retry_on_a_slice_cancels_speculation_and_stops_speculating() {
     let mut engine = Engine::new(backend.clone());
     engine.set_source_context_provider(sliced_goal_provider());
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     let discovery = engine.start(goal).await.unwrap();
     let first = engine
         .action(&discovery.session_id, Action::Goal)
@@ -892,7 +1026,7 @@ async fn single_file_goal_without_plan_completes_as_a_batch_of_one() {
     let backend = Arc::new(SingleFileNoPlanBackend::default());
     let mut engine = Engine::new(backend.clone());
     let mut goal = params();
-    goal.mode = Mode::Auto;
+    goal.mode = Mode::Investigate;
     goal.buffer_text = "first".into();
 
     let discovery = engine.start(goal).await.unwrap();
@@ -1003,8 +1137,8 @@ impl BackendAdapter for BatchGoalBackend {
             loopbiotic_protocol::MAX_CHANGED_LINES
         );
 
-        Ok(BackendResponse {
-            card: Card::Patch(PatchCard {
+        let card = match req.action {
+            BackendAction::User(Action::Goal) => Card::Patch(PatchCard {
                 id: "c_batch".into(),
                 title: "Complete local change".into(),
                 explanation: "Prepare both independent edits.".into(),
@@ -1014,11 +1148,39 @@ impl BackendAdapter for BatchGoalBackend {
                 patches: vec![FilePatch {
                     id: "p_batch".into(),
                     file: "src/work.ts".into(),
-                    diff: "@@ -1,2 +1,2 @@\n-first\n+FIRST\n middle\n@@ -2,2 +2,2 @@\n middle\n-last\n+LAST\n".into(),
-                    explanation: "Updates both required locations.".into(),
+                    diff: "@@ -1,3 +1,4 @@\n+interface Work {}\n first\n middle\n-last\n+Work\n"
+                        .into(),
+                    explanation: "Adds a declaration and separately replaces its use.".into(),
                 }],
                 actions: vec![Action::Apply, Action::Why, Action::Retry, Action::Stop],
             }),
+            BackendAction::ContractRetry(reason) => {
+                assert!(reason.contains("Return ONLY one of its separated change blocks"));
+                assert!(reason.contains("return ONLY the dependency-producing declaration block"));
+                assert!(reason.contains("leave every consumer byte-for-byte unchanged"));
+                assert!(reason.contains("Mark goal_complete=false"));
+                Card::Patch(PatchCard {
+                    id: "c_declaration".into(),
+                    title: "Introduce the interface first".into(),
+                    explanation: "Add only the dependency required by the later implementation."
+                        .into(),
+                    warnings: vec![],
+                    goal_complete: false,
+                    plan: None,
+                    patches: vec![FilePatch {
+                        id: "p_declaration".into(),
+                        file: "src/work.ts".into(),
+                        diff: "@@ -1,1 +1,2 @@\n+interface Work {}\n first\n".into(),
+                        explanation: "Introduces the interface before any use.".into(),
+                    }],
+                    actions: vec![Action::Apply, Action::Why, Action::Retry, Action::Stop],
+                })
+            }
+            action => panic!("unexpected batch-goal action {action:?}"),
+        };
+
+        Ok(BackendResponse {
+            card,
             raw_output: None,
             metadata: BackendMetadata {
                 backend: "batch_goal".into(),
@@ -1099,16 +1261,25 @@ struct RepairingPatchBackend {
     failed_once: AtomicBool,
 }
 
+#[derive(Default)]
+struct UnparsedOutputBackend {
+    failed_once: AtomicBool,
+}
+
+struct AlwaysUnparsedBackend;
+
 struct WrongTypeBackend;
 
 struct AlwaysFailBackend;
 
-struct HangingPostAcceptBackend;
+struct HangingAcceptContinuationBackend;
 
 #[async_trait]
-impl BackendAdapter for HangingPostAcceptBackend {
+impl BackendAdapter for HangingAcceptContinuationBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
-        if matches!(req.action, BackendAction::PostAccept) {
+        if matches!(req.action, BackendAction::User(Action::Goal))
+            && matches!(req.session.last_card, Some(Card::Patch(_)))
+        {
             return std::future::pending().await;
         }
         MockBackend.next_card(req).await
@@ -1168,6 +1339,7 @@ impl BackendAdapter for RepeatingObservationBackend {
                         annotation: "The preview is skipped here.".into(),
                     }),
                     next_move: None,
+                    flow_path: vec![],
                     actions: vec![Action::Follow, Action::Fix, Action::Stop],
                 })
             }
@@ -1181,6 +1353,7 @@ impl BackendAdapter for RepeatingObservationBackend {
                     column: 1,
                 }),
                 annotation: Some("The preview is skipped here.".into()),
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             _ => panic!("unexpected observation backend request"),
@@ -1245,6 +1418,7 @@ impl BackendAdapter for FlakyBackend {
                 claim: "Initial claim.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Follow, Action::Why, Action::Stop],
             }),
             _ => Card::Finding(FindingCard {
@@ -1253,6 +1427,7 @@ impl BackendAdapter for FlakyBackend {
                 finding: "Session still works.".into(),
                 location: None,
                 annotation: None,
+                flow_path: vec![],
                 actions: vec![Action::Stop],
             }),
         };
@@ -1292,6 +1467,7 @@ impl BackendAdapter for BadPatchBackend {
                 claim: "Initial claim.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             _ => Card::Patch(PatchCard {
@@ -1346,6 +1522,7 @@ impl BackendAdapter for RepairingPatchBackend {
                 claim: "The local representation needs one change.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             BackendAction::User(Action::Fix) if !self.failed_once.swap(true, Ordering::SeqCst) => {
@@ -1411,6 +1588,105 @@ impl BackendAdapter for RepairingPatchBackend {
     }
 }
 
+fn unparsed_output_card() -> Card {
+    Card::Error(ErrorCard {
+        id: UNPARSED_OUTPUT_CARD_ID.into(),
+        title: "Claude error".into(),
+        message: "expected value at line 1 column 245\n\nRaw output:\n{\"op\":\"patch\", \"explanation\":\"pod \u{201e}Data produkcji\", widoczne\"}".into(),
+        actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+    })
+}
+
+#[async_trait]
+impl BackendAdapter for UnparsedOutputBackend {
+    async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+        let card = match req.action {
+            BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                id: "c_1".into(),
+                title: "Start".into(),
+                claim: "The local representation needs one change.".into(),
+                evidence: None,
+                next_move: None,
+                flow_path: vec![],
+                actions: vec![Action::Fix, Action::Stop],
+            }),
+            BackendAction::User(Action::Fix) if !self.failed_once.swap(true, Ordering::SeqCst) => {
+                unparsed_output_card()
+            }
+            BackendAction::ContractRetry(reason) => {
+                assert!(reason.contains("could not be parsed"));
+                assert!(reason.contains("strict JSON"));
+                Card::Patch(PatchCard {
+                    id: "c_reemitted".into(),
+                    title: "Re-emitted op".into(),
+                    explanation: "Strict JSON this time.".into(),
+                    warnings: vec![],
+                    goal_complete: false,
+                    plan: None,
+                    patches: vec![FilePatch {
+                        id: "p_1".into(),
+                        file: "src/work.ts".into(),
+                        diff: "@@ -1,1 +1,1 @@\n-placeholder\n+repaired\n".into(),
+                        explanation: "Repair one line.".into(),
+                    }],
+                    actions: vec![Action::Apply, Action::Retry, Action::Stop],
+                })
+            }
+            _ => panic!("unexpected unparsed-output backend request"),
+        };
+
+        Ok(BackendResponse {
+            card,
+            raw_output: Some("{\"op\":\"patch\"".into()),
+            metadata: BackendMetadata {
+                backend: "unparsed_output".into(),
+                model: None,
+                token_usage: None,
+                activities: vec![],
+                attempts: vec![],
+            },
+        })
+    }
+
+    fn capabilities(&self) -> BackendInfo {
+        MockBackend::info()
+    }
+}
+
+#[async_trait]
+impl BackendAdapter for AlwaysUnparsedBackend {
+    async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+        let card = match req.action {
+            BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                id: "c_1".into(),
+                title: "Start".into(),
+                claim: "The local representation needs one change.".into(),
+                evidence: None,
+                next_move: None,
+                flow_path: vec![],
+                actions: vec![Action::Fix, Action::Stop],
+            }),
+            _ => unparsed_output_card(),
+        };
+
+        Ok(BackendResponse {
+            card,
+            raw_output: Some("{\"op\":\"patch\"".into()),
+            metadata: BackendMetadata {
+                backend: "unparsed_output".into(),
+                model: None,
+                token_usage: None,
+                activities: vec![],
+                attempts: vec![],
+            },
+        })
+    }
+
+    fn capabilities(&self) -> BackendInfo {
+        MockBackend::info()
+    }
+}
+
 #[async_trait]
 impl BackendAdapter for WrongTypeBackend {
     async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
@@ -1421,6 +1697,7 @@ impl BackendAdapter for WrongTypeBackend {
                 claim: "Wrong type for this test.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             _ => Card::Finding(FindingCard {
@@ -1429,6 +1706,7 @@ impl BackendAdapter for WrongTypeBackend {
                 finding: "This is deliberately not a patch.".into(),
                 location: None,
                 annotation: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
         };
@@ -1495,7 +1773,7 @@ impl BackendAdapter for CountingBackend {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn read_only_post_accept_prefetch_is_consumed_without_another_turn() {
+async fn read_only_accept_continuation_is_consumed_without_another_turn() {
     let backend = Arc::new(CountingBackend::default());
     let mut engine = Engine::new(backend.clone());
     engine.set_prefetch_mode(PrefetchMode::ReadOnly);
@@ -1514,13 +1792,17 @@ async fn read_only_post_accept_prefetch_is_consumed_without_another_turn() {
         .await
         .unwrap();
 
-    assert!(matches!(result.card, Card::Finding(_)));
+    assert!(matches!(result.card, Card::Summary(_)));
+    assert_eq!(
+        result.goal.status,
+        loopbiotic_protocol::GoalStatus::Complete
+    );
     assert!(result.turn_token_usage.total_tokens > 0);
     let calls = backend.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 3, "unexpected backend calls: {calls:?}");
     assert!(calls[0].starts_with("progress:Start"));
     assert!(calls[1].starts_with("progress:User(Fix)"));
-    assert!(calls[2].starts_with("plain:PostAccept"));
+    assert!(calls[2].starts_with("plain:User(Goal)"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1554,12 +1836,12 @@ async fn rejecting_a_patch_cancels_read_only_speculation_without_redrafting() {
     assert!(
         !calls
             .iter()
-            .any(|call| call.starts_with("progress:PostAccept")),
+            .any(|call| call.starts_with("progress:User(Goal)")),
         "reject started a replacement turn: {calls:?}"
     );
 }
 
-type RecordedExpectation = (Option<CardKind>, String, Vec<String>);
+type RecordedExpectation = (Option<CardKind>, String, Vec<String>, bool, Vec<String>);
 
 #[derive(Default)]
 struct ExpectationRecorder {
@@ -1574,6 +1856,12 @@ impl BackendAdapter for ExpectationRecorder {
             req.card_contract.expected_kind,
             req.session.prompt.clone(),
             req.session.interaction_feedback.clone(),
+            req.card_contract.conversation_only,
+            req.session
+                .project
+                .as_ref()
+                .map(|profile| profile.adapters.clone())
+                .unwrap_or_default(),
         ));
         self.inner.next_card(req).await
     }
@@ -1613,21 +1901,47 @@ async fn interaction_feedback_is_injected_once_on_the_next_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn plain_auto_prompt_expects_any_kind() {
+async fn investigate_prompt_requires_a_hypothesis() {
     let backend = Arc::new(ExpectationRecorder::default());
     let mut engine = Engine::new(backend.clone());
 
-    let mut auto = params();
-    auto.mode = Mode::Auto;
-    engine.start(auto).await.unwrap();
+    let mut investigate = params();
+    investigate.mode = Mode::Investigate;
+    engine.start(investigate).await.unwrap();
 
     let requests = backend.requests.lock().unwrap().clone();
-    assert_eq!(requests[0].0, None);
+    assert_eq!(requests[0].0, Some(CardKind::Hypothesis));
     assert_eq!(requests[0].1, "payload is empty");
+    assert!(!requests[0].3);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn kind_prefix_forces_the_expected_card() {
+async fn start_profiles_marker_activated_adapters_before_the_backend_turn() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("package.json"),
+        r#"{"dependencies":{"@angular/core":"22.0.6"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("deno.lock"),
+        r#"{"specifiers":{"npm:@angular/core@22.0.6":"22.0.6"}}"#,
+    )
+    .unwrap();
+    let backend = Arc::new(ExpectationRecorder::default());
+    let mut engine = Engine::new(backend.clone());
+    let mut start = params();
+    start.cwd = root.path().to_path_buf();
+
+    engine.start(start).await.unwrap();
+
+    let requests = backend.requests.lock().unwrap();
+    assert!(requests[0].4.contains(&"angular".into()));
+    assert!(requests[0].4.contains(&"package-workspace".into()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_prefixed_text_cannot_override_the_visible_mode() {
     let backend = Arc::new(ExpectationRecorder::default());
     let mut engine = Engine::new(backend.clone());
     let mut start_params = params();
@@ -1636,8 +1950,8 @@ async fn kind_prefix_forces_the_expected_card() {
     engine.start(start_params).await.unwrap();
 
     let requests = backend.requests.lock().unwrap().clone();
-    assert_eq!(requests[0].0, Some(CardKind::Patch));
-    assert_eq!(requests[0].1, "guard the payload");
+    assert_eq!(requests[0].0, Some(CardKind::Hypothesis));
+    assert_eq!(requests[0].1, "/patch guard the payload");
 }
 
 #[derive(Default)]
@@ -1657,6 +1971,7 @@ impl BackendAdapter for NavigatingBackend {
                 claim: "The sizing lives in the component file.".into(),
                 evidence: None,
                 next_move: None,
+                flow_path: vec![],
                 actions: vec![Action::Fix, Action::Stop],
             }),
             BackendAction::User(Action::Fix) => {
@@ -1733,6 +2048,7 @@ fn granted_context() -> ContextBundle {
         hints: vec![],
         artifacts: vec![],
         report: None,
+        call_hierarchy: None,
     }
 }
 

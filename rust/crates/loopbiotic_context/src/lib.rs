@@ -1,4 +1,5 @@
 mod index;
+pub mod project;
 mod rank;
 
 use std::cmp::Reverse;
@@ -234,6 +235,7 @@ pub(crate) mod test_support {
             hints: vec![],
             artifacts: vec![],
             report: None,
+            call_hierarchy: None,
         }
     }
 }

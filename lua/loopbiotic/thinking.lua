@@ -1,5 +1,6 @@
 local config = require("loopbiotic.config")
 local state = require("loopbiotic.state")
+local surfaces = require("loopbiotic.surfaces")
 local ui = require("loopbiotic.ui")
 
 local M = {}
@@ -23,6 +24,7 @@ function M.start(label, session_id)
   state.thinking_session_id = session_id
   state.thinking_started_at = uv.hrtime()
   state.thinking_label = M.clean(label or "Preparing agent")
+  state.thinking_preview = nil
   state.thinking_steps = {
     {
       phase = "starting",
@@ -32,10 +34,6 @@ function M.start(label, session_id)
   }
 
   M.render()
-
-  vim.keymap.set("n", "q", function()
-    M.stop(true)
-  end, { buffer = state.thinking_buf, nowait = true, silent = true })
 
   state.thinking_timer = uv.new_timer()
   state.thinking_timer:start(
@@ -69,12 +67,29 @@ function M.progress(progress)
     return
   end
 
+  if progress.phase == "repairing" or progress.phase == "restarting" then
+    state.thinking_preview = nil
+  end
+
+  local preview_updated = false
+  if type(progress.preview) == "table" and type(progress.preview.title) == "string" then
+    local preview = {
+      title = progress.preview.title,
+      body = type(progress.preview.body) == "string" and progress.preview.body or nil,
+    }
+    preview_updated = not vim.deep_equal(state.thinking_preview, preview)
+    state.thinking_preview = preview
+  end
+
   local message = M.clean(progress.message or "Agent is working")
   local phase = M.clean(progress.phase or "working")
   local steps = state.thinking_steps or {}
   local current = steps[#steps]
 
   if current and current.phase == phase and current.message == message then
+    if preview_updated then
+      M.render()
+    end
     return
   end
 
@@ -99,19 +114,19 @@ end
 
 function M.render()
   local lines = M.lines(state.thinking_frame or 0)
-  local buf, win = ui.render(state.card_buf, state.card_win, lines, {
-    width = width,
-    height = math.min(#lines, 8),
-    border = config.values.card.border,
-    anchor = M.anchor(),
+  local drafting = type(state.thinking_preview) == "table"
+  surfaces.render_agent(lines, {
+    view = "working",
+    working = true,
     enter = false,
-    title = " Loopbiotic: Working ",
+    window = {
+      width = width,
+      height = math.min(#lines, 8),
+      border = config.values.card.border,
+      anchor = M.anchor(),
+      title = drafting and " Loopbiotic: Drafting " or " Loopbiotic: Working ",
+    },
   })
-
-  state.card_buf = buf
-  state.card_win = win
-  state.thinking_buf = buf
-  state.thinking_win = win
 end
 
 function M.current(request_id)
@@ -130,6 +145,21 @@ function M.lines(frame)
   local steps = state.thinking_steps or {}
   local current = steps[#steps]
   local marker = spinner[(frame % #spinner) + 1]
+  local preview = state.thinking_preview
+  if type(preview) == "table" then
+    local lines = {
+      marker .. " Drafting response",
+      "Elapsed  " .. M.elapsed() .. "s · validating before actions",
+      "",
+    }
+    vim.list_extend(lines, M.wrap(preview.title or "Draft", width - 4, 2))
+    if preview.body and preview.body ~= "" then
+      table.insert(lines, "")
+      vim.list_extend(lines, M.wrap(preview.body, width - 4, 3))
+    end
+    return lines
+  end
+
   local lines = {
     marker .. " " .. (current and current.message or "Preparing agent"),
     "Elapsed  " .. M.elapsed() .. "s",
@@ -139,6 +169,36 @@ function M.lines(frame)
     if not step.current then
       table.insert(lines, "Done     " .. step.message)
     end
+  end
+
+  return lines
+end
+
+function M.wrap(value, limit, max_lines)
+  local lines = {}
+  local current = ""
+  local truncated = false
+
+  for word in tostring(value):gmatch("%S+") do
+    local candidate = current == "" and word or (current .. " " .. word)
+    if current ~= "" and vim.fn.strdisplaywidth(candidate) > limit then
+      table.insert(lines, current)
+      current = word
+      if #lines >= max_lines then
+        truncated = true
+        break
+      end
+    else
+      current = candidate
+    end
+  end
+  if current ~= "" and #lines < max_lines then
+    table.insert(lines, current)
+  elseif current ~= "" then
+    truncated = true
+  end
+  if truncated and #lines > 0 and lines[#lines]:sub(-1) ~= "…" then
+    lines[#lines] = lines[#lines] .. "…"
   end
 
   return lines
@@ -170,17 +230,16 @@ function M.stop(close)
   end
 
   state.thinking_timer = nil
-  state.thinking_win = nil
-  state.thinking_buf = nil
   state.thinking_request_id = nil
   state.thinking_session_id = nil
   state.thinking_started_at = nil
   state.thinking_label = nil
   state.thinking_steps = nil
+  state.thinking_preview = nil
+  surfaces.set_agent_working(false)
 
   if close then
-    ui.close(state.card_win)
-    state.card_win = nil
+    surfaces.close_agent()
   end
 end
 

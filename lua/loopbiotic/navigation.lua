@@ -42,7 +42,12 @@ function M.any_window(buf)
   return nil
 end
 
-function M.open_location(location)
+-- opts.focus (default true): when false, make the file available as context
+-- (load it, remember it as the source buffer/cursor) WITHOUT moving the user's
+-- active window or cursor. Server-driven opens during a turn use focus=false so
+-- the agent pulling a file into context never teleports the user.
+function M.open_location(location, opts)
+  opts = opts or {}
   if type(location) ~= "table" then
     return false
   end
@@ -50,6 +55,24 @@ function M.open_location(location)
   local file = location.file
   local open = config.values.navigation.open
   local target = vim.fn.fnamemodify(file, ":p")
+  if not util.in_workspace(target) then
+    require("loopbiotic.ui").notify("Location is outside the workspace: " .. tostring(file), vim.log.levels.WARN)
+    return false
+  end
+
+  if opts.focus == false then
+    local target_buf = vim.fn.bufadd(target)
+    vim.fn.bufload(target_buf)
+    if not vim.api.nvim_buf_is_valid(target_buf) then
+      return false
+    end
+    local pos = util.clamp_cursor(target_buf, location.line, (location.column or 1) - 1)
+    state.source_buf = target_buf
+    state.source_cursor = pos
+    extmarks.annotate(target_buf, pos[1], location.annotation)
+    return true
+  end
+
   local target_buf
   local target_win
 

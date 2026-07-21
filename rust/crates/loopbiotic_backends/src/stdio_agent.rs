@@ -130,10 +130,6 @@ impl StdioAgentBackend {
 
         result
     }
-
-    fn error_card(message: impl Into<String>) -> Card {
-        error_card("c_agent_error", "Agent error", message)
-    }
 }
 
 /// Sends one turn to the agent and reads its stream until the result line.
@@ -197,8 +193,13 @@ impl BackendAdapter for StdioAgentBackend {
         let answer = self.ask(&req, progress.as_ref()).await?;
         let raw_output = answer.line;
         let output_tokens = estimate_tokens(&raw_output);
-        let card = parse_agent_output(&raw_output)
-            .unwrap_or_else(|error| Self::error_card(format!("{}\n\n{}", error, raw_output)));
+        let card = parse_agent_output(&raw_output).unwrap_or_else(|error| {
+            error_card(
+                crate::UNPARSED_OUTPUT_CARD_ID,
+                "Agent error",
+                format!("{}\n\n{}", error, raw_output),
+            )
+        });
         let card = enforce_card_contract(card, &req.card_contract, "Agent", &raw_output);
 
         Ok(BackendResponse {
@@ -254,7 +255,9 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
             "known_observations": req.session.known_observations,
             "mode": req.session.mode,
             "n": req.session.card_count,
-            "last": req.session.last_summary
+            "last": req.session.last_summary,
+            "project": req.session.project,
+            "skills": req.session.skills
         },
         "a": action_value(&req.action),
         "ctx": crate::backend_context(&req.context),
@@ -263,9 +266,11 @@ fn agent_event(req: &BackendRequest) -> serde_json::Value {
 }
 
 fn agent_api() -> serde_json::Value {
-    json!(
-        "Return one JSON Loopbiotic op only. Ops: hypothesis, finding, patch, choice, deny, open_location, summary, error. When limits.conversation_only is true, never return patch or summary. Return patch for user action fix or start mode fix unless impossible. Goal execution is explicit and advances one small, compilable hunk per turn with a plan of remaining coherent steps. A patch is exactly one file and one hunk within the supplied changed-line limit. You may emit loopbiotic_progress records before the result. Never emit hidden reasoning. End with either a raw Loopbiotic op or a loopbiotic_result record."
-    )
+    json!(format!(
+        "Return one JSON Loopbiotic op only. Ops: hypothesis, finding, patch, choice, deny, open_location, summary, error. When limits.conversation_only is true, never return patch or summary. Return patch for user action fix or mode fix/propose unless impossible. The user-selected mode and limits.expected define the response contract; never infer or replace the mode. Goal execution is explicit and advances one small, compilable hunk per turn with a plan of remaining coherent steps. A patch is exactly one file and one hunk within the supplied changed-line limit. You may emit loopbiotic_progress records before the result. Never emit hidden reasoning. End with either a raw Loopbiotic op or a loopbiotic_result record. Implementation guidelines: {} Flow guidelines: {}",
+        crate::IMPLEMENTATION_GUIDELINES,
+        crate::FLOW_GUIDELINES
+    ))
 }
 
 fn parse_agent_output(output: &str) -> Result<Card> {
@@ -283,6 +288,16 @@ mod tests {
         let card = parse_agent_output(r#"{"op":"hypothesis","title":"T","claim":"C"}"#).unwrap();
 
         assert!(matches!(card, Card::Hypothesis(_)));
+    }
+
+    #[test]
+    fn agent_api_requires_dependency_first_compiler_safe_patches() {
+        let api = agent_api().as_str().unwrap().to_string();
+
+        assert!(api.contains("Compiler acceptance is a hard invariant"));
+        assert!(api.contains("before any later patch first references, implements"));
+        assert!(api.contains("exactly one uninterrupted change block"));
+        assert!(api.contains("Do not use tools or searches to re-enumerate"));
     }
 
     #[tokio::test]

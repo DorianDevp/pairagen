@@ -5,6 +5,7 @@ local navigation = require("loopbiotic.navigation")
 local rpc = require("loopbiotic.rpc")
 local session = require("loopbiotic.session")
 local state = require("loopbiotic.state")
+local surfaces = require("loopbiotic.surfaces")
 local thinking = require("loopbiotic.thinking")
 local ui = require("loopbiotic.ui")
 local util = require("loopbiotic.util")
@@ -30,8 +31,31 @@ function M.show(card, opts)
     ui.notify("Patch card has no local change", vim.log.levels.ERROR)
     return false
   end
+  if not util.in_workspace(patch.file) then
+    ui.notify("Patch target is outside the workspace", vim.log.levels.ERROR)
+    return false
+  end
 
   local source_buf = apply.buffer(patch.file)
+  local target = vim.fn.fnamemodify(patch.file, ":p")
+  if source_buf and vim.uv.fs_stat(target) == nil then
+    ui.notify("A loaded unsaved buffer already owns the proposed path", vim.log.levels.ERROR)
+    return false
+  end
+  local is_new = source_buf == nil and vim.uv.fs_stat(target) == nil
+  if is_new then
+    local plan, reason = require("loopbiotic.creation").inspect(patch.file)
+    if not plan then
+      ui.notify(reason, vim.log.levels.ERROR)
+      return false
+    end
+    state.creation = plan
+    source_buf = vim.fn.bufadd(target)
+    vim.fn.bufload(source_buf)
+    M.open_creation_context(plan, source_buf)
+  else
+    state.creation = nil
+  end
   if not source_buf then
     navigation.open_location({ file = patch.file, line = 1, column = 1 })
     source_buf = apply.buffer(patch.file)
@@ -48,23 +72,27 @@ function M.show(card, opts)
     return false
   end
 
-  -- Queued patches were validated daemon-side, so a failure here means the
-  -- draft went stale in review: parse failures are a malformed diff, while
-  -- resolve/apply failures mean the buffer drifted after the draft was made
-  -- (cards carry no queue-time changedtick, so resolution failure itself is
-  -- the drift signal). Offer recovery instead of dead-ending the goal.
+  -- A malformed or stale proposal cannot cross the review boundary. It is
+  -- reported as inert content; replacement work can only be requested through
+  -- PromptWindow.
   local source_lines = vim.api.nvim_buf_get_lines(source_buf, 0, -1, false)
   local hunk_ok, hunk = pcall(apply.parse_hunk, patch.diff)
   if not hunk_ok then
-    return M.recover(card, "malformed", hunk)
+    log.write("patch preview failed", { kind = "malformed", error = hunk })
+    ui.notify(hunk, vim.log.levels.ERROR)
+    return false
   end
   local start_ok, source_start = pcall(apply.resolve_start, source_lines, hunk)
   if not start_ok then
-    return M.recover(card, "drift", source_start)
+    log.write("patch preview failed", { kind = "drift", error = source_start })
+    ui.notify(source_start, vim.log.levels.ERROR)
+    return false
   end
   local draft_ok, draft_lines = pcall(apply.apply_diff, source_lines, patch.diff)
   if not draft_ok then
-    return M.recover(card, "drift", draft_lines)
+    log.write("patch preview failed", { kind = "drift", error = draft_lines })
+    ui.notify(draft_lines, vim.log.levels.ERROR)
+    return false
   end
 
   local annotations = M.annotations(hunk, source_start)
@@ -110,74 +138,40 @@ function M.show(card, opts)
   local keymaps = require("loopbiotic.config").values.keymaps
   vim.keymap.set("n", keymaps.draft_accept, M.accept, { buffer = draft_buf, nowait = true, silent = true })
   vim.keymap.set("n", keymaps.draft_reject, M.reject, { buffer = draft_buf, nowait = true, silent = true })
-  vim.keymap.set("n", keymaps.draft_retry, M.retry, { buffer = draft_buf, nowait = true, silent = true })
 
   M.focus_change()
 
   return true
 end
 
--- Decide what recovery to offer for a queued patch that failed to preview.
--- Pure (kinds and actions in, choices out) so headless tests can cover the
--- decision table directly.
---
--- Retrying redrafts the current goal slice against the live buffer, which is
--- cheap, so it comes first: recovery is one keypress. There is no "skip this
--- hunk" choice because no skip path exists — patch cards carry a single hunk
--- and rejecting a draft stops at an explicit retry/edit/stop decision.
----@param kind "malformed"|"drift" parse failure vs. stale buffer context
----@param actions (string|table)[]|nil the card's available actions
----@return { reason: string, choices: { label: string, action: "retry"|"cancel" }[] }|nil plan nil when the card cannot retry
-function M.recovery_plan(kind, actions)
-  local can_retry = false
-  for _, action in ipairs(actions or {}) do
-    if action == "retry" then
-      can_retry = true
-    end
-  end
-  if not can_retry then
-    return nil
-  end
-
-  return {
-    reason = kind == "malformed" and "the drafted patch is malformed"
-      or "draft no longer matches the buffer (edited since it was drafted)",
-    choices = {
-      { label = "Retry slice with current buffer", action = "retry" },
-      { label = "Cancel", action = "cancel" },
-    },
-  }
-end
-
--- A queued patch failed to preview: prompt for recovery instead of leaving
--- the goal at a dead end. The retry turn costs tokens, so it only fires on
--- the user's explicit pick — never automatically. Always returns false so
--- callers fall back to the plain card while the choice is pending.
----@param card LoopbioticCard
----@param kind "malformed"|"drift"
----@param err string the underlying parse/resolve/apply error
----@return boolean shown always false
-function M.recover(card, kind, err)
-  log.write("patch preview failed", { kind = kind, error = err })
-
-  local plan = M.recovery_plan(kind, card.actions or card.next_actions)
-  if not plan then
-    ui.notify(err, vim.log.levels.ERROR)
+function M.open_creation_context(plan, source_buf)
+  state.creation_context_win = nil
+  local source_win = navigation.normal_window()
+  vim.api.nvim_set_current_win(source_win)
+  local split_ok = pcall(vim.cmd, "vsplit")
+  if not split_ok then
+    vim.api.nvim_win_set_buf(source_win, source_buf)
     return false
   end
-
-  vim.ui.select(plan.choices, {
-    prompt = "Loopbiotic: " .. plan.reason,
-    format_item = function(choice)
-      return choice.label
-    end,
-  }, function(choice)
-    if choice and choice.action == "retry" then
-      require("loopbiotic").action("retry", { allow_hidden = true })
+  local draft_win = vim.api.nvim_get_current_win()
+  local netrw_win
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if win ~= draft_win and vim.api.nvim_win_get_config(win).relative == "" then
+      netrw_win = win
+      break
     end
-  end)
-
-  return false
+  end
+  if netrw_win then
+    vim.api.nvim_set_current_win(netrw_win)
+    pcall(vim.cmd, "edit " .. vim.fn.fnameescape(plan.existing_parent))
+    -- Tracked so restore_source can close it; otherwise every new-file
+    -- proposal leaks another parent-directory split for the rest of the
+    -- session.
+    state.creation_context_win = netrw_win
+  end
+  vim.api.nvim_set_current_win(draft_win)
+  vim.api.nvim_win_set_buf(draft_win, source_buf)
+  return netrw_win ~= nil
 end
 
 function M.annotations(hunk, source_start)
@@ -251,44 +245,45 @@ function M.controls(card, opts)
   opts = opts or {}
   local keys = require("loopbiotic.config").values.keymaps
   local lines = M.control_lines(card, keys)
-
   local width = math.min(58, require("loopbiotic.config").values.card.max_width)
   local height = 0
   for _, line in ipairs(lines) do
     height = height + math.max(math.ceil(vim.fn.strdisplaywidth(line) / width), 1)
   end
-  local buf, win = ui.render(state.card_buf, state.card_win, lines, {
-    width = width,
-    height = height,
-    anchor = ui.buffer_anchor(
-      state.diff_buf,
-      (state.diff_cursor or { (state.diff_first_row or 0) + 1, 0 })[1],
-      (state.diff_cursor or { 1, 0 })[2]
-    ),
-    anchor_gap = 1,
-    avoid_anchor_row = true,
+  surfaces.render_agent(lines, {
+    view = "review",
+    working = false,
+    wrap = true,
     enter = opts.enter == true,
-    title = " Loopbiotic: Draft ",
+    window = {
+      width = width,
+      height = height,
+      anchor = ui.buffer_anchor(
+        state.diff_buf,
+        (state.diff_cursor or { (state.diff_first_row or 0) + 1, 0 })[1],
+        (state.diff_cursor or { 1, 0 })[2]
+      ),
+      anchor_gap = 1,
+      avoid_anchor_row = true,
+      title = " Loopbiotic: Review ",
+    },
+    bind = function(active_buf, active_win)
+      M.bind_controls(active_buf, active_win, card, lines)
+    end,
   })
-  state.card_buf = buf
-  state.card_win = win
-  vim.wo[win].wrap = true
-  vim.wo[win].linebreak = true
+end
 
+function M.bind_controls(buf, _win, card, lines)
+  local keys = require("loopbiotic.config").values.keymaps
   for index, line in ipairs(lines) do
     local group = line:match("^Goal") and "LoopbioticGoal" or line:match("^%[") and "LoopbioticAction"
     if group then
       vim.api.nvim_buf_add_highlight(buf, -1, group, index - 1, 0, -1)
     end
   end
-
-  bind(buf, { "a", keys.draft_accept }, M.accept)
-  bind(buf, { "q", keys.draft_reject }, M.reject)
-  bind(buf, { "r", keys.draft_retry }, M.retry)
-  bind(buf, { "w", keys.why }, function()
-    require("loopbiotic").action("why")
-  end)
-  bind(buf, { "e", "g", keys.go_to }, function()
+  bind(buf, { keys.draft_accept }, M.accept)
+  bind(buf, { keys.draft_reject }, M.reject)
+  bind(buf, { keys.go_to }, function()
     M.focus_change()
   end)
   local details_key = keys.details or "z"
@@ -320,6 +315,12 @@ function M.control_lines(card, keys)
   end
 
   local explanation = card.explanation or card.title or "Local change"
+  if state.creation then
+    table.insert(lines, "Create " .. state.creation.relative)
+    for _, directory in ipairs(state.creation.missing_directories or {}) do
+      table.insert(lines, "Parent " .. vim.fn.fnamemodify(directory, ":."))
+    end
+  end
   table.insert(lines, state.details_expanded and M.one_line(explanation) or M.truncate(explanation, 58))
   table.insert(lines, "")
   if M.details_available(card) then
@@ -328,8 +329,6 @@ function M.control_lines(card, keys)
   end
   table.insert(lines, string.format("[%s] Back to proposal", keys.go_to))
   table.insert(lines, string.format("[%s] Accept   [%s] Reject", keys.draft_accept, keys.draft_reject))
-  table.insert(lines, string.format("[%s] Why this hunk", keys.why or "w"))
-  table.insert(lines, string.format("[%s] Retry    edit the draft directly", keys.draft_retry))
   if card.warnings and card.warnings[1] then
     table.insert(lines, "Warning shown at hunk")
   end
@@ -383,7 +382,7 @@ function M.one_line(text)
 end
 
 function M.accept()
-  if not require("loopbiotic").require_actions_visible() then
+  if not require("loopbiotic.scope").allows("accept") then
     return
   end
 
@@ -403,15 +402,26 @@ function M.accept()
 
   local lines = vim.api.nvim_buf_get_lines(draft_buf, 0, -1, false)
   local cursor = vim.api.nvim_win_get_cursor(state.diff_win)
+  if state.creation then
+    local ok, reason = require("loopbiotic.creation").commit(state.creation, lines)
+    if not ok then
+      ui.notify(reason, vim.log.levels.ERROR)
+      return
+    end
+  end
   vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, lines)
+  if state.creation then
+    vim.bo[source_buf].modified = false
+  end
   state.source_buf = source_buf
   state.source_cursor = cursor
   M.restore_source(cursor)
-  M.send(true, { patch.id }, { patch.file }, nil)
+  state.creation = nil
+  M.send_accept({ patch.id }, { patch.file })
 end
 
 function M.reject()
-  if not require("loopbiotic").require_actions_visible() then
+  if not require("loopbiotic.scope").allows("reject") then
     return
   end
 
@@ -423,16 +433,81 @@ function M.reject()
   end
 
   M.restore_source()
-  M.send(false, { patch.id }, {}, nil)
-end
-
-function M.retry()
-  if not require("loopbiotic").require_actions_visible() then
-    return
+  if state.goal then
+    state.goal.status = "paused"
+    state.goal.next_step = nil
   end
 
-  M.restore_source()
-  require("loopbiotic").action("retry", { allow_hidden = true })
+  local lines = {
+    "Proposal rejected",
+    "Accepted source was restored. The Goal is paused.",
+    "",
+    "[m] Reply   [q] Quit",
+  }
+  surfaces.render_agent(lines, {
+    view = "paused",
+    working = false,
+    enter = false,
+    window = {
+      width = 58,
+      height = #lines,
+      border = require("loopbiotic.config").values.card.border,
+      title = " Loopbiotic: Paused ",
+    },
+    bind = function(buf)
+      bind(buf, { "m" }, function()
+        require("loopbiotic.scope").run("reply", require("loopbiotic").reply_prompt)
+      end)
+      bind(buf, { "q" }, require("loopbiotic").stop)
+    end,
+  })
+
+  M.acknowledge_rejection({ patch.id })
+  require("loopbiotic.prompt").reply()
+end
+
+function M.acknowledge_rejection(patch_ids)
+  local session_id = state.session_id
+  state.turn_barrier = true
+  rpc.request("patch/apply_result", {
+    session_id = session_id,
+    card_id = state.card and state.card.id or "",
+    accepted = false,
+    patch_ids = patch_ids,
+    changed_files = {},
+    error = nil,
+    context = context.session(),
+  }, function(message)
+    if message.error then
+      log.write("patch rejection acknowledgement error", message.error)
+      surfaces.render_agent({
+        "Rejection could not be recorded",
+        tostring(message.error.message),
+        "The source is restored, but this session cannot safely continue.",
+        "",
+        "[q] Quit",
+      }, {
+        view = "error",
+        working = false,
+        enter = false,
+        window = {
+          width = 62,
+          height = 5,
+          border = require("loopbiotic.config").values.card.border,
+          title = " Loopbiotic: Error ",
+        },
+        bind = function(buf)
+          bind(buf, { "q" }, require("loopbiotic").stop)
+        end,
+      })
+      return
+    end
+    if state.session_id == session_id and message.result then
+      state.goal = message.result.goal or state.goal
+      state.token_usage = message.result.token_usage or state.token_usage
+    end
+    state.turn_barrier = false
+  end)
 end
 
 function M.valid_preview()
@@ -444,27 +519,59 @@ function M.valid_preview()
     and vim.api.nvim_win_is_valid(state.diff_win)
 end
 
-function M.restore_source(cursor)
+-- opts.focus (default true): user-driven accept/reject return the cursor to
+-- the source window; background cleanup (a non-patch card superseding a stale
+-- preview, e.g. a progress tick mid-turn) passes focus=false so it swaps the
+-- buffer back without yanking the user into the diff window.
+function M.restore_source(cursor, opts)
+  opts = opts or {}
+  local focus = opts.focus ~= false
   local draft_buf = state.diff_buf
   local source_buf = state.diff_source_buf
   local win = state.diff_win
+  local discard_creation = cursor == nil and state.creation ~= nil
 
   if win and vim.api.nvim_win_is_valid(win) and source_buf and vim.api.nvim_buf_is_valid(source_buf) then
     vim.api.nvim_win_set_buf(win, source_buf)
-    vim.api.nvim_set_current_win(win)
+    if focus then
+      vim.api.nvim_set_current_win(win)
 
-    if cursor then
-      local line = math.min(cursor[1], vim.api.nvim_buf_line_count(source_buf))
-      vim.api.nvim_win_set_cursor(win, { math.max(line, 1), cursor[2] })
+      if cursor then
+        local line = math.min(cursor[1], vim.api.nvim_buf_line_count(source_buf))
+        vim.api.nvim_win_set_cursor(win, { math.max(line, 1), cursor[2] })
+      end
     end
   end
+
+  -- Close the parent-directory split opened for new-file review, unless it is
+  -- the very window we just restored the source into.
+  local context_win = state.creation_context_win
+  if
+    context_win
+    and context_win ~= win
+    and type(context_win) == "number"
+    and vim.api.nvim_win_is_valid(context_win)
+    and #vim.api.nvim_tabpage_list_wins(0) > 1
+  then
+    pcall(vim.api.nvim_win_close, context_win, true)
+  end
+  state.creation_context_win = nil
 
   if draft_buf and vim.api.nvim_buf_is_valid(draft_buf) then
     pcall(vim.api.nvim_buf_delete, draft_buf, { force = true })
   end
-  ui.close(state.card_win)
-  state.card_win = nil
-
+  if discard_creation and source_buf and vim.api.nvim_buf_is_valid(source_buf) then
+    -- The rejected creation buffer is about to be wiped; drop any remembered
+    -- reference so context capture doesn't fall back to a deleted buffer.
+    if state.source_buf == source_buf then
+      state.source_buf = nil
+      state.source_cursor = nil
+    end
+    pcall(vim.api.nvim_buf_delete, source_buf, { force = true })
+  end
+  if discard_creation then
+    state.creation = nil
+  end
   state.diff_buf = nil
   state.diff_win = nil
   state.diff_source_buf = nil
@@ -473,17 +580,17 @@ function M.restore_source(cursor)
   state.diff_cursor = nil
 end
 
-function M.send(accepted, patch_ids, changed_files, error)
+function M.send_accept(patch_ids, changed_files)
   local session_id = state.session_id
-  local request_id = thinking.start(accepted and "Continuing" or "Rejecting", session_id)
+  local request_id = thinking.start("Continuing", session_id)
 
   rpc.request("patch/apply_result", {
     session_id = session_id,
     card_id = state.card and state.card.id or "",
-    accepted = accepted,
+    accepted = true,
     patch_ids = patch_ids,
     changed_files = changed_files,
-    error = error,
+    error = nil,
     context = context.session(),
   }, function(message)
     if not thinking.current(request_id) then
@@ -494,7 +601,28 @@ function M.send(accepted, patch_ids, changed_files, error)
 
     if message.error then
       log.write("patch apply error", message.error)
-      ui.notify(message.error.message, vim.log.levels.ERROR)
+      local lines = {
+        "Accepted change could not continue",
+        tostring(message.error.message),
+        "The local accepted source was kept.",
+        "",
+        "[m] Reply   [q] Quit",
+      }
+      surfaces.render_agent(lines, {
+        view = "error",
+        working = false,
+        enter = false,
+        window = {
+          width = 58,
+          height = #lines,
+          border = require("loopbiotic.config").values.card.border,
+          title = " Loopbiotic: Error ",
+        },
+        bind = function(buf)
+          bind(buf, { "m" }, require("loopbiotic").reply_prompt)
+          bind(buf, { "q" }, require("loopbiotic").stop)
+        end,
+      })
       return
     end
     if message.result.session_id ~= state.session_id then
@@ -502,10 +630,13 @@ function M.send(accepted, patch_ids, changed_files, error)
       return
     end
 
-    -- Patch results historically never updated state.backend_model.
+    -- Accepting a patch now runs a real patch-phase turn on the daemon, which
+    -- reports the model it actually ran; adopt it so the displayed model and
+    -- cost attribution reflect the accepted turn rather than the previous
+    -- (often discovery) turn's model.
     session.apply_turn_result(message.result, {
-      update_model = false,
-      track_backend_error = accepted,
+      update_model = true,
+      track_backend_error = true,
     })
   end)
 end

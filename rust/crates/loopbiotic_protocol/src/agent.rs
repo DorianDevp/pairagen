@@ -15,12 +15,16 @@ pub enum AgentOp {
         claim: String,
         evidence: Option<AgentLocation>,
         next: Option<AgentLocation>,
+        #[serde(default)]
+        flow_path: Option<Vec<String>>,
     },
     Finding {
         title: String,
         finding: String,
         location: Option<AgentLocation>,
         annotation: Option<String>,
+        #[serde(default)]
+        flow_path: Option<Vec<String>>,
     },
     Patch {
         title: String,
@@ -197,12 +201,14 @@ impl AgentOp {
                 claim,
                 evidence,
                 next,
+                flow_path,
             } => Card::Hypothesis(HypothesisCard {
                 id,
                 title,
                 claim,
                 evidence: evidence.map(AgentLocation::evidence),
                 next_move: next.map(|location| NextMove::OpenLocation(location.evidence())),
+                flow_path: flow_path.unwrap_or_default(),
                 actions: vec![
                     Action::Open,
                     Action::Follow,
@@ -218,12 +224,14 @@ impl AgentOp {
                 finding,
                 location,
                 annotation,
+                flow_path,
             } => Card::Finding(FindingCard {
                 id,
                 title,
                 finding,
                 location: location.map(AgentLocation::location),
                 annotation,
+                flow_path: flow_path.unwrap_or_default(),
                 actions: vec![
                     Action::Open,
                     Action::Why,
@@ -563,9 +571,25 @@ mod tests {
             claim: "The branch may return early.".into(),
             evidence: None,
             next: None,
+            flow_path: Some(vec!["caller".into(), "callee".into()]),
         };
         let card = op.into_card("c_1");
 
-        assert!(matches!(card, Card::Hypothesis(_)));
+        let Card::Hypothesis(card) = card else {
+            panic!("expected hypothesis card");
+        };
+        assert_eq!(card.flow_path, ["caller", "callee"]);
+    }
+
+    #[test]
+    fn old_agent_op_without_flow_path_stays_compatible() {
+        let op: AgentOp = serde_json::from_str(
+            r#"{"op":"finding","title":"T","finding":"F","location":null,"annotation":null}"#,
+        )
+        .unwrap();
+        let Card::Finding(card) = op.into_card("c_1") else {
+            panic!("expected finding card");
+        };
+        assert!(card.flow_path.is_empty());
     }
 }

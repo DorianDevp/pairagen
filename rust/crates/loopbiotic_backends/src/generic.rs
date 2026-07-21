@@ -57,17 +57,69 @@ impl GenericCliBackend {
     fn prompt(&self, req: &BackendRequest) -> String {
         generic_prompt(req)
     }
-
-    fn error_card(message: impl Into<String>) -> Card {
-        error_card("c_backend_error", "Backend error", message)
-    }
 }
 
 /// The op contract sent on every turn. A `const` so it can never interpolate
 /// volatile data: it opens the prompt and anchors the provider prompt cache.
-const GENERIC_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next), finding(title,finding,location,annotation), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). choice.options items are {id,label,action} objects; action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|open|run_check|stop. Use deny when you cannot or should not proceed. When limits.conversation_only is true, never return patch or summary. Goal turns are explicitly user-authorized. error is only for technical failures. limits.expected, when set, is the required op. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.";
+const GENERIC_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next,flow_path), finding(title,finding,location,annotation,flow_path), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). flow_path is an ordered array of node ids from ctx.call_hierarchy and is empty unless the answer presents a code path. choice.options items are {id,label,action} objects; action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|open|run_check|stop. Use deny when you cannot or should not proceed. When limits.conversation_only is true, never return patch or summary. The user-selected mode and limits.expected define the response contract; never infer or replace the mode. Goal turns are explicitly user-authorized. error is only for technical failures. limits.expected, when set, is the required op. patch.diff must be unified diff hunks starting with @@. Unused schema fields null.";
+
+const STRUCTURED_API_CONTRACT: &str = "Return one JSON Loopbiotic op only. No prose. Ops: hypothesis(title,claim,evidence,next,flow_path), finding(title,finding,location,annotation,flow_path), patch(title,explanation,goal_complete,plan,patches), choice(title,question,options), deny(title,reason,location), open_location(reason,location), summary(title,summary,changed_files), error(title,message). flow_path is an ordered array of node ids from ctx.call_hierarchy and is empty unless the answer presents a code path. choice.options items are {id,label,action} objects; action is one of follow|why|fix|goal|other_lead|retry|edit_prompt|open|run_check|stop. Use deny when you cannot or should not proceed. When limits.conversation_only is true, never return patch or summary. The user-selected mode and limits.expected define the response contract; never infer or replace the mode. Goal turns are explicitly user-authorized. error is only for technical failures. limits.expected, when set, is the required op. A patch item contains id, file, explanation, and hunks. Each hunk contains 1-based old_start, 1-based new_start, and ordered lines. Each line is {kind,text}, where kind is context, remove, or add and text has no diff prefix or trailing newline. Never write a raw unified diff; Rust renders it from the typed lines. Unused schema fields null.";
 
 pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
+    prompt_with_contract(req, GENERIC_API_CONTRACT)
+}
+
+pub(crate) fn structured_prompt(req: &BackendRequest) -> String {
+    prompt_with_contract(req, STRUCTURED_API_CONTRACT)
+}
+
+/// Compact append-only turn data for a provider-managed response chain. The
+/// first response already owns the static API contract, original prompt, and
+/// project profile; continuations transmit only state that can change.
+pub(crate) fn structured_continuation_prompt(
+    req: &BackendRequest,
+    include_context: bool,
+) -> String {
+    let fields = vec![
+        (
+            "turn",
+            json!({
+                "mode": req.session.mode,
+                "limits": {
+                    "one": req.card_contract.one_card_only,
+                    "max": req.card_contract.max_body_chars,
+                    "patch_files": req.card_contract.max_patch_files,
+                    "hunks_per_patch": req.card_contract.max_hunks_per_patch,
+                    "changed_lines": req.card_contract.max_changed_lines,
+                    "goal_completion": req.card_contract.allow_goal_completion,
+                    "conversation_only": req.card_contract.conversation_only,
+                    "expected": req.card_contract.expected_kind,
+                },
+                "action": action_value(&req.action),
+                "last": req.session.last_summary,
+                "card_count": req.session.card_count,
+            }),
+        ),
+        ("completed_steps", json!(req.session.completed_steps)),
+        ("known_observations", json!(req.session.known_observations)),
+        ("skills", json!(req.session.skills)),
+        (
+            "interaction_feedback",
+            json!(req.session.interaction_feedback),
+        ),
+        (
+            "ctx",
+            if include_context {
+                crate::backend_context(&req.context)
+            } else {
+                json!("unchanged; reuse the preceding response-chain context")
+            },
+        ),
+    ];
+    crate::support::ordered_json_object(&fields)
+}
+
+fn prompt_with_contract(req: &BackendRequest, api_contract: &str) -> String {
     let mut rules = vec![
         json!(
             "If a.kind is user and a.action is fix, return a patch op unless a patch is impossible."
@@ -81,6 +133,8 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
         json!(
             "A non-goal patch is one small local pair-programming step: one file, one hunk, and no more changed lines than the supplied limit; its plan is null."
         ),
+        json!(crate::IMPLEMENTATION_GUIDELINES),
+        json!(crate::FLOW_GUIDELINES),
         json!(
             "Explain why the next coherent block matters and return control to the user after that step."
         ),
@@ -89,7 +143,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     // the rules array survives across goal and non-goal turns.
     if req.card_contract.allow_goal_completion {
         rules.push(json!(
-            "Goal turn: return one small, compilable hunk within limits.changed_lines plus plan {remaining:[{file,summary}],complete}. Remaining entries are coherent steps and may repeat a file. A finding or choice is allowed when programmer attention is needed."
+            "Goal turn: return one small, compilable hunk within limits.changed_lines plus plan {remaining:[{file,summary}],complete}. Remaining entries are coherent steps and may repeat a file. Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary."
         ));
         rules.push(json!(
             "On a goal continuation (a.action is goal), continue with the next planned coherent step."
@@ -106,7 +160,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
     // lead with the volatile action.
     let fields: Vec<(&str, serde_json::Value)> = vec![
         // Static: identical bytes across all turns and sessions.
-        ("api", json!(GENERIC_API_CONTRACT)),
+        ("api", json!(api_contract)),
         (
             "stream",
             json!({
@@ -128,6 +182,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
                 "id": req.session.id,
                 "mode": req.session.mode,
                 "p": req.session.prompt,
+                "project": req.session.project,
             }),
         ),
         // Turn-kind-stable: constant across all turns of the same kind.
@@ -147,6 +202,7 @@ pub(crate) fn generic_prompt(req: &BackendRequest) -> String {
         // Append-only within a session.
         ("completed_steps", json!(req.session.completed_steps)),
         ("known_observations", json!(req.session.known_observations)),
+        ("skills", json!(req.session.skills)),
         // Volatile: changes every turn.
         (
             "interaction_feedback",
@@ -249,7 +305,11 @@ impl BackendAdapter for GenericCliBackend {
         let stdout = output.join("\n");
         let raw_output = format!("{stdout}{stderr}");
         let card = parse_card(&stdout).unwrap_or_else(|error| {
-            Self::error_card(format!("{}\n\n{}", error, excerpt(&raw_output)))
+            error_card(
+                crate::UNPARSED_OUTPUT_CARD_ID,
+                "Backend error",
+                format!("{}\n\n{}", error, excerpt(&raw_output)),
+            )
         });
         let card = enforce_card_contract(card, &req.card_contract, &backend_name, &raw_output);
 
@@ -400,12 +460,47 @@ mod tests {
     fn generic_prompt_adds_the_slice_rule_only_on_goal_turns() {
         let mut req = crate::test_request();
         assert!(!generic_prompt(&req).contains("one small, compilable hunk"));
+        assert!(generic_prompt(&req).contains("Compiler acceptance is a hard invariant"));
+        assert!(generic_prompt(&req).contains("exactly one uninterrupted change block"));
+        assert!(generic_prompt(&req).contains("Do not use tools or searches to re-enumerate"));
 
         req.card_contract.allow_goal_completion = true;
         let goal = generic_prompt(&req);
         assert!(goal.contains("one small, compilable hunk"));
         assert!(goal.contains("plan {remaining:[{file,summary}],complete}"));
         assert!(goal.contains("next planned coherent step"));
+    }
+
+    #[test]
+    fn generic_prompt_includes_project_facts_and_selected_instruction_content() {
+        let mut req = crate::test_request();
+        req.session.project = Some(loopbiotic_protocol::ProjectProfile {
+            schema_version: 1,
+            kind: "polyglot_monorepo".into(),
+            adapters: vec!["angular".into()],
+            technologies: vec![loopbiotic_protocol::ProjectTechnology {
+                name: "Angular".into(),
+                version: Some("22.0.6".into()),
+                role: "web_framework".into(),
+                source: "deno.lock".into(),
+            }],
+            areas: vec![],
+            commands: vec![],
+            tools: vec![],
+        });
+        req.session.skills = vec![loopbiotic_protocol::InstructionSkill {
+            name: "AGENTS.md".into(),
+            path: "AGENTS.md".into(),
+            content: "Preserve the public API.".into(),
+            provenance: "config".into(),
+            auto: true,
+            sha256: "abc".into(),
+        }];
+
+        let prompt = generic_prompt(&req);
+        assert!(prompt.contains("polyglot_monorepo"));
+        assert!(prompt.contains("22.0.6"));
+        assert!(prompt.contains("Preserve the public API."));
     }
 
     #[test]

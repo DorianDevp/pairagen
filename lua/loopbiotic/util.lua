@@ -131,4 +131,21 @@ function M.in_workspace(file, root)
   return target == root or vim.startswith(target, root .. "/")
 end
 
+-- Workspace-relative form of a path, compatible with Neovim 0.10 where
+-- vim.fs.relpath is not available yet. Returns nil outside the root.
+---@param root string
+---@param file string
+---@return string|nil
+function M.relative_path(root, file)
+  root = vim.uv.fs_realpath(root) or vim.fs.normalize(vim.fn.fnamemodify(root, ":p"):gsub("/$", ""))
+  local target = vim.uv.fs_realpath(file) or vim.fs.normalize(vim.fn.fnamemodify(file, ":p"))
+  if target == root then
+    return "."
+  end
+  if not vim.startswith(target, root .. "/") then
+    return nil
+  end
+  return target:sub(#root + 2)
+end
+
 return M

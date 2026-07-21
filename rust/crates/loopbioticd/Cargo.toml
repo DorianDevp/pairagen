@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 loopbiotic_backends = { path = "../loopbiotic_backends" }
+loopbiotic_context = { path = "../loopbiotic_context" }
 loopbiotic_harness = { path = "../loopbiotic_harness" }
 loopbiotic_patch = { path = "../loopbiotic_patch" }
 loopbiotic_protocol = { path = "../loopbiotic_protocol" }

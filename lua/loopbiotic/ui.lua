@@ -72,7 +72,9 @@ function M.cleanup_deferred()
   end
 end
 
-function M.float(lines, opts)
+-- Low-level technical Frame constructor. Product code must enter through
+-- surfaces.lua so PromptWindow and AgentWindow ownership cannot be bypassed.
+function M.open_frame(lines, opts)
   opts = opts or {}
   M.setup_highlights()
   lines = M.lines(lines)
@@ -105,7 +107,7 @@ function M.float(lines, opts)
   return buf, win
 end
 
-function M.render(buf, win, lines, opts)
+function M.render_frame(buf, win, lines, opts)
   opts = opts or {}
   lines = M.lines(lines)
 
@@ -120,7 +122,7 @@ function M.render(buf, win, lines, opts)
   end
 
   if not buf or not vim.api.nvim_buf_is_valid(buf) then
-    return M.float(lines, opts)
+    return M.open_frame(lines, opts)
   end
 
   vim.bo[buf].modifiable = true
@@ -137,7 +139,7 @@ function M.render(buf, win, lines, opts)
     return buf, win
   end
 
-  return M.float(lines, opts)
+  return M.open_frame(lines, opts)
 end
 
 function M.resize(win, line_count, opts)

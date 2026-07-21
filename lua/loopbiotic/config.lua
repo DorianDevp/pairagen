@@ -1,9 +1,15 @@
 local M = {}
 
+local mode_order = { "fix", "explain", "investigate", "review", "propose" }
+local valid_modes = {}
+for _, mode in ipairs(mode_order) do
+  valid_modes[mode] = true
+end
+
 ---@class LoopbioticBackendConfig
 ---@field command string|nil explicit loopbioticd path; nil resolves/installs one
 ---@field args string[]
----@field mode string default prompt mode ("auto", "fix", "explain", ...)
+---@field mode string default prompt mode ("investigate", "fix", "explain", ...)
 ---@field agent string key into LoopbioticConfig.agents
 ---@field prefetch "off"|"read_only" read-only post-accept prefetch
 ---@field token_budget integer ask before another turn past this session total; 0 disables
@@ -32,6 +38,8 @@ local M = {}
 ---@field card { border: string, max_width: integer, max_height: integer }
 ---@field thinking { enabled: boolean, interval: integer }
 ---@field context table context capture limits, optimization policy, and LSP hint options
+---@field flow table static LSP call hierarchy limits and responsive layout
+---@field skills { autoload: string[], discover_root_markdown: boolean, max_file_bytes: integer, picker_height: integer }
 ---@field navigation { open: "current"|"tab"|"split"|"vsplit", annotate: boolean }
 ---@field diff { layout: string, apply_to_buffer: boolean, max_changed_lines: integer }
 
@@ -40,10 +48,10 @@ M.values = {
   backend = {
     command = nil,
     args = {},
-    mode = "auto",
+    mode = "investigate",
     agent = "mock",
-    -- Ordinary speculation never drafts code: it prepares only the
-    -- conversational card shown after an accepted local patch.
+    -- Ordinary speculation prepares the next goal step while the current
+    -- patch is being reviewed; it can surface only after acceptance.
     prefetch = "read_only",
     -- Ask before starting another model turn after this session total.
     -- Set to 0 to disable the guard.
@@ -101,14 +109,8 @@ M.values = {
     },
   },
   keymaps = {
-    prompt = "<leader>a",
+    prompt = "<leader>pp",
     reply = "<leader>pm",
-    follow = "<leader>pf",
-    why = "<leader>pw",
-    fix = "<leader>px",
-    goal = "<leader>pG",
-    cancel = "<leader>pc",
-    other_lead = "<leader>pn",
     stop = "<leader>pq",
     hide = "<leader>ph",
     resume = "<leader>pr",
@@ -117,9 +119,14 @@ M.values = {
     details = "z",
     draft_accept = "<leader>pa",
     draft_reject = "<leader>pd",
-    draft_retry = "<leader>pt",
     -- Model picker inside the prompt window (buffer-local, insert and normal).
     models = "<C-l>",
+    -- Turn-mode picker inside every PromptWindow.
+    modes = "<C-k>",
+    -- Session-scoped Markdown instruction multiselect in PromptWindow.
+    skills = "<C-g>",
+    -- Toggle the session-pinned Flow explorer from prompt and cards.
+    flow = "F",
   },
   prompt = {
     border = "rounded",
@@ -170,6 +177,23 @@ M.values = {
       workspace_symbols = true,
     },
   },
+  flow = {
+    enabled = true,
+    initial_depth = 2,
+    max_nodes = 40,
+    snippet_token_budget = 800,
+    responsive_split = 120,
+    panel_width = 52,
+    request_timeout_ms = 1200,
+    submit_wait_ms = 160,
+    render_batch_ms = 24,
+  },
+  skills = {
+    autoload = { "AGENTS.md" },
+    discover_root_markdown = true,
+    max_file_bytes = 65536,
+    picker_height = 10,
+  },
   navigation = {
     open = "current",
     annotate = true,
@@ -184,6 +208,18 @@ M.values = {
 M.explicit_models = {}
 
 function M.setup(opts)
+  local requested_mode = opts and opts.backend and opts.backend.mode
+  if requested_mode ~= nil and not valid_modes[requested_mode] then
+    error(
+      "Unsupported Loopbiotic mode: "
+        .. tostring(requested_mode)
+        .. ". Configure one of: "
+        .. table.concat(mode_order, ", ")
+        .. ". The mode can be changed in PromptWindow with "
+        .. M.values.keymaps.modes
+        .. "."
+    )
+  end
   M.explicit_models = {}
   for name, agent in pairs((opts and opts.agents) or {}) do
     if agent.model ~= nil then
@@ -197,6 +233,14 @@ function M.setup(opts)
   return M.values
 end
 
+function M.mode_names()
+  return vim.deepcopy(mode_order)
+end
+
+function M.valid_mode(mode)
+  return valid_modes[mode] == true
+end
+
 function M.preferences_path()
   return vim.fn.stdpath("state") .. "/loopbiotic/preferences.json"
 end
@@ -206,15 +250,16 @@ function M.read_preferences()
   if vim.fn.filereadable(path) ~= 1 then
     local legacy_path = vim.fn.stdpath("state") .. "/pairagen/preferences.json"
     if vim.fn.filereadable(legacy_path) ~= 1 then
-      return { models = {} }
+      return { models = {}, discovery_models = {} }
     end
     path = legacy_path
   end
   local ok, value = pcall(vim.json.decode, table.concat(vim.fn.readfile(path), "\n"))
   if not ok or type(value) ~= "table" then
-    return { models = {} }
+    return { models = {}, discovery_models = {} }
   end
   value.models = type(value.models) == "table" and value.models or {}
+  value.discovery_models = type(value.discovery_models) == "table" and value.discovery_models or {}
   return value
 end
 
@@ -226,11 +271,19 @@ function M.load_models()
       agent.model = model
     end
   end
+  for name, model in pairs(preferences.discovery_models) do
+    local agent = M.values.agents[name]
+    if agent and not M.explicit_models[name] and type(model) == "string" and model ~= "" then
+      agent.discovery_model = model
+    end
+  end
 end
 
-function M.persist_model(agent_name, model)
+-- Persist a per-agent model preference under the named preferences field
+-- (`models` for the patch/response model, `discovery_models` for discovery).
+local function persist_preference(field, agent_name, model)
   local preferences = M.read_preferences()
-  preferences.models[agent_name] = model and model ~= "" and model or nil
+  preferences[field][agent_name] = model and model ~= "" and model or nil
   local path = M.preferences_path()
   local directory = vim.fn.fnamemodify(path, ":h")
   local ok, error_message = pcall(function()
@@ -245,6 +298,14 @@ function M.persist_model(agent_name, model)
     return true, nil
   end
   return false, tostring(error_message)
+end
+
+function M.persist_model(agent_name, model)
+  return persist_preference("models", agent_name, model)
+end
+
+function M.persist_discovery_model(agent_name, model)
+  return persist_preference("discovery_models", agent_name, model)
 end
 
 function M.migrate_legacy_codex()
@@ -299,6 +360,24 @@ function M.model(name)
   end
 
   return agent.model, false
+end
+
+function M.discovery_model(name)
+  local agent_name, agent = M.agent_config()
+
+  if name then
+    if name == "" then
+      agent.discovery_model = nil
+    else
+      agent.discovery_model = name
+    end
+    if not M.explicit_models[agent_name] then
+      local saved, error_message = M.persist_discovery_model(agent_name, agent.discovery_model)
+      return agent.discovery_model, saved, error_message
+    end
+  end
+
+  return agent.discovery_model, false
 end
 
 function M.model_names()

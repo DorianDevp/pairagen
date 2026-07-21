@@ -1,5 +1,6 @@
 local config = require("loopbiotic.config")
 local state = require("loopbiotic.state")
+local surfaces = require("loopbiotic.surfaces")
 local ui = require("loopbiotic.ui")
 
 local M = {}
@@ -9,37 +10,129 @@ local M = {}
 -- the default footer so a cleared preflight error can restore it.
 local open_kind = "Prompt"
 local open_footer = nil
+local open_source = nil
+local open_graph = nil
+local open_mode = "investigate"
+local submit_token = 0
+
+local mode_labels = {
+  fix = "Fix — prepare a reviewed patch",
+  explain = "Explain — explain without patching",
+  investigate = "Investigate — form a grounded hypothesis",
+  review = "Review — review the selected code",
+  propose = "Propose — propose a reviewed patch",
+}
+
+local function shortcut_label(key)
+  if type(key) ~= "string" or key == "" then
+    return nil
+  end
+  return key:gsub("<[Cc]%-([^>]+)>", "Ctrl-%1"):gsub("<[Mm]%-([^>]+)>", "Alt-%1")
+end
+
+local function action_footer(submit_label)
+  local actions = {}
+  local function add(key, label)
+    key = shortcut_label(key)
+    if key then
+      table.insert(actions, key .. " " .. label)
+    end
+  end
+  add(config.values.keymaps.skills, "skills")
+  add(config.values.keymaps.modes, "mode")
+  add(config.values.keymaps.models, "model")
+  add("<C-s>", submit_label)
+  add("<Esc>", "normal")
+  add("q", "close")
+  return " " .. table.concat(actions, "  ") .. " "
+end
+
+function M.normalize_mode(mode)
+  if config.valid_mode(mode) then
+    return mode
+  end
+  error("Unknown Loopbiotic mode: " .. tostring(mode))
+end
+
+function M.mode_candidates()
+  return config.mode_names()
+end
+
+function M.current_mode()
+  return open_mode
+end
+
+local function flow_listener(graph)
+  if surfaces.prompt_open() and open_source then
+    open_source.value.call_hierarchy = require("loopbiotic.flow").bundle(graph)
+  end
+end
+
+local function resolve_hints(source)
+  source.lsp_pending = true
+  require("loopbiotic.context").lsp_hints_async(
+    source.buf,
+    { source.value.cursor.line, math.max(source.value.cursor.column - 1, 0) },
+    source.value.cwd,
+    function(hints)
+      source.value.hints = hints
+      source.lsp_pending = false
+    end
+  )
+end
 
 function M.open(mode)
-  local source = require("loopbiotic.context").capture()
-
-  -- Let the backend pay its startup cost (CLI boot, process spawn) while the
-  -- user is still typing the prompt. The response also carries the backend
-  -- identity (concrete model, known models) used for the title and picker.
-  require("loopbiotic.rpc").request("backend/warmup", {}, M.on_warmup)
+  open_mode = M.normalize_mode(mode or state.prompt_stash_mode or config.values.backend.mode)
+  local source = require("loopbiotic.context").capture(nil, { skip_lsp = true })
+  open_source = source
+  require("loopbiotic.skills").prepare(source.value.cwd)
 
   open_kind = "Prompt"
   M.open_for({
-    title = M.title("Prompt"),
-    footer = " Ctrl-l model  /kind forces card type  Ctrl-s submit  Esc normal  q close ",
-    submit = function(text)
-      require("loopbiotic").start(text, mode, source)
+    title = M.title("Prompt", open_mode),
+    footer = action_footer("submit"),
+    return_to_agent = state.session_id ~= nil,
+    submit = function(text, selected_mode, selected_skills)
+      require("loopbiotic").submit_prompt(text, selected_mode, open_source, selected_skills)
     end,
   })
+
+  -- Open the editor workspace before starting any process or LSP work. The
+  -- backend can then pay its startup cost while the user is already typing;
+  -- its response also supplies the concrete model used by the title/picker.
+  require("loopbiotic.rpc").request("backend/warmup", {}, M.on_warmup)
+  resolve_hints(source)
+
+  if (config.values.flow or {}).enabled ~= false then
+    open_graph = require("loopbiotic.flow").start(source.buf, {
+      source.value.cursor.line,
+      math.max(source.value.cursor.column - 1, 0),
+    }, flow_listener)
+    source.value.call_hierarchy = require("loopbiotic.flow").bundle(open_graph)
+  else
+    open_graph = nil
+  end
 
   M.prefill()
   M.refresh_footer()
 end
 
-function M.reply()
+function M.reply(mode)
+  open_mode = M.normalize_mode(mode or state.session_mode or config.values.backend.mode)
+  open_source = nil
+  open_graph = nil
   open_kind = "Reply"
+  require("loopbiotic.skills").prepare(state.skills_root or vim.fn.getcwd())
   M.open_for({
-    title = M.title("Reply"),
-    footer = " Ctrl-l model  Ctrl-s send  Esc normal  q close ",
-    submit = function(text)
-      require("loopbiotic").reply(text)
+    title = M.title("Reply", open_mode),
+    footer = action_footer("send"),
+    return_to_agent = true,
+    submit = function(text, selected_mode, selected_skills)
+      require("loopbiotic").submit_reply(text, selected_mode, selected_skills)
     end,
   })
+  M.prefill()
+  M.refresh_footer()
 end
 
 -- Store the identity reported by backend/warmup and refresh the open prompt
@@ -86,12 +179,7 @@ end
 -- Callers may run outside the main loop (RPC callbacks), hence the schedule.
 function M.refresh_title()
   vim.schedule(function()
-    local frame_win = state.prompt_frame_win
-    if not (frame_win and vim.api.nvim_win_is_valid(frame_win)) then
-      return
-    end
-
-    pcall(vim.api.nvim_win_set_config, frame_win, { title = M.title(open_kind), title_pos = "left" })
+    surfaces.update_prompt_frame({ title = M.title(open_kind), title_pos = "left" })
   end)
 end
 
@@ -100,17 +188,21 @@ end
 -- default keymap hints. Mirrors refresh_title (schedule + validity check).
 function M.refresh_footer()
   vim.schedule(function()
-    local frame_win = state.prompt_frame_win
-    if not (frame_win and vim.api.nvim_win_is_valid(frame_win)) then
-      return
-    end
-
     local footer = open_footer
     if type(state.backend_preflight_error) == "string" and state.backend_preflight_error ~= "" then
       footer = M.preflight_footer(state.backend_preflight_error)
     end
 
-    pcall(vim.api.nvim_win_set_config, frame_win, { footer = footer, footer_pos = "right" })
+    local context_summary = require("loopbiotic.widgets").summary()
+    if context_summary then
+      footer = " " .. context_summary .. " · Ctrl-x remove   " .. (footer or "")
+    end
+    local skill_summary = require("loopbiotic.skills").summary()
+    if skill_summary then
+      footer = " " .. skill_summary .. "   " .. (footer or "")
+    end
+
+    surfaces.update_prompt_frame({ footer = footer, footer_pos = "right" })
   end)
 end
 
@@ -137,7 +229,7 @@ end
 -- session start, cursor at the end, so the composed prompt is not lost.
 function M.prefill()
   local stash = state.prompt_stash
-  local buf = state.prompt_buf
+  local buf, win = surfaces.prompt_handles()
   if type(stash) ~= "string" or stash == "" or not (buf and vim.api.nvim_buf_is_valid(buf)) then
     return
   end
@@ -145,7 +237,6 @@ function M.prefill()
   local lines = vim.split(stash, "\n", { plain = true })
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 
-  local win = state.prompt_win
   if win and vim.api.nvim_win_is_valid(win) then
     pcall(vim.api.nvim_win_set_cursor, win, { #lines, #lines[#lines] })
     if vim.api.nvim_get_current_win() == win then
@@ -174,16 +265,20 @@ function M.next_stash(stash, event, text)
   return stash
 end
 
--- Pick the concrete model out of the fixed resolution order: configured
--- model, then the model the warmup identity announced for the next turn,
--- then the model the backend reported after a turn. Returns nil when none
+-- Pick the concrete model out of the fixed resolution order: the model the
+-- backend reported it actually ran this turn, then the user's configured
+-- pick, then the model the warmup identity announced. Returns nil when none
 -- is known. vim.NIL (JSON null) and empty strings count as unknown.
 ---@param configured string|nil
 ---@param identity_model string|nil
 ---@param backend_model string|nil
 ---@return string|nil
 function M.resolved_model(configured, identity_model, backend_model)
-  local candidates = { configured, identity_model, backend_model }
+  -- Actual-used first: once a turn has run, the backend-reported model is the
+  -- honest answer for the headline (a discovery turn ran discovery_model, a
+  -- patch turn ran the patch model). Before any turn, fall back to the user's
+  -- configured pick, then the backend's advertised default.
+  local candidates = { backend_model, configured, identity_model }
 
   for index = 1, 3 do
     local value = candidates[index]
@@ -196,29 +291,22 @@ function M.resolved_model(configured, identity_model, backend_model)
 end
 
 -- Title-ready model name; "model?" until any concrete model is known. The
--- word "default" is never rendered. When the backend runs a different
--- discovery model (identity.phases), it is shown alongside the patch model
--- instead of being presented as "the" model.
+-- word "default" is never rendered. The label always reflects the actual
+-- per-turn model (a discovery turn shows discovery_model, a patch turn shows
+-- the patch model) via resolved_model, so no separate discovery suffix is
+-- needed — the headline is never a model the turn did not run.
 ---@param configured string|nil
 ---@param identity table|nil backend/warmup identity ({ model, models, phases })
 ---@param backend_model string|nil
 ---@return string
 function M.model_label(configured, identity, backend_model)
   local identity_model = type(identity) == "table" and identity.model or nil
-  local label = M.resolved_model(configured, identity_model, backend_model) or "model?"
-  local phases = type(identity) == "table" and type(identity.phases) == "table" and identity.phases or nil
-  local discovery = phases and phases.discovery
-
-  if type(discovery) == "string" and discovery ~= "" and discovery ~= label then
-    return label .. " · discovery " .. discovery
-  end
-
-  return label
+  return M.resolved_model(configured, identity_model, backend_model) or "model?"
 end
 
 -- Deduped model-picker candidates, in resolution-priority order: configured
--- model, identity model, backend-enumerated models, the agent's `models`
--- config list, the model reported after the last turn.
+-- patch model, backend default/patch model, backend-enumerated selectable
+-- models, the agent's `models` config list, and the last reported model.
 ---@param configured string|nil
 ---@param identity table|nil backend/warmup identity ({ model, models })
 ---@param agent_models string[]|nil the agent's `models` config list
@@ -239,6 +327,9 @@ function M.model_candidates(configured, identity, agent_models, backend_model)
     add(identity.model)
     if type(identity.phases) == "table" then
       add(identity.phases.patch)
+      -- Discovery runs a distinct (often cheaper) model; keep it selectable so
+      -- the user can control which model answers investigate/explain/review
+      -- turns, not only patch turns.
       add(identity.phases.discovery)
     end
     if type(identity.models) == "table" then
@@ -255,20 +346,73 @@ function M.model_candidates(configured, identity, agent_models, backend_model)
   return candidates
 end
 
-function M.title(kind)
-  local agent = config.agent()
-  local model = M.model_label(config.model(), state.agent_identity, state.backend_model)
+-- Inputs for the model the next turn in `phase` would run: the phase's
+-- configured pick, the identity default for that phase, and the model the
+-- backend last reported for that phase. resolved_model keeps its actual-first
+-- priority; feeding it per-phase inputs is what keeps the headline from
+-- naming a model the turn will not use.
+---@param phase "patch"|"discovery"
+---@return string|nil configured, string|nil identity_model, string|nil actual
+function M.phase_model_inputs(phase)
+  local configured = phase == "patch" and config.model() or config.discovery_model()
+  local identity = state.agent_identity
+  local identity_model
+  if type(identity) == "table" then
+    local phases = type(identity.phases) == "table" and identity.phases or {}
+    if type(phases[phase]) == "string" and phases[phase] ~= "" then
+      identity_model = phases[phase]
+    elseif type(identity.model) == "string" then
+      identity_model = identity.model
+    end
+  end
+  local actuals = state.backend_models
+  local actual = type(actuals) == "table" and actuals[phase] or nil
+  return configured, identity_model, actual
+end
 
-  return string.format(" Loopbiotic %s · %s / %s ", kind, agent, model)
+function M.title(kind, mode)
+  local agent = config.agent()
+  local resolved_mode = M.normalize_mode(mode or open_mode)
+  local configured, identity_model, actual = M.phase_model_inputs(M.model_phase(resolved_mode))
+  local model = M.resolved_model(configured, identity_model, actual) or "model?"
+
+  return string.format(" Loopbiotic %s · %s · %s / %s ", kind, resolved_mode, agent, model)
+end
+
+-- Choose the behavior contract for this PromptWindow. The picker is local UI:
+-- it preserves typed text and does not contact the backend until submit.
+function M.pick_mode()
+  vim.ui.select(M.mode_candidates(), {
+    prompt = "Loopbiotic mode",
+    format_item = function(mode)
+      return mode_labels[mode] or mode
+    end,
+  }, function(choice)
+    if not choice then
+      return
+    end
+    open_mode = M.normalize_mode(choice)
+    M.refresh_title()
+  end)
 end
 
 -- Open a picker over every model known for the active agent. The choice
 -- goes through the regular model-switch entry point (persisting the
 -- per-agent preference); only the frame title changes, the typed prompt
 -- text and window stay as they are.
+-- fix/propose draft a patch; explain/investigate/review run discovery. The
+-- visible PromptWindow mode therefore names the phase the model picker targets.
+function M.model_phase(mode)
+  if mode == "fix" or mode == "propose" then
+    return "patch"
+  end
+  return "discovery"
+end
+
 function M.pick_model()
   local agent = config.agent()
   local identity = state.agent_identity
+  local phase = M.model_phase(M.current_mode())
   local candidates = M.model_candidates(config.model(), identity, config.model_names(), state.backend_model)
 
   if #candidates == 0 then
@@ -276,12 +420,17 @@ function M.pick_model()
     return
   end
 
-  vim.ui.select(candidates, { prompt = "Loopbiotic model (" .. agent .. ")" }, function(choice)
+  local label = phase == "patch" and "patch model" or "discovery model"
+  vim.ui.select(candidates, { prompt = "Loopbiotic " .. label .. " (" .. agent .. ")" }, function(choice)
     if not choice or choice == "" then
       return
     end
 
-    require("loopbiotic").model(choice)
+    if phase == "patch" then
+      require("loopbiotic").model(choice)
+    else
+      require("loopbiotic").discovery_model(choice)
+    end
     M.refresh_title()
   end)
 end
@@ -294,44 +443,20 @@ function M.open_for(opts)
   local position = M.position(size)
   local row = position.row
   local col = position.col
-  local frame_buf = vim.api.nvim_create_buf(false, true)
-  local zindex = config.values.prompt.zindex or 200
-  local frame_win = vim.api.nvim_open_win(frame_buf, false, {
-    relative = "editor",
+  local buf, win = surfaces.open_prompt({
     row = row,
     col = col,
-    width = size.outer_width,
-    height = size.outer_height,
-    style = "minimal",
+    outer_width = size.outer_width,
+    outer_height = size.outer_height,
+    inner_width = size.inner_width,
+    inner_height = size.inner_height,
+    padding_x = size.padding_x,
+    padding_y = size.padding_y,
     border = config.values.prompt.border,
     title = opts.title,
-    title_pos = "left",
     footer = opts.footer,
-    footer_pos = "right",
-    zindex = zindex,
+    return_to_agent = opts.return_to_agent == true,
   })
-
-  state.prompt_frame_buf = frame_buf
-  state.prompt_frame_win = frame_win
-
-  vim.bo[frame_buf].bufhidden = "wipe"
-  vim.bo[frame_buf].modifiable = false
-
-  local buf = vim.api.nvim_create_buf(false, true)
-  local win = vim.api.nvim_open_win(buf, true, {
-    relative = "editor",
-    row = row + size.padding_y,
-    col = col + size.padding_x,
-    width = size.inner_width,
-    height = size.inner_height,
-    style = "minimal",
-    border = "none",
-    zindex = zindex + 1,
-  })
-
-  state.prompt_buf = buf
-  state.prompt_win = win
-
   M.prepare(buf, win)
   M.bind(buf, opts.submit)
 
@@ -363,6 +488,24 @@ function M.bind(buf, submit)
     end, { buffer = buf, nowait = true, silent = true })
   end
 
+  local modes_key = config.values.keymaps.modes
+  if modes_key and modes_key ~= "" then
+    vim.keymap.set({ "i", "n" }, modes_key, function()
+      M.pick_mode()
+    end, { buffer = buf, nowait = true, silent = true })
+  end
+
+  local skills_key = config.values.keymaps.skills
+  if skills_key and skills_key ~= "" then
+    vim.keymap.set({ "i", "n" }, skills_key, function()
+      local return_to_insert = vim.fn.mode():match("^[iR]") ~= nil
+      if return_to_insert then
+        vim.cmd("stopinsert")
+      end
+      require("loopbiotic.skills").open_picker({ return_to_insert = return_to_insert })
+    end, { buffer = buf, nowait = true, silent = true })
+  end
+
   vim.keymap.set("n", "<CR>", function()
     M.submit(buf, submit)
   end, { buffer = buf, nowait = true, silent = true })
@@ -370,12 +513,44 @@ function M.bind(buf, submit)
   vim.keymap.set("n", "q", function()
     M.close()
   end, { buffer = buf, nowait = true, silent = true })
+
+  vim.keymap.set({ "i", "n" }, "<C-x>", function()
+    M.remove_context()
+  end, { buffer = buf, nowait = true, silent = true })
+end
+
+function M.remove_context()
+  local widgets = require("loopbiotic.widgets")
+  local refs = widgets.list()
+  if #refs == 0 then
+    return
+  end
+  vim.ui.select(refs, {
+    prompt = "Remove attached context",
+    format_item = function(ref)
+      return ref.label .. " · " .. vim.fn.fnamemodify(ref.file, ":.")
+    end,
+  }, function(ref)
+    if ref then
+      widgets.deselect(ref.id)
+      M.refresh_footer()
+    end
+  end)
 end
 
 function M.submit(buf, submit)
   local text = M.text(buf)
+  local selected_mode = open_mode
+  local selected_skills = require("loopbiotic.skills").snapshot()
 
   if text == "" then
+    return
+  end
+
+  -- PromptWindow may open as soon as a running turn is invalidated locally.
+  -- Keep the composed request in place until the daemon confirms cancellation,
+  -- so two turns can never overlap in one session.
+  if state.turn_barrier then
     return
   end
 
@@ -386,18 +561,39 @@ function M.submit(buf, submit)
   -- The window closes before the backend answers, so stash the composed text
   -- now; a successful start clears it, a failed one leaves it for prefill.
   state.prompt_stash = M.next_stash(state.prompt_stash, "submit", text)
-  M.close()
-  submit(text)
+  state.prompt_stash_mode = selected_mode
+  submit_token = submit_token + 1
+  local token = submit_token
+  vim.b[buf].loopbiotic_submitting = true
+  local graph = open_graph
+  local source = open_source
+  require("loopbiotic.flow").await(graph, (config.values.flow or {}).submit_wait_ms or 160, function(bundle)
+    if token ~= submit_token then
+      return
+    end
+    if source then
+      source.value.call_hierarchy = bundle
+    end
+    if graph then
+      state.call_hierarchy = graph
+    end
+    M.close(true)
+    submit(text, selected_mode, selected_skills)
+  end, function()
+    return not source or source.lsp_pending ~= true
+  end)
 end
 
-function M.close()
-  ui.close(state.prompt_win)
-  ui.close(state.prompt_frame_win)
-
-  state.prompt_win = nil
-  state.prompt_buf = nil
-  state.prompt_frame_win = nil
-  state.prompt_frame_buf = nil
+function M.close(preserve_submit)
+  if not preserve_submit then
+    submit_token = submit_token + 1
+  end
+  local graph = open_graph
+  if not preserve_submit and graph and graph ~= state.call_hierarchy then
+    require("loopbiotic.flow").set_listener(graph, nil)
+  end
+  open_graph = nil
+  surfaces.close_prompt({ focus_agent = preserve_submit ~= true })
 end
 
 function M.text(buf)
@@ -407,8 +603,8 @@ function M.text(buf)
 end
 
 function M.size()
-  local outer_width = M.width()
   local viewport = ui.viewport()
+  local outer_width = M.width()
   local outer_height = math.min(config.values.prompt.height, math.max(viewport.height - 2, 1))
   local padding_x = math.min(config.values.prompt.padding_x, math.floor((outer_width - 1) / 2))
   local padding_y = math.min(config.values.prompt.padding_y, math.floor((outer_height - 1) / 2))
@@ -474,6 +670,28 @@ function M.width()
   local limit = math.max(ui.viewport().width - 2, 1)
 
   return math.min(configured, limit)
+end
+
+function M.relayout()
+  if not surfaces.prompt_open() then
+    return
+  end
+  local size = M.size()
+  local viewport = ui.viewport()
+  local _, _, _, frame = surfaces.prompt_handles()
+  local frame_config = vim.api.nvim_win_get_config(frame)
+  local row = ui.clamp(ui.number(frame_config.row) or 0, 0, math.max(viewport.height - size.outer_height - 2, 0))
+  local col = ui.clamp(ui.number(frame_config.col) or 0, 0, math.max(viewport.width - size.outer_width - 2, 0))
+  surfaces.relayout_prompt({
+    row = row,
+    col = col,
+    outer_width = size.outer_width,
+    outer_height = size.outer_height,
+    inner_width = size.inner_width,
+    inner_height = size.inner_height,
+    padding_x = size.padding_x,
+    padding_y = size.padding_y,
+  })
 end
 
 return M

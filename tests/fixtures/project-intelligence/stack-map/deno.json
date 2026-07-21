@@ -1,0 +1,5 @@
+{
+  "tasks": {
+    "check": "nx run-many -t build,test"
+  }
+}

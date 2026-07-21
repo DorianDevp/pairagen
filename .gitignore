@@ -1,5 +1,6 @@
 /target
 /doc/tags
+*.log
 loopbioticd-v*.tar.gz
 loopbioticd-v*.tar.gz.sha256
 .luarc.local.json

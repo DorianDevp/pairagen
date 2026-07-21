@@ -9,7 +9,7 @@ use anyhow::Result;
 use loopbiotic_protocol::{Action, Card, ErrorCard};
 use serde_json::{Value, json};
 
-use crate::{BackendAction, BackendProgress, BackendRequest, ProgressReporter};
+use crate::{BackendAction, BackendPreview, BackendProgress, BackendRequest, ProgressReporter};
 
 pub(crate) const TURN_TIMEOUT_ENV: &str = "LOOPBIOTIC_TURN_TIMEOUT_SECS";
 const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(600);
@@ -93,21 +93,9 @@ pub(crate) fn turn_phase(req: &BackendRequest) -> Phase {
 /// re-sending an unchanged buffer to a persistent process.
 pub(crate) fn context_fingerprint(req: &BackendRequest) -> u64 {
     let mut hasher = DefaultHasher::new();
-    req.context.file.hash(&mut hasher);
-    req.context.cursor.line.hash(&mut hasher);
-    req.context.cursor.column.hash(&mut hasher);
-    req.context.buffer_start_line.hash(&mut hasher);
-    req.context.buffer_text.hash(&mut hasher);
-    for diagnostic in &req.context.diagnostics {
-        diagnostic.file.hash(&mut hasher);
-        diagnostic.line.hash(&mut hasher);
-        diagnostic.message.hash(&mut hasher);
-    }
-    for artifact in &req.context.artifacts {
-        artifact.file.hash(&mut hasher);
-        artifact.start_line.hash(&mut hasher);
-        artifact.text.hash(&mut hasher);
-    }
+    serde_json::to_string(&crate::backend_context(&req.context))
+        .unwrap_or_default()
+        .hash(&mut hasher);
     hasher.finish()
 }
 
@@ -145,7 +133,6 @@ pub(crate) fn action_value(action: &BackendAction) -> Value {
             json!({"kind": "user", "action": action})
         }
         BackendAction::Reply(text) => json!({"kind": "reply", "text": text}),
-        BackendAction::PostAccept => json!({"kind": "post_accept"}),
         BackendAction::ContractRetry(reason) => {
             json!({"kind": "contract_retry", "reason": reason})
         }
@@ -164,6 +151,22 @@ pub(crate) fn report_progress(
             session_id: session_id.into(),
             phase: phase.into(),
             message: message.into(),
+            preview: None,
+        });
+    }
+}
+
+pub(crate) fn report_preview(
+    progress: Option<&ProgressReporter>,
+    session_id: &str,
+    preview: BackendPreview,
+) {
+    if let Some(progress) = progress {
+        progress(BackendProgress {
+            session_id: session_id.into(),
+            phase: "drafting".into(),
+            message: "Drafting a response".into(),
+            preview: Some(preview),
         });
     }
 }
@@ -240,6 +243,35 @@ mod tests {
         req.card_contract.expected_kind = None;
         req.card_contract.allow_goal_completion = true;
         assert_eq!(turn_phase(&req), Phase::Patch);
+    }
+
+    #[test]
+    fn flow_graph_participates_in_context_fingerprinting() {
+        let mut req = crate::test_request();
+        let without = context_fingerprint(&req);
+        req.context.call_hierarchy = Some(loopbiotic_protocol::CallHierarchy {
+            root: None,
+            nodes: vec![],
+            edges: vec![],
+            partial: false,
+            truncated: false,
+            unavailable: true,
+        });
+
+        assert_ne!(context_fingerprint(&req), without);
+    }
+
+    #[test]
+    fn selection_participates_in_context_fingerprinting() {
+        let mut req = crate::test_request();
+        let without = context_fingerprint(&req);
+        req.context.selection = Some(loopbiotic_protocol::Selection {
+            start: loopbiotic_protocol::Cursor { line: 1, column: 1 },
+            end: loopbiotic_protocol::Cursor { line: 1, column: 3 },
+            text: "fn".into(),
+        });
+
+        assert_ne!(context_fingerprint(&req), without);
     }
 
     #[test]

@@ -11,6 +11,7 @@
     "finding",
     "location",
     "annotation",
+    "flow_path",
     "explanation",
     "goal_complete",
     "patches",
@@ -69,6 +70,10 @@
     },
     "annotation": {
       "type": ["string", "null"]
+    },
+    "flow_path": {
+      "type": ["array", "null"],
+      "items": { "type": "string" }
     },
     "explanation": {
       "type": ["string", "null"]

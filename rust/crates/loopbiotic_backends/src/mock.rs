@@ -35,8 +35,13 @@ impl BackendAdapter for MockBackend {
                 BackendAction::User(Action::Next) => next_step_card(),
                 BackendAction::User(Action::Stop) => stop_card(),
                 BackendAction::User(action) => unsupported_card(action),
+                BackendAction::Reply(_)
+                    if req.card_contract.expected_kind
+                        == Some(loopbiotic_protocol::CardKind::Patch) =>
+                {
+                    patch_card(&req)
+                }
                 BackendAction::Reply(text) => reply_card(text),
-                BackendAction::PostAccept => post_accept_card(),
                 BackendAction::ContractRetry(_) => finding_card(),
                 BackendAction::LocationGranted => patch_card(&req),
             }
@@ -74,17 +79,6 @@ impl BackendAdapter for MockBackend {
     }
 }
 
-fn post_accept_card() -> Card {
-    Card::Finding(FindingCard {
-        id: "c_post_accept".into(),
-        title: "Local step accepted".into(),
-        finding: "The accepted hunk is in place. Exercise the changed behavior before authorizing more code.".into(),
-        location: None,
-        annotation: None,
-        actions: vec![Action::Follow, Action::Goal, Action::RunCheck, Action::Stop],
-    })
-}
-
 /// Later slices of the mock's three-slice goal. The first slice always
 /// targets the live buffer; these two use fixed single-line sources so tests
 /// (and the daemon's editor/read_file flow) can serve matching buffers.
@@ -119,6 +113,18 @@ fn goal_card(req: &BackendRequest) -> Card {
     }
 
     let Some(plan) = last_plan else {
+        // An ordinary accepted patch enters the goal loop without showing a
+        // post-accept receipt. Its speculative request already carries that
+        // patch in completed_steps, so this tiny mock can finish directly.
+        if !req.session.completed_steps.is_empty() {
+            return Card::Summary(SummaryCard {
+                id: "c_complete".into(),
+                title: "Goal complete".into(),
+                summary: "The accepted change completes the requested local fix.".into(),
+                changed_files: vec!["src/work.ts".into()],
+                next_actions: vec![Action::RunCheck, Action::Stop],
+            });
+        }
         // A fresh goal turn: slice the live buffer first.
         return slice_card(
             "c_slice_1",
@@ -271,6 +277,7 @@ fn first_card() -> Card {
         claim: "This path can return before the payload is built.".into(),
         evidence: None,
         next_move: None,
+        flow_path: vec![],
         actions: vec![
             Action::Follow,
             Action::Why,
@@ -288,6 +295,7 @@ fn finding_card() -> Card {
         finding: "The selected path leaves before payload construction.".into(),
         location: None,
         annotation: Some("payload construction is skipped here".into()),
+        flow_path: vec![],
         actions: vec![
             Action::Open,
             Action::Why,
@@ -305,6 +313,7 @@ fn why_card() -> Card {
         finding: "Callers later read body.data, but this branch does not create body.".into(),
         location: None,
         annotation: None,
+        flow_path: vec![],
         actions: vec![Action::Follow, Action::Fix, Action::OtherLead, Action::Stop],
     })
 }
@@ -316,6 +325,7 @@ fn other_card() -> Card {
         claim: "A caller may replace the response before it reaches this code.".into(),
         evidence: None,
         next_move: None,
+        flow_path: vec![],
         actions: vec![Action::Follow, Action::Why, Action::Fix, Action::Stop],
     })
 }
@@ -332,6 +342,7 @@ fn next_step_card() -> Card {
             column: 1,
         }),
         annotation: Some("This is the next unresolved part of the original goal.".into()),
+        flow_path: vec![],
         actions: vec![Action::Open, Action::Fix, Action::Stop],
     })
 }
@@ -343,6 +354,7 @@ fn reply_card(text: String) -> Card {
         finding: format!("You said: {text}"),
         location: None,
         annotation: None,
+        flow_path: vec![],
         actions: vec![Action::Follow, Action::Why, Action::Fix, Action::Stop],
     })
 }
@@ -403,6 +415,7 @@ fn check_card() -> Card {
         finding: "Run the project check command from the editor or shell.".into(),
         location: None,
         annotation: None,
+        flow_path: vec![],
         actions: vec![Action::Goal, Action::Stop],
     })
 }

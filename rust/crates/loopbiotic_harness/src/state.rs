@@ -107,8 +107,8 @@ impl NextState {
                 Card::Patch(_)
                 | Card::Summary(_)
                 | Card::Choice(_)
-                | Card::Finding(_)
-                | Card::Hypothesis(_),
+                | Card::Deny(_)
+                | Card::Error(_),
             ) => Ok(()),
             (Self::GoalLoop, _) => Err(anyhow!(
                 "expected the next goal patch, a blocking choice, or a completed goal summary"
@@ -269,6 +269,7 @@ mod tests {
             claim: "c".into(),
             evidence: None,
             next_move: None,
+            flow_path: vec![],
             actions: vec![Action::Stop],
         })
     }
@@ -280,6 +281,7 @@ mod tests {
             finding: "f".into(),
             location: None,
             annotation: None,
+            flow_path: vec![],
             actions: vec![Action::Stop],
         })
     }
@@ -386,8 +388,18 @@ mod tests {
             (N::GoalLoop, patch_card(), Ok(())),
             (N::GoalLoop, summary_card(), Ok(())),
             (N::GoalLoop, choice_card(), Ok(())),
-            (N::GoalLoop, finding_card(), Ok(())),
-            (N::GoalLoop, hypothesis_card(), Ok(())),
+            (N::GoalLoop, deny_card(), Ok(())),
+            (N::GoalLoop, error_card(), Ok(())),
+            (
+                N::GoalLoop,
+                finding_card(),
+                Err("expected the next goal patch, a blocking choice, or a completed goal summary"),
+            ),
+            (
+                N::GoalLoop,
+                hypothesis_card(),
+                Err("expected the next goal patch, a blocking choice, or a completed goal summary"),
+            ),
             (N::GoalWhy, finding_card(), Ok(())),
             (
                 N::GoalWhy,

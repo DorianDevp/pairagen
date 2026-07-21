@@ -1,0 +1,14 @@
+{
+  "name": "angular-input",
+  "prompt": "Fix TitleCard so its required title input uses the modern API supported by this workspace. Keep the patch minimal and preserve the template. Return the concrete patch.",
+  "entry": "apps/web-angular/src/title-card.ts",
+  "mode": "fix",
+  "expected_kind": "patch",
+  "skills": ["AGENTS.md", "ANGULAR.md"],
+  "rubric": [
+    { "label": "required signal input", "any": ["input.required<string>()"] },
+    { "label": "readonly field", "any": ["readonly title"] },
+    { "label": "removes decorator", "none": ["+  @input", "+@input"] },
+    { "label": "preserves signal template", "any": ["title()"] }
+  ]
+}

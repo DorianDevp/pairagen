@@ -79,14 +79,6 @@ pub(super) fn update_goal_state(session: &mut Session, card: &Card, next_state: 
             session.goal_status = loopbiotic_protocol::GoalStatus::Complete;
             session.next_step = None;
         }
-        Card::Finding(card) => {
-            session.goal_status = loopbiotic_protocol::GoalStatus::Active;
-            session.next_step = Some(card.finding.clone());
-        }
-        Card::Hypothesis(card) => {
-            session.goal_status = loopbiotic_protocol::GoalStatus::Active;
-            session.next_step = Some(card.claim.clone());
-        }
         Card::Choice(_) => {
             session.goal_status = loopbiotic_protocol::GoalStatus::Active;
             session.next_step = None;

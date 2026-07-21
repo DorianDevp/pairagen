@@ -9,7 +9,7 @@ function M.current(prompt, mode)
   local value = vim.deepcopy(source.value)
 
   value.prompt = prompt
-  value.mode = mode or "auto"
+  value.mode = mode or "investigate"
   value.context_policy = vim.deepcopy(config.values.context.optimization)
 
   return value, source
@@ -18,6 +18,7 @@ end
 function M.session()
   local value = M.capture(require("loopbiotic.state").source_buf).value
   value.hints = M.merge_hints(value.hints, require("loopbiotic.state").workspace_hints or {})
+  value.call_hierarchy = require("loopbiotic.flow").bundle(require("loopbiotic.state").call_hierarchy)
 
   return value
 end
@@ -32,6 +33,7 @@ function M.new_file(file)
     buffer_start_line = 1,
     diagnostics = {},
     hints = {},
+    call_hierarchy = require("loopbiotic.flow").bundle(require("loopbiotic.state").call_hierarchy),
   }
 end
 
@@ -63,10 +65,12 @@ function M.file(file)
     buffer_start_line = 1,
     diagnostics = diagnostics,
     hints = {},
+    call_hierarchy = require("loopbiotic.flow").bundle(require("loopbiotic.state").call_hierarchy),
   }
 end
 
-function M.capture(preferred_buf)
+function M.capture(preferred_buf, opts)
+  opts = opts or {}
   local buf = M.source_buffer(preferred_buf)
   local win = M.buffer_window(buf)
   local cursor = win and vim.api.nvim_win_get_cursor(win) or require("loopbiotic.state").source_cursor or { 1, 0 }
@@ -91,9 +95,169 @@ function M.capture(preferred_buf)
       buffer_text = buffer_text,
       buffer_start_line = buffer_start_line,
       diagnostics = M.diagnostics(file, buf),
-      hints = M.lsp_hints(buf, cursor, vim.fn.getcwd()),
+      hints = opts.skip_lsp and {} or M.lsp_hints(buf, cursor, vim.fn.getcwd()),
+      call_hierarchy = require("loopbiotic.flow").bundle(require("loopbiotic.state").call_hierarchy),
     },
   }
+end
+
+function M.project_signals(buf, cwd)
+  if not vim.lsp then
+    return { lsp_clients = {} }
+  end
+  local clients = vim.lsp.get_clients and vim.lsp.get_clients({ bufnr = buf })
+    or vim.lsp.get_active_clients({ bufnr = buf })
+  local capability_fields = {
+    call_hierarchy = "callHierarchyProvider",
+    declaration = "declarationProvider",
+    definition = "definitionProvider",
+    diagnostics = "diagnosticProvider",
+    implementation = "implementationProvider",
+    references = "referencesProvider",
+    type_definition = "typeDefinitionProvider",
+    workspace_symbols = "workspaceSymbolProvider",
+  }
+  local signals = {}
+  for _, client in ipairs(clients or {}) do
+    if #signals >= 16 then
+      break
+    end
+    local capabilities = {}
+    for label, field in pairs(capability_fields) do
+      if (client.server_capabilities or {})[field] then
+        table.insert(capabilities, label)
+      end
+    end
+    table.sort(capabilities)
+    local root = client.config and client.config.root_dir or nil
+    root = type(root) == "string" and util.relative_path(cwd, root) or nil
+    table.insert(signals, {
+      name = tostring(client.name or client.id or "lsp"),
+      version = client.server_info and client.server_info.version or nil,
+      root = root,
+      capabilities = capabilities,
+    })
+  end
+  table.sort(signals, function(left, right)
+    return left.name < right.name
+  end)
+  return { lsp_clients = signals }
+end
+
+function M.lsp_hints_async(buf, cursor, cwd, callback)
+  local lsp_options = config.values.context.lsp or {}
+  if lsp_options.enabled == false or not vim.lsp then
+    callback({})
+    return
+  end
+  if type(vim.lsp.buf_request_all) ~= "function" then
+    vim.schedule(function()
+      callback(M.lsp_hints(buf, cursor, cwd))
+    end)
+    return
+  end
+
+  local active_clients = vim.lsp.get_clients and vim.lsp.get_clients({ bufnr = buf })
+    or vim.lsp.get_active_clients({ bufnr = buf })
+  local methods = {
+    { enabled = lsp_options.definition, method = "textDocument/definition", kind = "definition" },
+    { enabled = lsp_options.declaration, method = "textDocument/declaration", kind = "declaration" },
+    {
+      enabled = lsp_options.type_definition,
+      method = "textDocument/typeDefinition",
+      kind = "type_definition",
+    },
+    { enabled = lsp_options.implementation, method = "textDocument/implementation", kind = "implementation" },
+    { enabled = lsp_options.references, method = "textDocument/references", kind = "reference" },
+  }
+  local hints = {}
+  local seen = {}
+  local pending = 0
+  local finished = false
+  local cancel = {}
+  local limit = lsp_options.max_locations or 16
+
+  local function supports(client, method)
+    if type(client.supports_method) ~= "function" then
+      return true
+    end
+    local ok, value = pcall(client.supports_method, client, method, { bufnr = buf })
+    return not ok or value == true
+  end
+
+  local function complete()
+    if finished or pending > 0 then
+      return
+    end
+    finished = true
+    table.sort(hints, function(left, right)
+      local left_key = table.concat({ left.file, left.line, left.column, left.kind }, ":")
+      local right_key = table.concat({ right.file, right.line, right.column, right.kind }, ":")
+      return left_key < right_key
+    end)
+    callback(hints)
+  end
+
+  for _, item in ipairs(methods) do
+    local has_client = false
+    if item.enabled ~= false then
+      for _, client in ipairs(active_clients or {}) do
+        has_client = has_client or supports(client, item.method)
+      end
+    end
+    if has_client then
+      local request_item = item
+      pending = pending + 1
+      local params = {
+        textDocument = { uri = vim.uri_from_bufnr(buf) },
+        position = { line = cursor[1] - 1, character = cursor[2] },
+      }
+      if request_item.kind == "reference" then
+        params.context = { includeDeclaration = false }
+      end
+      local ok, cancel_request = pcall(vim.lsp.buf_request_all, buf, request_item.method, params, function(responses)
+        if finished then
+          return
+        end
+        for client_id, response in pairs(responses or {}) do
+          if not response.error and response.result then
+            local client = vim.lsp.get_client_by_id and vim.lsp.get_client_by_id(client_id) or nil
+            M.add_lsp_locations(
+              hints,
+              seen,
+              response.result,
+              request_item.kind,
+              (client and client.name) or tostring(client_id),
+              limit,
+              cwd
+            )
+          end
+        end
+        pending = pending - 1
+        complete()
+      end)
+      if ok and type(cancel_request) == "function" then
+        table.insert(cancel, cancel_request)
+      elseif not ok then
+        pending = pending - 1
+      end
+    end
+  end
+
+  if pending == 0 then
+    complete()
+    return
+  end
+  vim.defer_fn(function()
+    if finished then
+      return
+    end
+    pending = 0
+    for _, cancel_request in ipairs(cancel) do
+      pcall(cancel_request)
+    end
+    complete()
+  end, lsp_options.timeout_ms or 120)
 end
 
 function M.lsp_hints(buf, cursor, cwd)

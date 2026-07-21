@@ -1,0 +1,23 @@
+{
+  "name": "tool-read",
+  "prompt": "Find the exact string assigned to HIDDEN_BACKEND_MARKER, cite its workspace-relative file, and explain what the marker demonstrates. The declaration is not in the active buffer.",
+  "entry": "src/entry.ts",
+  "mode": "review",
+  "expected_kind": "finding",
+  "cursor": { "line": 1, "column": 1 },
+  "context_policy": { "enabled": false },
+  "rubric": [
+    {
+      "label": "exact hidden value",
+      "any": ["stateful-tools-work"]
+    },
+    {
+      "label": "hidden file provenance",
+      "any": ["packages/internal/hidden.ts"]
+    },
+    {
+      "label": "bounded backend lookup",
+      "any": ["tool", "search", "workspace", "outside the active buffer"]
+    }
+  ]
+}

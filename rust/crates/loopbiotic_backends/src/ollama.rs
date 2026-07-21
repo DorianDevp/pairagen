@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{BackendInfo, Card, TokenUsage};
+use loopbiotic_protocol::{BackendInfo, TokenUsage};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -117,10 +117,6 @@ impl OllamaBackend {
             _ => vec![],
         }
     }
-
-    fn error_card(message: impl Into<String>) -> Card {
-        error_card("c_ollama_error", "Ollama error", message)
-    }
 }
 
 /// Extracts `models[].name` from an `/api/tags` response body.
@@ -157,8 +153,13 @@ impl BackendAdapter for OllamaBackend {
         let response = self.ask(&prompt).await?;
 
         let text = response.message.content;
-        let card = crate::parse_card(&text)
-            .unwrap_or_else(|error| Self::error_card(format!("{error}\n\nRaw output:\n{text}")));
+        let card = crate::parse_card(&text).unwrap_or_else(|error| {
+            error_card(
+                crate::UNPARSED_OUTPUT_CARD_ID,
+                "Ollama error",
+                format!("{error}\n\nRaw output:\n{text}"),
+            )
+        });
         let card = enforce_card_contract(card, &req.card_contract, &self.model, &text);
         let token_usage = match (response.prompt_eval_count, response.eval_count) {
             (Some(input), Some(output)) => TokenUsage::reported(input, output),

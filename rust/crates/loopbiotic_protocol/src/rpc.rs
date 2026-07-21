@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Action, Card, ContextBundle};
+use crate::{Action, Card, ContextBundle, Mode};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TokenUsage {
@@ -124,8 +124,12 @@ pub struct ActionParams {
 pub struct ReplyParams {
     pub session_id: String,
     pub text: String,
+    /// Required because every PromptWindow owns an explicit user-selected mode.
+    pub mode: Mode,
     #[serde(default)]
     pub context: Option<ContextBundle>,
+    #[serde(default)]
+    pub skills: Vec<crate::InstructionSkill>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -185,6 +189,8 @@ pub enum ViolationClass {
     DuplicateStep,
     /// A goal batch could not be validated coherently across its files.
     IncoherentBatch,
+    /// The backend response contained no parseable Loopbiotic op at all.
+    UnparsedOutput,
     /// A violation no construction site has classified.
     Other,
 }

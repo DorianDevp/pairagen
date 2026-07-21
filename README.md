@@ -23,7 +23,8 @@ The editor experience stays the same.
 
 Loopbiotic is beta software. It has been developed and tested primarily with the
 Codex CLI app-server backend. Persistent Claude CLI (stream-json), Ollama HTTP,
-generic CLI, and stdio agent adapters are available, but currently receive less
+an OpenAI-compatible HTTP adapter used for local LM Studio benchmarks, generic
+CLI, and stdio agent adapters are available, but currently receive less
 real-world testing than Codex.
 
 Requirements:
@@ -40,12 +41,14 @@ Implemented capabilities include:
 - raw, cached, and non-cached session token usage plus a local error log
 - JSON-RPC over stdio
 - Rust session harness
-- conversational-first state machine with explicit goals and local hunk review
+- explicit per-PromptWindow modes with local hunk review
 - patch gate
 - mock backend
 - generic CLI backend
 - persistent Claude CLI backend (one stream-json process per session)
 - Ollama HTTP backend for local models (model stays loaded, JSON-forced output)
+- stateful OpenAI-compatible Responses backend for LM Studio, with SSE progress,
+  optional reasoning, and bounded read-only workspace tools
 - structured agent denial (`deny` op) rendered as a distinct card
 - deterministic token-budgeted project context with LSP hints and dependency ranking
 
@@ -82,7 +85,7 @@ require("loopbiotic").setup({
     command = "/absolute/path/to/loopbioticd",
     args = { "--stdio" },
     agent = "codex",
-    mode = "auto",
+    mode = "investigate",
   },
   distribution = {
     auto_install = false,
@@ -98,7 +101,7 @@ require("loopbiotic").setup({
     command = "cargo",
     args = { "run", "-p", "loopbioticd", "--", "--stdio" },
     agent = "mock",
-    mode = "auto",
+    mode = "investigate",
   },
 })
 ```
@@ -151,30 +154,40 @@ Switch at runtime:
 :LoopbioticAgent claude
 :LoopbioticAgent local
 :LoopbioticModel <model>
+:LoopbioticDiscoveryModel <model>
 ```
 
 If the active agent has no `model` set in `setup()`, `:LoopbioticModel <model>` stores
 the selection per agent in `stdpath("state")/loopbiotic/preferences.json` and
-restores it on the next Neovim start. A model explicitly configured in
-`setup()` always takes precedence. `:LoopbioticModel default` clears the stored model
-and returns that agent to its own default.
+restores it on the next Neovim start. `:LoopbioticDiscoveryModel <model>` does the
+same for the discovery model (investigate/explain/review turns), stored
+separately per agent. A model explicitly configured in `setup()` always takes
+precedence. `:LoopbioticModel default` (or `:LoopbioticDiscoveryModel default`)
+clears the stored model and returns that agent to its own default.
 
-The prompt window title always names the active agent and the concrete model
-the next turn will use, e.g. `codex / gpt-5.4-mini`. Without a configured
+The prompt window title always names the selected mode, active agent, and the
+concrete model the next turn will use, e.g. `fix · codex / gpt-…`. Without a configured
 model it shows the model the backend announces during warmup (or reported
 after the last turn), and `model?` until one is known — it never shows
-`default`. The title always names the patch-drafting model; when an agent
-runs discovery on a different model (the shipped Codex agent uses
-`gpt-5.4-mini` at low effort; Claude pins `discovery_model = "haiku"`), that
-is shown separately, e.g.
-`claude-fable-5 · discovery haiku`. Press `<C-l>` (`keymaps.models`) inside
-the prompt to pick a model from every known candidate: the configured model,
-the models the backend enumerates (Ollama's local tags; claude offers its
-stable CLI aliases `sonnet`, `opus`, `haiku`), an optional `models` list on
-the agent definition, and the model reported by the last turn. Picking sets
-the patch model; `discovery_model` stays as configured. The picked model
-persists per agent exactly like `:LoopbioticModel`; the prompt window and its
-typed text stay open.
+`default`. The title names the model the turn actually runs: a patch mode
+(`fix`/`propose`) shows the patch-drafting model, a discovery mode
+(`explain`/`investigate`/`review`) shows the discovery model (the shipped Codex
+agent uses `gpt-5.4-mini` at low effort; Claude pins `discovery_model = "haiku"`).
+Press `<C-l>` (`keymaps.models`) inside the prompt to pick a model from every
+known candidate: the configured patch and discovery models, the models the
+backend enumerates (Codex `model/list`, Ollama's local tags; claude offers its
+stable CLI aliases `sonnet`, `opus`, `haiku`), an optional `models` list on the
+agent definition, and the model reported by the last turn. The picker sets the
+model for the current mode's phase — `<C-l>` in `fix`/`propose` sets the patch
+model, in the other modes it sets the discovery model (`:LoopbioticModel` and
+`:LoopbioticDiscoveryModel` do the same from the command line). The picked model
+persists per agent; the prompt window and its typed text stay open.
+
+Every PromptWindow, including Reply, also shows exactly one turn mode in its
+title. Press `<C-k>` (`keymaps.modes`) inside the prompt to choose `fix`,
+`explain`, `investigate`, `review`, or `propose`. The picker preserves typed text
+and attached context and sends nothing until submit. Both a new session and a
+Reply transmit the mode visible at submit time.
 
 ```lua
 require("loopbiotic").setup({
@@ -186,78 +199,146 @@ require("loopbiotic").setup({
     },
   },
   keymaps = {
+    skills = "<C-g>", -- session Markdown multiselect above PromptWindow
+    modes = "<C-k>", -- mode picker inside every prompt window
     models = "<C-l>", -- model picker inside the prompt window
+  },
+  skills = {
+    autoload = { "AGENTS.md" }, -- locked, session-scoped instructions
+    discover_root_markdown = true,
+    max_file_bytes = 65536,
+    picker_height = 10,
   },
 })
 ```
 
+## Project Intelligence and Skills
+
+Loopbiotic gives every backend a deterministic `ProjectProfile` alongside the
+ranked source context. Lua only contributes cheap facts from already-active
+Neovim LSP clients. On session start, a Rust registry activates adapters from
+root markers such as `deno.json`, `package.json`, `nx.json`, `Cargo.toml`, and
+Compose files. Root facts are read concurrently, matching adapters run in
+parallel, and their results are merged deterministically. No adapter knows a
+project name.
+
+The first POC includes independent adapters for package workspaces, TypeScript,
+Angular, React, Excalidraw, RxJS, Deno, Nx, Cargo/Rust, Axum, SQLx, Tokio,
+Docker Compose, and Neovim LSP. It records the adapter IDs that fired, exact
+versions from `deno.lock`, Nx project areas and dependencies, Cargo workspace
+members, project tasks, selected runtime/infrastructure versions, and bounded
+LSP capabilities. Profiling runs without an agent turn, command execution,
+network request, or MCP. This keeps frontier models on a direct evidence path
+while giving smaller local models facts they are less likely to infer reliably.
+
+The reproducible real-model A/B runner compares no profile/Skills, profile only,
+and profile plus selected Skills across the fixtures in
+`tests/fixtures/project-intelligence`. See the
+[2026-07-20 benchmark](doc/benchmarks/project-intelligence-2026-07-20.md) for
+methodology and measured tradeoffs. A planned follow-up case is specified in
+[the Angular reactivity benchmark](doc/benchmarks/angular-reactivity-signal-forms.md).
+To reproduce, run:
+
+```sh
+scripts/project-intelligence-report.sh --repeat 3 --out results.jsonl
+```
+
+Inspect adapter activation and the exact profile during development with:
+
+```sh
+cargo run -q -p loopbioticd -- dev project-profile ../libregraf
+```
+
+Press `<C-g>` (`keymaps.skills`) in PromptWindow or Reply to open a bounded
+multiselect Frame above the prompt. It lists Markdown files in the workspace
+root and configured `skills.autoload` paths. Space toggles an optional file,
+Enter applies the selection, and Escape cancels it. Autoloaded files are marked
+`auto` and cannot be deselected. The selected filenames stay visible in the
+PromptWindow footer and persist until Stop or Reset.
+
+On submit, Loopbiotic snapshots each selected file as workspace-relative inert
+text with provenance and a SHA-256 content hash. Selection never executes the
+file, grants tools, or contacts the backend by itself. Protocol limits bound the
+number, individual size, and combined size of instruction files. Exact project
+versions ground the model; versioned framework knowledge packs and native
+compile probes—for example Angular 22 and TypeScript 6 guidance for an older
+local model—remain follow-up work.
+
+The LM Studio backend adds a separate Rust-owned evidence loop for discovery and
+explicit Goal turns. It can perform bounded workspace-relative file reads,
+literal search, and directory listing without MCP, command execution, network
+access, or source mutation. Ordinary Patch turns receive no read tools. Provider
+response IDs keep Replies stateful, while an expired chain is rebuilt once from
+the current bounded session context. Reasoning text remains private; AgentWindow
+shows only concise reasoning, streaming, read, and recovery phases.
+
 ## Flow
 
 ```text
-<leader>a
-Prompt
-Conversational answer, finding, or question — never an implicit patch
-Follow up or reply back-to-back
-Draft → one local editable hunk
-Accept → automatic read-only next card, without an intermediate summary
-Reject → stop locally; Retry only when explicitly requested
-Goal → explicitly authorize a sequence of small reviewed hunks
-While a goal hunk is reviewed, only its next small hunk may be prepared
-Repeat until one final goal summary and local diagnostics check
+<leader>pp
+PromptWindow → submit one intent
+AgentWindow → Working → response or Widget
+Patch → editable diff plus Accept / Reject
+Accept → continue the authorized goal to its next review boundary
+Reject → restore source, pause, keep AgentWindow, open PromptWindow
 ```
 
-Cards stay anchored clear of the source line and do not take focus. Use `<leader>pg`
-to jump to a finding or return to the active proposal, and `<leader>pr` to reveal or
-focus the current Loopbiotic card. Draft retry uses `<leader>pt`; actions
-are disabled while their card is hidden or no longer offers them. Long goals
-and draft explanations stay compact by default; press `z` while the card is
-focused to expand or collapse their full text (`keymaps.details` changes this
-key).
+Loopbiotic has exactly two product surfaces. PromptWindow owns user intent;
+AgentWindow owns progress, responses, review controls, and Widgets. AgentWindow
+never steals focus on async updates and remains attached to the tab where the
+session began. `<leader>ph` wraps it in the upper-right, while `<leader>pr`
+returns to its owner tab and restores the full View. `<leader>pg` performs local
+source navigation. Long goal and review explanations use `z` for local detail.
 
 Conversational turns have a 10-second interaction deadline and work turns have
-a 20-second deadline. Crossing it yields a focusable `Working` card instead of
-holding Neovim; the agent continues in the background, and `Cancel` interrupts
-the real backend turn. Slow-turn timing is recorded in the local trace and a
+a 20-second deadline. Crossing it updates AgentWindow to a non-actionable
+`Working` View instead of holding Neovim. Opening PromptWindow during this state
+invalidates the frontend generation, cancels the real backend turn, and blocks
+submission until cancellation settles. Slow-turn timing is recorded in the local trace and a
 compact, content-free instruction is injected into the next turn so the agent
 prioritizes an earlier useful response.
 
 For an explicit goal, each backend turn may return at most one file, one
-coherent hunk, and 32 changed lines, plus a plan of the remaining coherent
-steps. The next hunk may be prepared while the current one is reviewed.
-Accepting normally surfaces it immediately; rejecting cancels it and never
-generates a replacement without `Retry`. Automatic navigation stays inside the
-workspace, and every edit remains an inert draft until accepted.
+uninterrupted change block, and 32 changed lines, plus a plan of the remaining
+coherent steps. A single `@@` containing changed lines separated by unchanged
+context is still a batch and is rejected as multiple hunks. The next hunk may
+be prepared while the current one is reviewed.
+Accepting normally surfaces the next review boundary immediately. Rejecting is
+token-free: it restores accepted source, pauses the goal, changes AgentWindow to
+Reply/Quit, and opens PromptWindow for the user's explanation. No replacement is
+generated automatically. Source navigation stays inside the workspace, and
+every edit remains an inert draft until accepted.
 
-Loopbiotic moves directly to the evidence for a location-bearing card and to the
-first non-blank character of the first added line for a draft, including drafts
-in the current file. It stays at that destination while the action card follows
-the active tab; it does not bounce through an older window that happens to show
-the same buffer.
+Compiler acceptance is an invariant at every review boundary. Applying one
+proposed patch to the currently accepted source must leave the project compiling
+and type-checking without relying on a later patch. Dependency-producing work is
+ordered first: declarations, interfaces, types, imports, fields, functions, and
+compatibility shims must exist in an independently valid patch before a later
+patch references or implements them. For interface extraction this means one
+patch introduces the valid interface declaration; only after it is accepted may
+another patch replace the inline type or implement that interface. If no valid
+intermediate state fits one uninterrupted block, including the project's unused
+declaration checks, the agent must stop for a real decision instead of returning
+broken code or a batch.
 
-By default the first card is whatever fits the prompt best: a hypothesis, a
-finding, or a clarifying choice when the prompt is ambiguous. Start the prompt
-with `/{kind}` to demand a specific card instead — `/hypothesis`, `/finding`,
-`/patch` (alias `/fix`), `/choice`, or `/summary`. For example
-`/patch guard the payload here` skips discovery and drafts a patch directly.
-Unknown words after `/` are treated as normal prompt text, so paths like
-`/tmp/project` are safe.
+Location-bearing responses do not move the editor asynchronously. Use the local
+Go-to control to open their evidence. Draft review moves to the proposed hunk;
+AgentWindow retains its original tab ownership.
 
-The goal and accepted-step count stay visible on cards and editable drafts, but
-`auto` is conversational: it never starts goal execution or returns a patch on
-the first turn. Use `Goal` (`<leader>pG` or `:LoopbioticGoal`) to authorize
-persistent execution, and send a normal message at any time to pause it and get
-a conversational answer. Asking `Why` explains the pending hunk and returns to
-that exact draft without advancing or replacing it.
+There is no automatic intent-routing mode. The mode visible in PromptWindow is
+the contract: `fix` and `propose` require a reviewed patch; `explain`,
+`investigate`, and `review` require their non-mutating response kinds. The safe
+configured default is `investigate`. Slash-prefixed text is ordinary prompt
+content and cannot override the visible mode.
 
-When the goal completes, Loopbiotic automatically checks error-level diagnostics in
-the changed, loaded buffers after a short delay. `Check` repeats the same local
-operation without spending model tokens, saving buffers, or running shell test
-commands.
+The goal and accepted-step count remain subordinate metadata. New intent always
+comes from PromptWindow; AgentWindow does not expose Draft, Follow, Why, Goal,
+Retry, or Cancel actions. Review's Accept/Reject pair is the sole deliberate
+exception because it resolves a pending source mutation.
 
-Ordinary speculation is read-only: by default
-`backend.prefetch = "read_only"` prepares only the conversational card that
-follows an accepted non-goal draft. Set it to `"off"` to disable this. Patch
-speculation is allowed only inside an explicitly active goal.
+By default `backend.prefetch = "read_only"` prepares the next goal step while an
+ordinary draft is reviewed. It remains inert and can surface only after that
+draft is accepted. Set it to `"off"` to disable this.
 
 Cards show raw, cached, and non-cached turn and session usage against
 `backend.token_budget` (50,000 raw tokens by default).
@@ -304,10 +385,39 @@ receive a complete compact bundle. Contract retries reuse the current Codex
 thread. Reviewing queued hunks is entirely local, so it does not extend the
 agent conversation or resend the goal context.
 
+### Flow Widget
+
+When the attached language server supports LSP call hierarchy, opening a
+Loopbiotic prompt starts a non-blocking Flow lookup for the symbol under the
+session cursor. The pinned graph initially follows callers and callees to depth
+two, deduplicates overlapping clients, keeps every concrete call-site, and
+keeps non-call references separate. The lookup never changes the prompt's
+geometry or focus. Flow renders only as a Widget in AgentWindow and `F`
+(`keymaps.flow`) toggles it there. When open, `j`/`k` select,
+`h`/`l` fold or load a branch, `Enter` opens a definition, `u` lists exact
+uses, `s` selects or deselects prompt context, and `R` explicitly roots the
+graph at the current source cursor.
+
+Wide viewports compose Flow beside the answer inside AgentWindow; narrow
+viewports stack it in the same surface. When a
+user asks the agent for a callstack or code-flow explanation, the agent returns
+an ordered `flow_path` of existing LSP node IDs. The answer card renders that
+focused path immediately; keys `1` through `9` open its displayed symbols,
+while `F` opens the complete explorer. A
+missing `callHierarchyProvider` is reported as `Call hierarchy unavailable`;
+Loopbiotic never asks the agent to recreate the graph. The complete graph
+available at submit time is included in `ContextBundle`. Selected files, symbols,
+and call sites appear visibly in PromptWindow's footer, can be removed with
+`Ctrl-x`, and reach the backend only on prompt submission.
+
 The defaults can be overridden during setup:
 
 ```lua
 require("loopbiotic").setup({
+  keymaps = {
+    modes = "<C-k>", -- mode picker inside every prompt window
+    flow = "F", -- normal-mode Flow explorer toggle
+  },
   prompt = {
     -- Prompt and reply windows stay above Loopbiotic cards.
     zindex = 200,
@@ -344,6 +454,18 @@ require("loopbiotic").setup({
       workspace_symbols = true,
     },
   },
+  flow = {
+    enabled = true,
+    initial_depth = 2,
+    max_nodes = 40,
+    snippet_token_budget = 800,
+    -- An opened Flow explorer switches from split to a single-pane view below this width.
+    responsive_split = 120,
+    panel_width = 52,
+    request_timeout_ms = 1200,
+    -- Submit waits at most this long for requests already in flight.
+    submit_wait_ms = 160,
+  },
 })
 ```
 
@@ -352,13 +474,13 @@ trace contains a `context_optimization` event with cache statistics, ranked
 candidates, scores and selection decisions. It does not add those statistics to
 the agent prompt.
 
-Choosing `Fix` on a card first moves the source context to the card's
-`next_move` (falling back to evidence/location), then captures the next request.
-The patch agent therefore receives the recommended consumer or template instead
-of the file where discovery happened.
+`:LoopbioticFix` opens PromptWindow in fix mode. It never launches work directly
+from AgentWindow; the user still reviews and submits the prompt snapshot.
 
 The future optional classical-ML ranking design is documented in [`doc/ml.md`](doc/ml.md).
-The current implementation does not train or run an ML model.
+The current implementation does not train or run an ML model. The planned
+VS Code client design is documented in [`doc/vscode.md`](doc/vscode.md); no
+VS Code code exists yet.
 
 ## Commands
 
@@ -366,13 +488,7 @@ The current implementation does not train or run an ML model.
 :Loopbiotic
 :LoopbioticReply
 :LoopbioticFix
-:LoopbioticGoal
-:LoopbioticCancel
 :LoopbioticWhy
-:LoopbioticFollow
-:LoopbioticOther
-:LoopbioticAssess
-:LoopbioticNext
 :LoopbioticStop
 :LoopbioticHide
 :LoopbioticResume
@@ -460,3 +576,24 @@ The generic backend sends a strict JSON card contract to stdin. It accepts a raw
 ```
 
 `loopbiotic_progress.message` is user-visible feedback. It must be a concise status summary, never raw model reasoning. Claude and local agents that do not emit this protocol still show lifecycle feedback from Loopbiotic while their process is running.
+
+## LM Studio / OpenAI-compatible Responses Backend
+
+This backend requires a server that implements the OpenAI-compatible Responses
+API with streaming and stored responses. LM Studio is the tested target:
+
+```bash
+LOOPBIOTIC_BACKEND=lm_studio \
+LOOPBIOTIC_OPENAI_MODEL=qwen/qwen3.6-35b-a3b \
+LOOPBIOTIC_OPENAI_BASE_URL=http://127.0.0.1:1234/v1 \
+loopbioticd --stdio
+```
+
+`LOOPBIOTIC_OPENAI_MAX_TOKENS` defaults to `4096`.
+`LOOPBIOTIC_OPENAI_TOOLS` defaults to `true`; read tools are still restricted to
+discovery and explicit Goal turns. `LOOPBIOTIC_OPENAI_MAX_TOOL_CALLS` defaults
+to `2` and is capped at `4`. `LOOPBIOTIC_OPENAI_REASONING_EFFORT` accepts
+`none`, `minimal`, `low`, `medium`, `high`, or `xhigh` and defaults to `none`,
+because some small models spend their entire output budget on hidden reasoning.
+`LOOPBIOTIC_OPENAI_API_KEY` is optional. The shared
+`LOOPBIOTIC_TURN_TIMEOUT_SECS` deadline and real turn cancellation also apply.

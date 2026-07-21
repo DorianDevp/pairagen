@@ -59,7 +59,7 @@ local function track_backend_errors(card)
 end
 
 -- Apply the shared tail of a successful turn result (session/start,
--- session/action, session/reply, patch/apply_result): record usage and
+-- session/reply, patch/apply_result): record usage and
 -- reports, log them, adopt the updated goal, and show the resulting card.
 -- Call-site-specific handling (thinking guards, stale-session checks,
 -- session_id adoption) stays at the call sites.
@@ -68,11 +68,20 @@ end
 --- update_model=false keeps state.backend_model untouched; track_backend_error=false marks a local result
 function M.apply_turn_result(result, opts)
   opts = opts or {}
-
   state.token_usage = type(result.token_usage) == "table" and result.token_usage or nil
   state.turn_token_usage = type(result.turn_token_usage) == "table" and result.turn_token_usage or nil
   if opts.update_model ~= false and type(result.model) == "string" then
     state.backend_model = result.model
+    -- The card kind names the phase that produced it, so the per-phase
+    -- actual-model record used by the PromptWindow title stays honest.
+    local kind = type(result.card) == "table" and result.card.kind or nil
+    local phase = (kind == "patch" or kind == "summary") and "patch"
+      or (kind == "hypothesis" or kind == "finding" or kind == "choice") and "discovery"
+      or nil
+    if phase then
+      state.backend_models = type(state.backend_models) == "table" and state.backend_models or {}
+      state.backend_models[phase] = result.model
+    end
   end
   state.context_report = type(result.context_report) == "table" and result.context_report or nil
   log.event("context_optimization", state.context_report or {})

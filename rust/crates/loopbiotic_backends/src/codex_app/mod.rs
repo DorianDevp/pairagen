@@ -1,5 +1,5 @@
-mod parse;
-mod schema;
+pub(crate) mod parse;
+pub(crate) mod schema;
 mod transport;
 
 use std::process::Stdio;
@@ -20,7 +20,8 @@ use crate::support::{
 };
 use crate::{
     BackendAdapter, BackendIdentity, BackendMetadata, BackendPhaseModels, BackendRequest,
-    BackendResponse, ProgressReporter, enforce_card_contract, estimate_tokens,
+    BackendResponse, IMPLEMENTATION_GUIDELINES, ProgressReporter, enforce_card_contract,
+    estimate_tokens,
 };
 
 use transport::{ActiveTurn, CodexAppProcess, CodexAppState, TurnOutput};
@@ -38,6 +39,13 @@ pub struct CodexAppBackend {
     turn_timeout: Option<Duration>,
     discovery: Arc<Mutex<CodexAppState>>,
     patch: Arc<Mutex<CodexAppState>>,
+    model_catalog: Arc<Mutex<ModelCatalog>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ModelCatalog {
+    models: Vec<String>,
+    default: Option<String>,
 }
 
 impl CodexAppBackend {
@@ -132,6 +140,7 @@ impl CodexAppBackend {
             turn_timeout,
             discovery: Arc::new(Mutex::new(CodexAppState::default())),
             patch: Arc::new(Mutex::new(CodexAppState::default())),
+            model_catalog: Arc::new(Mutex::new(ModelCatalog::default())),
         }
     }
 
@@ -139,6 +148,23 @@ impl CodexAppBackend {
         match phase {
             Phase::Discovery => self.discovery_model.clone(),
             Phase::Patch => self.model.clone(),
+        }
+    }
+
+    /// The model a turn of this phase actually runs. When nothing is
+    /// configured the app-server resolves its own default (the one model/list
+    /// advertises); reporting that resolved name — not a bare null — keeps the
+    /// client's displayed model and cost attribution honest, matching
+    /// `identity()`.
+    async fn resolved_phase_model(&self, phase: Phase) -> Option<String> {
+        if let Some(model) = self.phase_model(phase) {
+            return Some(model);
+        }
+        let default = self.model_catalog.lock().await.default.clone();
+        let patch = self.model.clone().or(default);
+        match phase {
+            Phase::Patch => patch,
+            Phase::Discovery => self.discovery_model.clone().or(patch),
         }
     }
 
@@ -402,7 +428,49 @@ impl CodexAppBackend {
         let lane = self.lane(Phase::Discovery);
         let mut state = lane.lock().await;
 
-        Self::ensure(&mut state, &self.command, &self.args).await
+        Self::ensure(&mut state, &self.command, &self.args).await?;
+        if self.model_catalog.lock().await.models.is_empty() {
+            match Self::list_models(&mut state).await {
+                Ok(catalog) => *self.model_catalog.lock().await = catalog,
+                Err(error) => debug(&format!("codex model/list unavailable: {error}")),
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn list_models(state: &mut CodexAppState) -> Result<ModelCatalog> {
+        let mut catalog = ModelCatalog::default();
+        let mut cursor: Option<String> = None;
+
+        // Bound the loop: a misbehaving app-server that returns an empty or
+        // non-advancing nextCursor must not spin forever while holding the
+        // lane lock. 50 pages of 100 is far more than any real model catalog.
+        for _ in 0..50 {
+            let response = state
+                .request(json!({
+                    "method": "model/list",
+                    "params": {
+                        "cursor": cursor,
+                        "limit": 100,
+                        "includeHidden": false
+                    }
+                }))
+                .await?;
+            append_model_page(&mut catalog, &response);
+            let next = response
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .filter(|next| !next.is_empty())
+                .map(str::to_owned);
+            // Stop on an absent, empty, or non-advancing cursor.
+            if next.is_none() || next == cursor {
+                break;
+            }
+            cursor = next;
+        }
+
+        Ok(catalog)
     }
 
     fn error_card(message: impl Into<String>) -> Card {
@@ -448,7 +516,7 @@ impl BackendAdapter for CodexAppBackend {
             raw_output: Some(output.text.clone()),
             metadata: BackendMetadata {
                 backend: "codex_app".into(),
-                model: self.phase_model(turn_phase(&req)),
+                model: self.resolved_phase_model(turn_phase(&req)).await,
                 token_usage: output.token_usage.or_else(|| {
                     Some(TokenUsage::estimated(
                         estimate_tokens(&prompt(&req, true)),
@@ -490,24 +558,30 @@ impl BackendAdapter for CodexAppBackend {
     }
 
     async fn identity(&self) -> BackendIdentity {
-        let patch = self.model.clone();
+        let catalog = self.model_catalog.lock().await.clone();
+        let patch = self.model.clone().or_else(|| catalog.default.clone());
         let discovery = self.discovery_model.clone().or_else(|| patch.clone());
         let phases = (discovery != patch).then(|| BackendPhaseModels {
             discovery: discovery.clone(),
             patch: patch.clone(),
         });
-        let mut models = vec![];
-        for candidate in [&patch, &discovery].into_iter().flatten() {
-            if !models.contains(candidate) {
+        let mut models = catalog.models;
+        if let Some(candidate) = &patch
+            && !models.contains(candidate)
+        {
+            models.insert(0, candidate.clone());
+        }
+        if models.is_empty() {
+            if let Some(candidate) = &patch {
                 models.push(candidate.clone());
             }
         }
 
         BackendIdentity {
             backend: "codex_app".into(),
-            // The app-server initialize handshake reports no default model or
-            // model list, so only the configured model can be named; turns
-            // with model: null use the server's own default.
+            // A configured model wins. Otherwise this is the current default
+            // returned by model/list; turns still pass null and let the
+            // app-server resolve that same default.
             model: patch,
             models,
             phases,
@@ -526,6 +600,29 @@ impl BackendAdapter for CodexAppBackend {
     }
 }
 
+fn append_model_page(catalog: &mut ModelCatalog, response: &Value) {
+    let Some(models) = response.get("data").and_then(Value::as_array) else {
+        return;
+    };
+    for entry in models {
+        let Some(model) = entry
+            .get("model")
+            .or_else(|| entry.get("id"))
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+        else {
+            continue;
+        };
+        let model = model.to_string();
+        if entry.get("isDefault").and_then(Value::as_bool) == Some(true) {
+            catalog.default = Some(model.clone());
+        }
+        if !catalog.models.contains(&model) {
+            catalog.models.push(model);
+        }
+    }
+}
+
 /// Opens every turn prompt. A `const` so it can never interpolate volatile
 /// data: it anchors the byte-stable prefix the provider prompt cache keys on.
 const PROMPT_STATIC_HEADER: &str = "Return exactly one JSON Loopbiotic op. No markdown. No prose.
@@ -535,9 +632,18 @@ Patch file paths must be relative.
 fn prompt(req: &BackendRequest, include_context: bool) -> String {
     let patch_turn = turn_phase(req) == Phase::Patch;
     let goal_loop = req.card_contract.allow_goal_completion;
+    let goal_action = matches!(
+        req.action,
+        crate::BackendAction::User(loopbiotic_protocol::Action::Goal)
+    );
+    let continuing_goal = !req.session.completed_steps.is_empty()
+        || matches!(
+            req.session.last_card,
+            Some(loopbiotic_protocol::Card::Patch(_))
+        );
+    let first_goal_patch = goal_loop && goal_action && !continuing_goal;
     let goal_question = goal_loop
         && req.card_contract.expected_kind == Some(loopbiotic_protocol::CardKind::Finding);
-    let post_accept = matches!(req.action, crate::BackendAction::PostAccept);
     let turn_rules = if goal_question {
         "- Explain why the currently pending patch is the right next step for the original goal.\n\
          - Address its behavior, tradeoffs, and relevant evidence from the code.\n\
@@ -545,26 +651,25 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
          - The exact pending patch remains awaiting user acceptance after this answer."
             .into()
     } else if goal_loop {
-        let lead = if matches!(
-            req.action,
-            crate::BackendAction::User(loopbiotic_protocol::Action::Goal)
-        ) {
+        let lead = if goal_action && continuing_goal {
             "- Continue with the next planned coherent step; the previous hunk was accepted.\n"
+        } else if goal_action {
+            "- Begin with the earliest dependency-producing, independently compiler-valid step. Return that step only; no consumer or implementation may share its card.\n"
         } else {
             ""
         };
         format!(
             "{lead}\
              - Continue executing the original session goal from the accepted progress; never restart or repeat a completed step.\n\
-             - Return at most one file and exactly one coherent, compilable hunk changing at most {} added/removed lines.\n\
+             - Return at most one file and exactly one uninterrupted, compilable change block changing at most {} added/removed lines. One @@ header is not enough: after context follows the first add/remove record, there must be no later add/remove record.\n\
              - Inspect only enough project context to produce that next step. Tool reads are valid patch source because Loopbiotic verifies the hunk before review.\n\
              - With the patch return plan: list the remaining coherent steps, each with its target file and one-line summary. A file may appear more than once. Set complete=true only when this hunk is the final step.\n\
              - Create a missing file incrementally before steps that reference it.\n\
              - Use open_location only when a required source cannot be inspected with read-only project tools.\n\
              - Set goal_complete=true only together with plan.complete=true.\n\
              - Return summary only when every requirement in the original goal is satisfied; cite the completed result.\n\
-             - Return choice only when a genuine user decision blocks all safe progress.\n\
-             - A concise finding is allowed when the programmer should see evidence before another draft.",
+             - Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary.\n\
+             - Implementation guidelines: {IMPLEMENTATION_GUIDELINES}",
             req.card_contract.max_changed_lines,
         )
     } else if patch_turn {
@@ -577,15 +682,10 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
              - If a safe step needs unseen references or more changed lines, limit this hunk to self-contained preparation such as adding only the new struct definition.\n\
              - Context and remove lines must be exact, contiguous source lines from the supplied buffer; never omit source lines between two context lines.\n\
              - Use the supplied buffer excerpt as the only patch source. Diagnostics and ranked context are evidence only; never patch a different file or unseen block.\n\
-             - Do not inspect the project or use tools.",
+             - Do not inspect the project or use tools.\n\
+             - Implementation guidelines: {IMPLEMENTATION_GUIDELINES}",
             req.card_contract.max_changed_lines
         )
-    } else if post_accept {
-        "- The programmer accepted the previous local draft.\n\
-         - Respond with the most useful immediate observation, verification target, or concise question.\n\
-         - This is read-only conversational follow-up: never return another patch or a completion summary.\n\
-         - Keep the response compact and hand control back immediately."
-            .into()
     } else {
         "- Find only one useful next move, not a plan for the whole solution.\n\
          - Treat an editor diagnostic at or nearest the cursor as the strongest direct signal unless the source disproves it; a distant warning or deprecation must not displace a cursor-local error.\n\
@@ -602,13 +702,12 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
         "- finding: concise explanation of the pending hunk"
     } else if goal_loop {
         "- patch: one small structured hunk for local review; include goal_complete and plan {remaining: [{file, summary}], complete}\n\
-- finding or hypothesis: concise evidence that needs programmer attention before another hunk\n\
 - open_location: when the next hunk belongs in another buffer; put the target in location (not next) and the explanation in reason (not message)\n\
 - choice: only for a blocking user decision\n\
 - summary: only when the complete original goal is satisfied"
     } else {
-        "- hypothesis: {\"op\":\"hypothesis\",\"title\":string,\"claim\":string,\"evidence\":object|null,\"next\":object|null}\n\
-- finding: {\"op\":\"finding\",\"title\":string,\"finding\":string,\"location\":object|null,\"annotation\":string|null}\n\
+        "- hypothesis: {\"op\":\"hypothesis\",\"title\":string,\"claim\":string,\"evidence\":object|null,\"next\":object|null,\"flow_path\":[string]}\n\
+- finding: {\"op\":\"finding\",\"title\":string,\"finding\":string,\"location\":object|null,\"annotation\":string|null,\"flow_path\":[string]}\n\
 - patch: use the exact structured patch schema supplied by the API. Each hunk has old_start, new_start, and lines with kind context/remove/add plus line text without a diff prefix.\n\
 - error: {\"op\":\"error\",\"title\":string,\"message\":string}"
     };
@@ -634,10 +733,18 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             .join("\n")
     };
     let diagnostics = editor_diagnostics(req);
+    let immediate_directive = if first_goal_patch {
+        "FIRST GOAL PATCH ONLY: return the earliest dependency-producing standalone change and nothing that consumes it. For interface or named-type extraction, add only the independently compiler-valid declaration now; leave the existing inline type, implementation, and every consumer byte-for-byte unchanged. Set goal_complete=false and put the consumer replacement in plan.remaining."
+            .to_string()
+    } else if let crate::BackendAction::ContractRetry(reason) = &req.action {
+        format!("REPAIR THIS EXACT VIOLATION NOW: {reason}")
+    } else {
+        "Apply the rules above to exactly this turn.".into()
+    };
 
     let source_context = if include_context {
         format!(
-            "File: {}\nCursor: {}:{}\nEditor diagnostics (nearest current-file diagnostic first):\n```text\n{}\n```\nBuffer starts at file line: {}\nBuffer excerpt:\n```text\n{}\n```\nRanked project context (read before using tools):\n```text\n{}\n```",
+            "File: {}\nCursor: {}:{}\nEditor diagnostics (nearest current-file diagnostic first):\n```text\n{}\n```\nBuffer starts at file line: {}\nBuffer excerpt:\n```text\n{}\n```\nRanked project context (read before using tools):\n```text\n{}\n```\nEditor-resolved static Flow graph:\n```json\n{}\n```",
             req.context.file.display(),
             req.context.cursor.line,
             req.context.cursor.column,
@@ -645,9 +752,29 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             req.context.buffer_start_line,
             req.context.buffer_text,
             ranked_context,
+            serde_json::to_string(&req.context.call_hierarchy).unwrap_or_else(|_| "null".into()),
         )
     } else {
         "Source context is unchanged from the preceding turn in this Loopbiotic thread. Reuse those exact diagnostics, buffer, and ranked project context.".into()
+    };
+    let project_profile =
+        serde_json::to_string(&req.session.project).unwrap_or_else(|_| "null".into());
+    let instruction_skills = if req.session.skills.is_empty() {
+        "none".into()
+    } else {
+        req.session
+            .skills
+            .iter()
+            .map(|skill| {
+                format!(
+                    "--- {} ({}) ---\n{}",
+                    skill.path.display(),
+                    skill.provenance,
+                    skill.content
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     };
 
     // Block order is byte-order for the provider prompt cache: the static
@@ -661,9 +788,13 @@ Allowed ops:
 
 Rules:
 {turn_rules}
+{flow_guidelines}
 
 Session prompt: {prompt}
 Mode: {mode}
+Rust-adapter project profile: {project_profile}
+Active instruction skills:
+{instruction_skills}
 
 Required card kind: {expected_kind}. Return that exact kind.
 Completed local steps: {completed_steps}
@@ -671,15 +802,19 @@ Known findings and signals (do not repeat): {known_observations}
 Interaction feedback: {interaction_feedback}
 Action: {action}
 Last card: {last}
-{source_context}"#,
+{source_context}
+
+Immediate directive (highest priority for this response): {immediate_directive}"#,
         prompt = req.session.prompt,
+        flow_guidelines = crate::FLOW_GUIDELINES,
         completed_steps =
             serde_json::to_string(&req.session.completed_steps).unwrap_or_else(|_| "[]".into()),
         known_observations =
             serde_json::to_string(&req.session.known_observations).unwrap_or_else(|_| "[]".into()),
         interaction_feedback = serde_json::to_string(&req.session.interaction_feedback)
             .unwrap_or_else(|_| "[]".into()),
-        mode = serde_json::to_string(&req.session.mode).unwrap_or_else(|_| "\"auto\"".into()),
+        mode =
+            serde_json::to_string(&req.session.mode).unwrap_or_else(|_| "\"investigate\"".into()),
         action = action_value(&req.action),
         expected_kind = req
             .card_contract
@@ -690,6 +825,9 @@ Last card: {last}
         output_contract = output_contract,
         last = req.session.last_summary.as_deref().unwrap_or("none"),
         source_context = source_context,
+        project_profile = project_profile,
+        instruction_skills = instruction_skills,
+        immediate_directive = immediate_directive,
     )
 }
 
@@ -754,10 +892,12 @@ mod tests {
                 interaction_feedback: vec![],
                 completed_steps: vec![],
                 known_observations: vec![],
-                mode: loopbiotic_protocol::Mode::Auto,
+                mode: loopbiotic_protocol::Mode::Investigate,
                 card_count: 0,
                 last_card: None,
                 last_summary: None,
+                project: None,
+                skills: vec![],
             },
             action: BackendAction::Start,
             context: loopbiotic_protocol::ContextBundle {
@@ -771,6 +911,7 @@ mod tests {
                 hints: vec![],
                 artifacts: vec![],
                 report: None,
+                call_hierarchy: None,
             },
             card_contract: crate::CardContract {
                 expected_kind: Some(loopbiotic_protocol::CardKind::Hypothesis),
@@ -859,7 +1000,53 @@ mod tests {
         let phases = identity.phases.expect("phase identity");
         assert_eq!(phases.patch.as_deref(), Some("gpt-patch"));
         assert_eq!(phases.discovery.as_deref(), Some("gpt-fast"));
-        assert_eq!(identity.models, vec!["gpt-patch", "gpt-fast"]);
+        assert_eq!(identity.models, vec!["gpt-patch"]);
+    }
+
+    #[tokio::test]
+    async fn identity_uses_the_app_server_catalog_and_default_model() {
+        let backend = CodexAppBackend::with_phase_models(
+            "codex-unused",
+            vec![],
+            None,
+            Some("medium".into()),
+            Some("gpt-discovery".into()),
+            Some("low".into()),
+        );
+        *backend.model_catalog.lock().await = ModelCatalog {
+            models: vec!["gpt-frontier".into(), "gpt-balanced".into()],
+            default: Some("gpt-frontier".into()),
+        };
+
+        let identity = backend.identity().await;
+
+        assert_eq!(identity.model.as_deref(), Some("gpt-frontier"));
+        assert_eq!(identity.models, vec!["gpt-frontier", "gpt-balanced"]);
+        let phases = identity.phases.expect("phase identity");
+        assert_eq!(phases.patch.as_deref(), Some("gpt-frontier"));
+        assert_eq!(phases.discovery.as_deref(), Some("gpt-discovery"));
+    }
+
+    #[test]
+    fn model_catalog_uses_model_ids_dedupes_and_tracks_the_default() {
+        let mut catalog = ModelCatalog::default();
+        append_model_page(
+            &mut catalog,
+            &json!({
+                "data": [
+                    {"id": "frontier-id", "model": "gpt-frontier", "isDefault": true},
+                    {"id": "balanced-id", "model": "gpt-balanced", "isDefault": false},
+                    {"id": "duplicate", "model": "gpt-frontier", "isDefault": false},
+                    {"id": "fallback-id", "isDefault": false}
+                ]
+            }),
+        );
+
+        assert_eq!(
+            catalog.models,
+            vec!["gpt-frontier", "gpt-balanced", "fallback-id"]
+        );
+        assert_eq!(catalog.default.as_deref(), Some("gpt-frontier"));
     }
 
     #[test]
@@ -992,6 +1179,8 @@ mod tests {
         assert!(rendered.contains("local type error"));
         assert!(rendered.contains("unique ranked diagnostic source"));
         assert!(rendered.contains("evidence only"));
+        assert!(rendered.contains("Editor-resolved static Flow graph"));
+        assert!(rendered.contains("Do not use tools or searches to re-enumerate"));
     }
 
     #[test]
@@ -1036,9 +1225,12 @@ mod tests {
         let prompt = prompt(&request, true);
 
         assert!(prompt.contains("Tool reads are valid patch source"));
-        assert!(prompt.contains("exactly one coherent, compilable hunk"));
+        assert!(prompt.contains("exactly one uninterrupted, compilable change block"));
         assert!(prompt.contains("With the patch return plan"));
         assert!(prompt.contains("complete=true only when this hunk is the final step"));
+        assert!(prompt.contains("Compiler acceptance is a hard invariant"));
+        assert!(prompt.contains("first patch contains ONLY the independently valid declaration"));
+        assert!(prompt.contains("after the first add/remove record"));
         assert!(!prompt.contains("Continue with the next planned coherent step"));
     }
 
@@ -1048,10 +1240,30 @@ mod tests {
         request.card_contract.allow_goal_completion = true;
         request.card_contract.expected_kind = None;
         request.action = BackendAction::User(Action::Goal);
+        request
+            .session
+            .completed_steps
+            .push("accepted declaration".into());
         let prompt = prompt(&request, true);
 
         assert!(prompt.contains("Continue with the next planned coherent step"));
-        assert!(prompt.contains("exactly one coherent, compilable hunk"));
+        assert!(prompt.contains("exactly one uninterrupted, compilable change block"));
+    }
+
+    #[test]
+    fn first_goal_prompt_does_not_claim_a_patch_was_already_accepted() {
+        let mut request = request();
+        request.card_contract.allow_goal_completion = true;
+        request.card_contract.expected_kind = None;
+        request.action = BackendAction::User(Action::Goal);
+
+        let prompt = prompt(&request, true);
+
+        assert!(prompt.contains("Begin with the earliest dependency-producing"));
+        assert!(prompt.contains("Return that step only"));
+        assert!(prompt.contains("FIRST GOAL PATCH ONLY"));
+        assert!(prompt.contains("leave the existing inline type"));
+        assert!(!prompt.contains("previous hunk was accepted"));
     }
 
     #[test]
@@ -1061,9 +1273,12 @@ mod tests {
 
         let patch_prompt = prompt(&request, true);
         assert!(!patch_prompt.contains("With the patch return plan"));
+        assert!(patch_prompt.contains("Compiler acceptance is a hard invariant"));
+        assert!(patch_prompt.contains("before any later patch first references, implements"));
 
         request.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Hypothesis);
         let discovery_prompt = prompt(&request, true);
         assert!(!discovery_prompt.contains("With the patch return plan"));
+        assert!(!discovery_prompt.contains("Compiler acceptance is a hard invariant"));
     }
 }

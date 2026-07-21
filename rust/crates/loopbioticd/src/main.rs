@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use loopbiotic_backends::{
     BackendAdapter, ClaudeAppBackend, CodexAppBackend, GenericCliBackend, MockBackend,
-    OllamaBackend, ProgressReporter, StdioAgentBackend,
+    OllamaBackend, OpenAiCompatibleBackend, ProgressReporter, StdioAgentBackend,
 };
 use loopbiotic_harness::{Engine, LocationGranter, PrefetchMode, SourceContextProvider};
 use loopbiotic_protocol::{
@@ -17,6 +17,7 @@ use loopbiotic_protocol::{
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+mod ab_report;
 mod token_report;
 
 const OPEN_LOCATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -40,10 +41,17 @@ async fn main() -> Result<()> {
         [cmd, sub] if cmd == "backend" && sub == "check" => check_backend(),
         [cmd, sub] if cmd == "schema" && sub == "card" => print_card_schema(),
         [cmd, sub] if cmd == "dev" && sub == "mock-session" => print_mock_session().await,
+        [cmd, sub] if cmd == "dev" && sub == "project-profile" => {
+            print_project_profile(std::path::Path::new("."))
+        }
+        [cmd, sub, root] if cmd == "dev" && sub == "project-profile" => {
+            print_project_profile(std::path::Path::new(root))
+        }
         [cmd, sub] if cmd == "dev" && sub == "stdio-agent" => run_stdio_agent(),
         [cmd, sub, rest @ ..] if cmd == "dev" && sub == "token-report" => {
             token_report::run(rest).await
         }
+        [cmd, sub, rest @ ..] if cmd == "dev" && sub == "ab-report" => ab_report::run(rest).await,
         _ => print_help(),
     }
 }
@@ -255,6 +263,9 @@ pub(crate) fn backend_from_env() -> Result<Arc<dyn BackendAdapter>> {
         Ok("codex_app") | Ok("codex") => Ok(Arc::new(CodexAppBackend::from_env()?)),
         Ok("claude_app") | Ok("claude") => Ok(Arc::new(ClaudeAppBackend::from_env()?)),
         Ok("ollama") => Ok(Arc::new(OllamaBackend::from_env()?)),
+        Ok("openai") | Ok("openai_compatible") | Ok("lm_studio") => {
+            Ok(Arc::new(OpenAiCompatibleBackend::from_env()?))
+        }
         Ok("agent") | Ok("agent_stdio") => Ok(Arc::new(StdioAgentBackend::from_env()?)),
         Ok("generic") | Ok("generic_cli") => Ok(Arc::new(GenericCliBackend::from_env()?)),
         _ => Ok(Arc::new(MockBackend)),
@@ -290,6 +301,7 @@ enum TurnCommand {
         session_id: String,
         generation: u64,
         text: String,
+        mode: loopbiotic_protocol::Mode,
     },
     Apply {
         result: Box<PatchApplyResult>,
@@ -300,6 +312,10 @@ enum TurnCommand {
 impl TurnCommand {
     fn kind(&self) -> &'static str {
         match self {
+            Self::Reply {
+                mode: loopbiotic_protocol::Mode::Fix | loopbiotic_protocol::Mode::Propose,
+                ..
+            } => "work",
             Self::Start { .. } | Self::Reply { .. } => "conversation",
             Self::Action {
                 action:
@@ -310,7 +326,7 @@ impl TurnCommand {
                 ..
             } => "work",
             Self::Action { .. } => "conversation",
-            Self::Apply { .. } => "post_accept",
+            Self::Apply { .. } => "continuation",
         }
     }
 }
@@ -383,6 +399,10 @@ impl Server {
             "backend/list" => json!([self.backend.capabilities()]),
             "session/start" => {
                 let params = parse::<StartSessionParams>(&id, request.params)?;
+                loopbiotic_protocol::validate_project_metadata(None, &params.skills)
+                    .map_err(server_error(&id))?;
+                loopbiotic_protocol::validate_project_signals(&params.project_signals)
+                    .map_err(server_error(&id))?;
                 let deadline = start_deadline(&params);
                 let (session_id, generation, working) = {
                     let mut engine = self.engine.lock().await;
@@ -457,6 +477,9 @@ impl Server {
             }
             "session/reply" => {
                 let params = parse::<ReplyParams>(&id, request.params)?;
+                loopbiotic_protocol::validate_project_metadata(None, &params.skills)
+                    .map_err(server_error(&id))?;
+                let deadline = reply_deadline(&params.mode);
                 self.abort_pending(&params.session_id).await;
                 self.apply_interaction_feedback(&params.session_id)
                     .await
@@ -468,6 +491,11 @@ impl Server {
                         .update_context(&params.session_id, context)
                         .map_err(server_error(&id))?;
                 }
+                self.engine
+                    .lock()
+                    .await
+                    .update_skills(&params.session_id, params.skills)
+                    .map_err(server_error(&id))?;
                 let (generation, working) = {
                     let mut engine = self.engine.lock().await;
                     let generation = engine
@@ -475,11 +503,7 @@ impl Server {
                         .map_err(server_error(&id))?;
                     let turn_id = next_turn_id();
                     let working = engine
-                        .working_result(
-                            &params.session_id,
-                            &turn_id,
-                            conversation_deadline().as_millis() as u64,
-                        )
+                        .working_result(&params.session_id, &turn_id, deadline.as_millis() as u64)
                         .map_err(server_error(&id))?;
                     (generation, (turn_id, working))
                 };
@@ -488,11 +512,12 @@ impl Server {
                         session_id: params.session_id.clone(),
                         generation,
                         text: params.text,
+                        mode: params.mode,
                     },
                     params.session_id,
                     generation,
                     working,
-                    conversation_deadline(),
+                    deadline,
                 )
                 .await
                 .map_err(server_error(&id))?
@@ -716,8 +741,9 @@ async fn execute_turn(
             session_id,
             generation,
             text,
+            mode,
         } => engine
-            .reply_with_progress_generation(&session_id, generation, text, Some(progress))
+            .reply_with_progress_generation(&session_id, generation, text, mode, Some(progress))
             .await
             .map(|result| json!(result)),
         TurnCommand::Apply { result, generation } => engine
@@ -732,16 +758,10 @@ fn next_turn_id() -> String {
 }
 
 fn start_deadline(params: &StartSessionParams) -> Duration {
-    let forced_patch = matches!(
-        loopbiotic_harness::session::parse_kind_prefix(&params.prompt).0,
-        Some(loopbiotic_protocol::CardKind::Patch)
-    );
-    if forced_patch
-        || matches!(
-            params.mode,
-            loopbiotic_protocol::Mode::Fix | loopbiotic_protocol::Mode::Propose
-        )
-    {
+    if matches!(
+        params.mode,
+        loopbiotic_protocol::Mode::Fix | loopbiotic_protocol::Mode::Propose
+    ) {
         work_deadline()
     } else {
         conversation_deadline()
@@ -755,6 +775,17 @@ fn action_deadline(action: &loopbiotic_protocol::Action) -> Duration {
             | loopbiotic_protocol::Action::Goal
             | loopbiotic_protocol::Action::Retry
             | loopbiotic_protocol::Action::EditPrompt
+    ) {
+        work_deadline()
+    } else {
+        conversation_deadline()
+    }
+}
+
+fn reply_deadline(mode: &loopbiotic_protocol::Mode) -> Duration {
+    if matches!(
+        mode,
+        loopbiotic_protocol::Mode::Fix | loopbiotic_protocol::Mode::Propose
     ) {
         work_deadline()
     } else {
@@ -861,12 +892,15 @@ async fn print_mock_session() -> Result<()> {
         cursor: loopbiotic_protocol::Cursor { line: 1, column: 1 },
         selection: None,
         prompt: "payload is empty".into(),
-        mode: loopbiotic_protocol::Mode::Auto,
+        mode: loopbiotic_protocol::Mode::Investigate,
         buffer_text: String::new(),
         buffer_start_line: 1,
         diagnostics: vec![],
         hints: vec![],
+        call_hierarchy: None,
         context_policy: Default::default(),
+        project_signals: Default::default(),
+        skills: vec![],
     };
     let start = engine.start(params).await?;
     let patch = engine
@@ -876,6 +910,13 @@ async fn print_mock_session() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&start)?);
     println!("{}", serde_json::to_string_pretty(&patch)?);
 
+    Ok(())
+}
+
+fn print_project_profile(root: &std::path::Path) -> Result<()> {
+    let profile = loopbiotic_context::project::ProjectProfiler
+        .inspect(root, &loopbiotic_protocol::ProjectSignals::default());
+    println!("{}", serde_json::to_string_pretty(&profile)?);
     Ok(())
 }
 
@@ -957,9 +998,13 @@ fn print_help() -> Result<()> {
     eprintln!("loopbioticd schema card");
     eprintln!("loopbioticd dev mock-session");
     eprintln!("loopbioticd dev stdio-agent");
+    eprintln!("loopbioticd dev project-profile [ROOT]");
     eprintln!("loopbioticd dev token-report [--fixtures DIR] [--json FILE] [--max-turns N]");
     eprintln!("loopbioticd dev token-report --render FILE");
     eprintln!("loopbioticd dev token-report --check BASELINE CURRENT");
+    eprintln!(
+        "loopbioticd dev ab-report [--fixtures DIR] [--cases NAME,...] [--variants before,profile,after] [--repeat N] [--json FILE]"
+    );
 
     Ok(())
 }

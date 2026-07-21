@@ -10,9 +10,9 @@ use serde_json::Value;
 struct StructuredPatchOp {
     op: String,
     title: String,
-    explanation: String,
+    explanation: Option<String>,
     #[serde(default)]
-    goal_complete: bool,
+    goal_complete: Option<bool>,
     #[serde(default)]
     plan: Option<loopbiotic_protocol::GoalPlan>,
     patches: Vec<StructuredFilePatch>,
@@ -47,14 +47,9 @@ enum StructuredLineKind {
     Add,
 }
 
-pub(super) fn parse_card(output: &str, contract: &crate::CardContract) -> Result<Card> {
-    if contract.allow_goal_completion {
-        let value = serde_json::from_str::<Value>(output.trim())?;
-        if value.get("op").and_then(Value::as_str) == Some("patch") {
-            return parse_structured_patch(output);
-        }
-    }
-    if contract.expected_kind == Some(loopbiotic_protocol::CardKind::Patch) {
+pub(crate) fn parse_card(output: &str, _contract: &crate::CardContract) -> Result<Card> {
+    let value = serde_json::from_str::<Value>(output.trim())?;
+    if value.get("op").and_then(Value::as_str) == Some("patch") {
         return parse_structured_patch(output);
     }
 
@@ -69,6 +64,11 @@ fn parse_structured_patch(output: &str) -> Result<Card> {
         return Err(anyhow!("codex returned op {:?}, expected patch", op.op));
     }
 
+    let explanation = op
+        .explanation
+        .filter(|explanation| !explanation.trim().is_empty())
+        .or_else(|| op.patches.first().map(|patch| patch.explanation.clone()))
+        .unwrap_or_else(|| op.title.clone());
     let patches = op
         .patches
         .into_iter()
@@ -86,9 +86,9 @@ fn parse_structured_patch(output: &str) -> Result<Card> {
     Ok(Card::Patch(loopbiotic_protocol::PatchCard {
         id: "c_agent".into(),
         title: op.title,
-        explanation: op.explanation,
+        explanation,
         warnings: vec![],
-        goal_complete: op.goal_complete,
+        goal_complete: op.goal_complete.unwrap_or(false),
         plan: op.plan,
         patches,
         actions: vec![
@@ -183,6 +183,52 @@ mod tests {
             card.patches[0].diff,
             "@@ -4,3 +4,3 @@\n fn main() {\n-    let old = 1;\n+    let new = 1;\n }\n"
         );
+    }
+
+    #[test]
+    fn unconstrained_turn_dispatches_patch_and_tolerates_nullable_shared_fields() {
+        let output = json!({
+            "op": "patch",
+            "title": "Add shell wrapper",
+            "explanation": null,
+            "goal_complete": null,
+            "patches": [{
+                "id": null,
+                "file": "src/work.ts",
+                "explanation": "Adds the requested router outlet.",
+                "hunks": [{
+                    "old_start": 1,
+                    "new_start": 1,
+                    "lines": [
+                        {"kind": "remove", "text": "template: ''"},
+                        {"kind": "add", "text": "template: '<router-outlet />'"}
+                    ]
+                }]
+            }],
+            "claim": null,
+            "evidence": null,
+            "next": null,
+            "finding": null,
+            "location": null,
+            "annotation": null,
+            "flow_path": null,
+            "question": null,
+            "options": null,
+            "reason": null,
+            "summary": null,
+            "changed_files": null,
+            "message": null
+        });
+
+        let Card::Patch(card) =
+            parse_card(&output.to_string(), &crate::CardContract::default()).unwrap()
+        else {
+            panic!("expected unconstrained patch");
+        };
+
+        assert_eq!(card.explanation, "Adds the requested router outlet.");
+        assert!(!card.goal_complete);
+        assert_eq!(card.patches[0].id, "p_1");
     }
 
     #[test]
