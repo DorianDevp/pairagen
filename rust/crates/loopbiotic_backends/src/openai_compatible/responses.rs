@@ -51,12 +51,20 @@ pub(super) async fn read_response_stream(
 ) -> Result<ResponseTurn> {
     let mut decoder = SseDecoder::default();
     let mut accumulator = Accumulator::default();
+    let mut cancellation_armed = true;
 
     loop {
         let chunk = tokio::select! {
-            changed = cancelled.changed() => {
-                if changed.is_ok() && *cancelled.borrow() {
-                    return Err(anyhow!("local model turn was interrupted"));
+            changed = cancelled.changed(), if cancellation_armed => {
+                match changed {
+                    Ok(()) if *cancelled.borrow() => {
+                        return Err(anyhow!("local model turn was interrupted"));
+                    }
+                    Ok(()) => {}
+                    // The sender is gone, so cancellation can never fire
+                    // again; disarm the branch instead of hot-looping on the
+                    // immediately-ready Err.
+                    Err(_) => cancellation_armed = false,
                 }
                 continue;
             }
@@ -322,7 +330,11 @@ impl SseDecoder {
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
-            events.push(serde_json::from_str(&data)?);
+            // Some servers interleave non-JSON keep-alive frames (for example
+            // "data: ping"); skip them instead of failing the whole turn.
+            if let Ok(event) = serde_json::from_str(&data) {
+                events.push(event);
+            }
         }
         Ok(events)
     }
@@ -357,6 +369,18 @@ mod tests {
         let events = decoder
             .push(b"ta: {\"type\":\"response.created\"}\r\n\r\n")
             .unwrap();
+        assert_eq!(events[0]["type"], "response.created");
+    }
+
+    #[test]
+    fn skips_non_json_keepalive_data_lines() {
+        let mut decoder = SseDecoder::default();
+
+        let events = decoder
+            .push(b"data: ping\n\ndata: {\"type\":\"response.created\"}\n\n")
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "response.created");
     }
 

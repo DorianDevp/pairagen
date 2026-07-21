@@ -3,17 +3,18 @@ mod tools;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{BackendInfo, Card, TokenUsage};
+use loopbiotic_protocol::{BackendInfo, TokenUsage};
 use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex, watch};
 
 use crate::support::{
-    Phase, context_fingerprint, error_card, optional_env, report_progress, turn_phase,
-    turn_timeout_from_env,
+    Phase, TurnTimedOut, await_turn, context_fingerprint, error_card, optional_env,
+    report_progress, turn_phase, turn_timeout_from_env,
 };
 use crate::{
     BackendAdapter, BackendIdentity, BackendMetadata, BackendRequest, BackendResponse,
@@ -42,7 +43,9 @@ pub struct OpenAiCompatibleBackend {
     reasoning_effort: String,
     tools_enabled: bool,
     client: reqwest::Client,
+    turn_timeout: Option<Duration>,
     state: Mutex<BackendState>,
+    active: StdMutex<ActiveTurns>,
     turn_sequence: AtomicU64,
 }
 
@@ -56,7 +59,30 @@ struct ThreadState {
 #[derive(Default)]
 struct BackendState {
     threads: HashMap<String, ThreadState>,
-    active: HashMap<(String, u64), watch::Sender<bool>>,
+}
+
+type ActiveTurns = HashMap<(String, u64), watch::Sender<bool>>;
+
+/// The cancellation-lane map lives behind a std mutex because unregistration
+/// must run inside `Drop`, where an async lock cannot be awaited. Every
+/// critical section is a short map operation, and the map stays valid after
+/// any panic, so a poisoned lock is safe to enter.
+fn lock_active(active: &StdMutex<ActiveTurns>) -> std::sync::MutexGuard<'_, ActiveTurns> {
+    active.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Removes one turn's cancellation lane when the turn ends. Dropping the guard
+/// covers normal completion and the harness prefetcher aborting a speculative
+/// turn future mid-await; without it the watch sender would leak forever.
+struct ActiveTurnGuard<'backend> {
+    active: &'backend StdMutex<ActiveTurns>,
+    key: (String, u64),
+}
+
+impl Drop for ActiveTurnGuard<'_> {
+    fn drop(&mut self) {
+        lock_active(self.active).remove(&self.key);
+    }
 }
 
 struct TurnOutput {
@@ -106,10 +132,31 @@ impl OpenAiCompatibleBackend {
         reasoning_effort: impl Into<String>,
         tools_enabled: bool,
     ) -> Self {
-        let mut builder = reqwest::Client::builder();
-        if let Some(limit) = turn_timeout_from_env() {
-            builder = builder.timeout(limit);
-        }
+        Self::with_turn_timeout(
+            base_url,
+            model,
+            api_key,
+            max_tokens,
+            max_tool_calls,
+            reasoning_effort,
+            tools_enabled,
+            turn_timeout_from_env(),
+        )
+    }
+
+    /// Internal constructor that fixes the per-turn deadline instead of
+    /// reading it from the environment; tests use it to avoid env races.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_turn_timeout(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        api_key: Option<String>,
+        max_tokens: usize,
+        max_tool_calls: usize,
+        reasoning_effort: impl Into<String>,
+        tools_enabled: bool,
+        turn_timeout: Option<Duration>,
+    ) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             model: model.into(),
@@ -118,8 +165,14 @@ impl OpenAiCompatibleBackend {
             max_tool_calls: max_tool_calls.min(MAX_TOOL_CALLS_LIMIT),
             reasoning_effort: reasoning_effort.into(),
             tools_enabled,
-            client: builder.build().unwrap_or_else(|_| reqwest::Client::new()),
+            // The whole turn, including every request of the read-tool loop,
+            // runs under the shared turn deadline in next_card_with_progress;
+            // a same-length reqwest timeout would only race it and replace the
+            // actionable TurnTimedOut message with a transport error.
+            client: reqwest::Client::new(),
+            turn_timeout,
             state: Mutex::new(BackendState::default()),
+            active: StdMutex::new(ActiveTurns::default()),
             turn_sequence: AtomicU64::new(1),
         }
     }
@@ -200,8 +253,14 @@ impl OpenAiCompatibleBackend {
                     .map(|call| call.call_id.clone())
                     .filter(|call_id| !call_id.is_empty())
                     .collect();
+                // A local model that ignores tool_choice may answer in plain
+                // prose instead of valid submit_card arguments. Keep the raw
+                // text so the strict card parser downstream surfaces it in an
+                // error card, exactly like JSON that misses the card schema;
+                // failing the turn here would lose the model's output.
+                let text = terminal_card(&call, req).unwrap_or_else(|_| call.arguments.clone());
                 return Ok(TurnOutput {
-                    text: terminal_card(&call, req)?,
+                    text,
                     response_id: turn.response_id,
                     terminal_call_ids,
                     token_usage: usage,
@@ -290,23 +349,18 @@ impl OpenAiCompatibleBackend {
         }
     }
 
-    async fn register_turn(&self, session_id: &str) -> (u64, watch::Receiver<bool>) {
+    fn register_turn(&self, session_id: &str) -> (ActiveTurnGuard<'_>, watch::Receiver<bool>) {
         let turn_id = self.turn_sequence.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = watch::channel(false);
-        self.state
-            .lock()
-            .await
-            .active
-            .insert((session_id.to_string(), turn_id), sender);
-        (turn_id, receiver)
-    }
-
-    async fn unregister_turn(&self, session_id: &str, turn_id: u64) {
-        self.state
-            .lock()
-            .await
-            .active
-            .remove(&(session_id.to_string(), turn_id));
+        let key = (session_id.to_string(), turn_id);
+        lock_active(&self.active).insert(key.clone(), sender);
+        (
+            ActiveTurnGuard {
+                active: &self.active,
+                key,
+            },
+            receiver,
+        )
     }
 
     async fn save_thread(&self, req: &BackendRequest, output: &TurnOutput) {
@@ -323,10 +377,6 @@ impl OpenAiCompatibleBackend {
                 context_fingerprint: context_fingerprint(req),
             },
         );
-    }
-
-    fn error_card(message: impl Into<String>) -> Card {
-        error_card("c_openai_compatible_error", "Local model error", message)
     }
 }
 
@@ -347,15 +397,31 @@ impl BackendAdapter for OpenAiCompatibleBackend {
             "starting",
             &format!("Starting local model {}", self.model),
         );
-        let (turn_id, cancelled) = self.register_turn(&req.session.id).await;
-        let output = self.ask(&req, progress.as_ref(), cancelled).await;
-        self.unregister_turn(&req.session.id, turn_id).await;
+        let (_turn, cancelled) = self.register_turn(&req.session.id);
+        let output = await_turn(
+            "The local model",
+            self.turn_timeout,
+            self.ask(&req, progress.as_ref(), cancelled),
+        )
+        .await;
+        if output
+            .as_ref()
+            .is_err_and(|error| error.is::<TurnTimedOut>())
+        {
+            // Abandon the interrupted response chain so the next turn rebuilds
+            // full context instead of continuing a half-finished tool loop.
+            self.state.lock().await.threads.remove(&thread_key(&req));
+        }
         let output = output?;
         self.save_thread(&req, &output).await;
 
         let parsed = crate::codex_app::parse::parse_card(&output.text, &req.card_contract);
         let card = parsed.unwrap_or_else(|error| {
-            Self::error_card(format!("{error}\n\nRaw output:\n{}", output.text))
+            error_card(
+                crate::UNPARSED_OUTPUT_CARD_ID,
+                "Local model error",
+                format!("{error}\n\nRaw output:\n{}", output.text),
+            )
         });
         let card = enforce_card_contract(card, &req.card_contract, &self.model, &output.text);
         let token_usage = output.token_usage.or_else(|| {
@@ -383,8 +449,7 @@ impl BackendAdapter for OpenAiCompatibleBackend {
     }
 
     async fn cancel_turn(&self, session_id: &str) -> Result<()> {
-        let state = self.state.lock().await;
-        for ((active_session, _), sender) in &state.active {
+        for ((active_session, _), sender) in lock_active(&self.active).iter() {
             if active_session == session_id {
                 let _ = sender.send(true);
             }
@@ -445,7 +510,7 @@ fn one_call(turn: &ResponseTurn) -> Result<FunctionCall> {
 }
 
 fn terminal_card(call: &FunctionCall, req: &BackendRequest) -> Result<String> {
-    let arguments = serde_json::from_str::<Value>(&call.arguments)?;
+    let arguments = serde_json::from_str::<Value>(strip_code_fence(&call.arguments))?;
     let mut card = match arguments.get("card") {
         Some(card) if card.is_object() => card.clone(),
         // Compatibility with providers that flatten a single object-valued
@@ -462,6 +527,22 @@ fn terminal_card(call: &FunctionCall, req: &BackendRequest) -> Result<String> {
             .insert("op".into(), json!(card_op(expected)));
     }
     Ok(serde_json::to_string(&card)?)
+}
+
+/// Strips one wrapping Markdown code fence (with an optional language tag) so
+/// a model that answers with ```json ... ``` still yields its card.
+fn strip_code_fence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let Some((_language, body)) = rest.split_once('\n') else {
+        return trimmed;
+    };
+    match body.trim_end().strip_suffix("```") {
+        Some(inner) => inner.trim(),
+        None => trimmed,
+    }
 }
 
 fn card_op(kind: loopbiotic_protocol::CardKind) -> &'static str {
@@ -588,6 +669,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
+
+    use loopbiotic_protocol::Card;
 
     use super::*;
 
@@ -765,18 +848,67 @@ mod tests {
         assert!(card.get("op").is_none());
     }
 
+    #[test]
+    fn terminal_card_strips_a_markdown_code_fence() {
+        let mut req = crate::test_request();
+        req.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Finding);
+        let call = FunctionCall {
+            call_id: "message_fallback".into(),
+            name: SUBMIT_CARD_TOOL.into(),
+            arguments: "```json\n{\"card\":{\"op\":\"finding\",\"title\":\"T\"}}\n```".into(),
+        };
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&terminal_card(&call, &req).unwrap()).unwrap()["op"],
+            "finding"
+        );
+    }
+
+    #[test]
+    fn code_fence_stripping_leaves_unfenced_and_unterminated_text_alone() {
+        assert_eq!(
+            strip_code_fence("{\"op\":\"finding\"}"),
+            "{\"op\":\"finding\"}"
+        );
+        assert_eq!(strip_code_fence("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(strip_code_fence("```\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(strip_code_fence("```json\n{\"a\":1}"), "```json\n{\"a\":1}");
+    }
+
     #[tokio::test]
     async fn cancellation_signals_every_active_lane_for_the_session() {
         let backend = backend();
-        let (_, first) = backend.register_turn("s_1").await;
-        let (_, second) = backend.register_turn("s_1").await;
-        let (_, other) = backend.register_turn("s_2").await;
+        let (_first_turn, first) = backend.register_turn("s_1");
+        let (_second_turn, second) = backend.register_turn("s_1");
+        let (_other_turn, other) = backend.register_turn("s_2");
 
         backend.cancel_turn("s_1").await.unwrap();
 
         assert!(*first.borrow());
         assert!(*second.borrow());
         assert!(!*other.borrow());
+    }
+
+    #[tokio::test]
+    async fn dropped_turn_future_unregisters_the_cancellation_lane() {
+        let backend = backend();
+        let (guard, cancelled) = backend.register_turn("s_1");
+        assert_eq!(lock_active(&backend.active).len(), 1);
+
+        // Stand-in for the harness prefetcher aborting a speculative turn:
+        // the deadline drops the in-flight future that owns the guard.
+        let turn = async move {
+            let _guard = guard;
+            let _cancelled = cancelled;
+            std::future::pending::<()>().await
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), turn)
+                .await
+                .is_err()
+        );
+
+        assert!(lock_active(&backend.active).is_empty());
     }
 
     #[tokio::test]
@@ -837,6 +969,86 @@ mod tests {
         assert_eq!(second_request["previous_response_id"], "resp_1");
         assert_eq!(second_request["input"][0]["call_id"], "call_1");
         assert_eq!(second.response_id, "resp_2");
+    }
+
+    #[tokio::test]
+    async fn prose_answer_surfaces_an_error_card_carrying_the_raw_output() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_json(&mut stream);
+            // A model that ignores tool_choice and answers in plain prose.
+            let response = json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_1",
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "The bug is in main.rs."}]
+                    }]
+                }
+            });
+            write_sse(&mut stream, &response);
+        });
+        let backend = OpenAiCompatibleBackend::new(
+            format!("http://{address}/v1"),
+            "local/model",
+            None,
+            1024,
+            2,
+            "none",
+            true,
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let mut req = crate::test_request();
+        req.context.cwd = workspace.path().to_path_buf();
+
+        let response = backend.next_card(req).await.unwrap();
+        server.join().unwrap();
+
+        let Card::Error(card) = &response.card else {
+            panic!("expected an error card, got {:?}", response.card.kind());
+        };
+        assert!(card.message.contains("The bug is in main.rs."));
+        assert_eq!(
+            response.raw_output.as_deref(),
+            Some("The bug is in main.rs.")
+        );
+    }
+
+    #[tokio::test]
+    async fn wedged_local_server_times_out_the_whole_turn() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // Accept the connection but never answer: a stand-in for a wedged
+        // server. It holds the socket open until the test releases it, so
+        // shutdown never depends on the timed-out client hanging up.
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let _ = release_rx.recv();
+            drop(stream);
+        });
+        let backend = OpenAiCompatibleBackend::with_turn_timeout(
+            format!("http://{address}/v1"),
+            "local/model",
+            None,
+            1024,
+            2,
+            "none",
+            true,
+            Some(Duration::from_millis(100)),
+        );
+
+        let error = backend.next_card(crate::test_request()).await.unwrap_err();
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+
+        assert!(error.is::<TurnTimedOut>(), "unexpected error: {error}");
+        assert!(error.to_string().contains("LOOPBIOTIC_TURN_TIMEOUT_SECS"));
+        assert!(lock_active(&backend.active).is_empty());
     }
 
     fn read_http_json(stream: &mut std::net::TcpStream) -> Value {

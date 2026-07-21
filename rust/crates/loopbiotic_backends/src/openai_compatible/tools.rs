@@ -9,6 +9,7 @@ use super::SUBMIT_CARD_TOOL;
 use super::responses::FunctionCall;
 
 const MAX_READ_BYTES: usize = 32 * 1024;
+const MAX_READ_FILE_BYTES: u64 = 512 * 1024;
 const MAX_READ_LINES: usize = 400;
 const MAX_SEARCH_FILES: usize = 4_096;
 const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
@@ -122,6 +123,15 @@ fn read_file(arguments: &str, workspace: &Path) -> Result<ToolExecution> {
     let (root, file) = resolve_existing(workspace, &args.path)?;
     if !file.is_file() {
         return Err(anyhow!("path is not a regular file"));
+    }
+    let size = file
+        .metadata()
+        .map_err(|_| anyhow!("file metadata is unavailable"))?
+        .len();
+    if size > MAX_READ_FILE_BYTES {
+        return Err(anyhow!(
+            "file is {size} bytes, larger than the {MAX_READ_FILE_BYTES}-byte read limit"
+        ));
     }
     let text = fs::read_to_string(&file).map_err(|_| anyhow!("file is not valid UTF-8"))?;
     let start = args.start_line.unwrap_or(1).max(1);
@@ -368,6 +378,26 @@ mod tests {
                 .output
                 .contains(workspace.path().to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn oversize_file_read_returns_a_tool_error_instead_of_reading() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace.path().join("huge.log"),
+            vec![b'a'; MAX_READ_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let call = FunctionCall {
+            call_id: "call_1".into(),
+            name: "workspace_read_file".into(),
+            arguments: r#"{"path":"huge.log","start_line":null,"end_line":null}"#.into(),
+        };
+
+        let result = execute(&call, workspace.path());
+
+        assert!(result.output.contains("\"ok\":false"));
+        assert!(result.output.contains("read limit"));
     }
 
     #[test]
