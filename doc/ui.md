@@ -87,7 +87,7 @@ The title has this semantic shape:
 Loopbiotic {Prompt|Reply} · {mode} · {agent} / {concrete turn model}
 ```
 
-The model names the model the next turn will actually run: a patch mode
+The title names the model the next turn will actually run: a patch mode
 (`fix`/`propose`) shows the patch-drafting model, a discovery mode
 (`explain`/`investigate`/`review`) shows the discovery model. The title is never
 a model the turn will not use. If the model is unknown, the label is `model?`;

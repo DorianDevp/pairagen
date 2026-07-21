@@ -72,6 +72,16 @@ function M.apply_turn_result(result, opts)
   state.turn_token_usage = type(result.turn_token_usage) == "table" and result.turn_token_usage or nil
   if opts.update_model ~= false and type(result.model) == "string" then
     state.backend_model = result.model
+    -- The card kind names the phase that produced it, so the per-phase
+    -- actual-model record used by the PromptWindow title stays honest.
+    local kind = type(result.card) == "table" and result.card.kind or nil
+    local phase = (kind == "patch" or kind == "summary") and "patch"
+      or (kind == "hypothesis" or kind == "finding" or kind == "choice") and "discovery"
+      or nil
+    if phase then
+      state.backend_models = type(state.backend_models) == "table" and state.backend_models or {}
+      state.backend_models[phase] = result.model
+    end
   end
   state.context_report = type(result.context_report) == "table" and result.context_report or nil
   log.event("context_optimization", state.context_report or {})

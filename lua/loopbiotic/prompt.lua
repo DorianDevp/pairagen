@@ -346,11 +346,37 @@ function M.model_candidates(configured, identity, agent_models, backend_model)
   return candidates
 end
 
+-- Inputs for the model the next turn in `phase` would run: the phase's
+-- configured pick, the identity default for that phase, and the model the
+-- backend last reported for that phase. resolved_model keeps its actual-first
+-- priority; feeding it per-phase inputs is what keeps the headline from
+-- naming a model the turn will not use.
+---@param phase "patch"|"discovery"
+---@return string|nil configured, string|nil identity_model, string|nil actual
+function M.phase_model_inputs(phase)
+  local configured = phase == "patch" and config.model() or config.discovery_model()
+  local identity = state.agent_identity
+  local identity_model
+  if type(identity) == "table" then
+    local phases = type(identity.phases) == "table" and identity.phases or {}
+    if type(phases[phase]) == "string" and phases[phase] ~= "" then
+      identity_model = phases[phase]
+    elseif type(identity.model) == "string" then
+      identity_model = identity.model
+    end
+  end
+  local actuals = state.backend_models
+  local actual = type(actuals) == "table" and actuals[phase] or nil
+  return configured, identity_model, actual
+end
+
 function M.title(kind, mode)
   local agent = config.agent()
-  local model = M.model_label(config.model(), state.agent_identity, state.backend_model)
+  local resolved_mode = M.normalize_mode(mode or open_mode)
+  local configured, identity_model, actual = M.phase_model_inputs(M.model_phase(resolved_mode))
+  local model = M.resolved_model(configured, identity_model, actual) or "model?"
 
-  return string.format(" Loopbiotic %s · %s · %s / %s ", kind, M.normalize_mode(mode or open_mode), agent, model)
+  return string.format(" Loopbiotic %s · %s · %s / %s ", kind, resolved_mode, agent, model)
 end
 
 -- Choose the behavior contract for this PromptWindow. The picker is local UI:

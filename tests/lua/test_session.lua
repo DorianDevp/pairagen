@@ -45,6 +45,23 @@ return function(t)
     state.reset()
   end)
 
+  t.test("apply_turn_result records the actual model per phase", function()
+    state.reset()
+    with_stubbed_show(function()
+      session.apply_turn_result(turn_result())
+      t.eq(state.backend_models.discovery, "reported-model", "finding records the discovery phase")
+      t.eq(state.backend_models.patch, nil, "patch phase untouched")
+
+      local patch_result = turn_result()
+      patch_result.model = "patch-model"
+      patch_result.card = { id = "c2", kind = "patch", title = "Patch" }
+      session.apply_turn_result(patch_result)
+      t.eq(state.backend_models.patch, "patch-model", "patch card records the patch phase")
+      t.eq(state.backend_models.discovery, "reported-model", "discovery record kept")
+    end)
+    state.reset()
+  end)
+
   t.test("apply_turn_result keeps the previous goal and model when absent", function()
     state.reset()
     state.goal = { statement = "existing goal" }

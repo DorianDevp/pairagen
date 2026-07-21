@@ -32,7 +32,10 @@ assert(config.read_preferences().models.codex == "legacy-model")
 vim.fn.delete(legacy_preferences)
 
 local prompt = require("loopbiotic.prompt")
-assert(prompt.title("Prompt", "investigate") == " Loopbiotic Prompt · investigate · codex / test-model ")
+-- The title names the model of the phase the mode runs: discovery modes show
+-- the discovery model, patch modes the configured patch model.
+assert(prompt.title("Prompt", "investigate") == " Loopbiotic Prompt · investigate · codex / gpt-5.4-mini ")
+assert(prompt.title("Prompt", "fix") == " Loopbiotic Prompt · fix · codex / test-model ")
 prompt.open_for({ title = prompt.title("Reply"), footer = " Test ", submit = function() end })
 local state = require("loopbiotic.state")
 assert(vim.api.nvim_win_get_config(state.surfaces.prompt.frame_win).zindex == 200)

@@ -511,6 +511,9 @@ function M.model(name)
   if name == "default" or name == "none" then
     local _, saved, save_error = config.model("")
     rpc.stop()
+    -- An explicit change makes the recorded per-phase actuals stale as
+    -- next-turn predictions for the PromptWindow title.
+    state.backend_models = vim.NIL
     local display = M.model_display()
     if save_error then
       ui.notify("Loopbiotic model: " .. display .. " (could not save: " .. save_error .. ")", vim.log.levels.WARN)
@@ -523,6 +526,7 @@ function M.model(name)
 
   local _, saved, save_error = config.model(name)
   rpc.stop()
+  state.backend_models = vim.NIL
   if save_error then
     ui.notify("Loopbiotic model: " .. name .. " (could not save: " .. save_error .. ")", vim.log.levels.WARN)
   else
@@ -551,6 +555,7 @@ function M.discovery_model(name)
   if name == "default" or name == "none" then
     local _, saved, save_error = config.discovery_model("")
     rpc.stop()
+    state.backend_models = vim.NIL
     if save_error then
       ui.notify("Loopbiotic discovery model: agent default (could not save: " .. save_error .. ")", vim.log.levels.WARN)
     else
@@ -561,6 +566,7 @@ function M.discovery_model(name)
 
   local _, saved, save_error = config.discovery_model(name)
   rpc.stop()
+  state.backend_models = vim.NIL
   if save_error then
     ui.notify("Loopbiotic discovery model: " .. name .. " (could not save: " .. save_error .. ")", vim.log.levels.WARN)
   else

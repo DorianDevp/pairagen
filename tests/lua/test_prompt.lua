@@ -52,6 +52,30 @@ return function(t)
     config.values.backend.agent = previous_agent
   end)
 
+  t.test("title names the model of the phase the next turn will run", function()
+    local previous_agent = config.values.backend.agent
+    config.values.backend.agent = "mock"
+    state.backend_model = nil
+    state.backend_models = nil
+    state.agent_identity = {
+      backend = "mock",
+      model = "gpt-5.4",
+      phases = { patch = "gpt-5.4", discovery = "gpt-5.4-mini" },
+    }
+
+    t.eq(prompt.title("Prompt", "investigate"), " Loopbiotic Prompt · investigate · mock / gpt-5.4-mini ")
+    t.eq(prompt.title("Prompt", "fix"), " Loopbiotic Prompt · fix · mock / gpt-5.4 ")
+
+    -- A reported actual only ever feeds the phase that ran it.
+    state.backend_models = { discovery = "haiku-actual" }
+    t.eq(prompt.title("Prompt", "review"), " Loopbiotic Prompt · review · mock / haiku-actual ")
+    t.eq(prompt.title("Reply", "fix"), " Loopbiotic Reply · fix · mock / gpt-5.4 ")
+
+    state.agent_identity = nil
+    state.backend_models = nil
+    config.values.backend.agent = previous_agent
+  end)
+
   t.test("model_candidates unions and dedupes in priority order", function()
     local candidates = prompt.model_candidates(
       "configured",

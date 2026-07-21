@@ -37,6 +37,7 @@
 ---@field token_usage LoopbioticTokenUsage|nil
 ---@field turn_token_usage LoopbioticTokenUsage|nil
 ---@field backend_model string|nil model the backend reported using
+---@field backend_models table|nil last backend-reported model per phase: { patch?, discovery? }
 ---@field agent_identity table|nil backend/warmup identity: { backend, model, models }
 ---@field backend_preflight_error string|nil last backend/warmup error; nil once a warmup or turn succeeds
 ---@field prompt_stash string|nil composed prompt text preserved across a failed session start
@@ -84,6 +85,7 @@ local defaults = {
   token_usage = vim.NIL,
   turn_token_usage = vim.NIL,
   backend_model = vim.NIL,
+  backend_models = vim.NIL,
   agent_identity = vim.NIL,
   backend_preflight_error = vim.NIL,
   prompt_stash = vim.NIL,
