@@ -251,8 +251,18 @@ return function(t)
     local agent = surfaces.snapshot().agent
     t.eq(mapped(agent.buf, config.values.keymaps.draft_accept), true)
     t.eq(mapped(agent.buf, config.values.keymaps.draft_reject), true)
+    t.eq(mapped(agent.buf, config.values.keymaps.go_to), true, "Review binds local navigation")
+    t.eq(mapped(agent.buf, config.values.keymaps.details), false, "short explanation offers no details toggle")
     t.eq(mapped(agent.buf, "m"), false, "Review has no Reply before a decision")
     t.eq(mapped(agent.buf, "t"), false, "Review has no Retry")
+
+    diff.controls({
+      id = "patch",
+      kind = "patch",
+      explanation = string.rep("A long explanation that overflows the control line ", 3),
+      actions = { "retry", "why" },
+    })
+    t.eq(mapped(agent.buf, config.values.keymaps.details), true, "overflowing explanation binds the details toggle")
     cleanup()
   end)
 
