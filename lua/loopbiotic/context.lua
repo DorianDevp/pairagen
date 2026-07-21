@@ -475,6 +475,18 @@ function M.source_buffer(preferred_buf)
 end
 
 function M.buffer_window(buf)
+  -- A buffer can be visible in several splits (and tabs); prefer the split
+  -- the user is working in, then the current tab, so cursor capture and
+  -- navigation do not land in whichever window happens to be listed first.
+  local current = vim.api.nvim_get_current_win()
+  if vim.api.nvim_win_get_buf(current) == buf then
+    return current
+  end
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
+      return win
+    end
+  end
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
       return win

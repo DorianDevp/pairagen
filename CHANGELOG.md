@@ -8,6 +8,12 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Split-window layouts no longer throw the cursor into the first (top-left)
+  split: closing a focused float (PromptWindow after submit, AgentWindow on
+  quit) returns the cursor to the window it was opened from, card anchoring
+  after a completed turn targets the split the user works in when the buffer
+  is visible in several, and cursor capture/navigation prefer the focused
+  split over the first window listed.
 - Model output that is not parseable as a Loopbiotic op (for example JSON with
   an unescaped quote inside a string value) is now repaired through the normal
   retry loop: the model is asked to re-emit one strict JSON object before the

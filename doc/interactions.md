@@ -313,6 +313,10 @@ Example integration-test flow:
 ## Focus and source navigation
 
 - Async AgentWindow renders do not steal focus.
+- Closing a focused Frame returns the cursor to the window it was entered
+  from, never to the tab's first split. When a buffer is visible in several
+  splits, anchoring, cursor capture, and navigation use the split the user is
+  working in, not whichever window happens to be listed first.
 - The first processing render and later progress renders share the resolved
   source anchor; asynchronous state completion cannot move AgentWindow from a
   fallback center to the source cursor.

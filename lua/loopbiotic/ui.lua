@@ -15,6 +15,22 @@ local function normal_window(tab)
   return nil
 end
 
+-- Where the cursor should land when a focused float closes: the window the
+-- user was in before entering the float, when that is still a valid normal
+-- window of the same tab. Falling back to the tab's first window would drop
+-- the cursor into the top-left split regardless of where the user works.
+local function return_window(tab)
+  local previous = vim.fn.win_getid(vim.fn.winnr("#"))
+  if previous ~= 0 and vim.api.nvim_win_is_valid(previous) and vim.api.nvim_win_get_tabpage(previous) == tab then
+    local ok, win_config = pcall(vim.api.nvim_win_get_config, previous)
+    if ok and win_config.relative == "" then
+      return previous
+    end
+  end
+
+  return normal_window(tab)
+end
+
 function M.setup_highlights()
   local highlights = {
     LoopbioticNormal = { link = "NormalFloat" },
@@ -50,7 +66,7 @@ function M.close(win)
   end
 
   if vim.api.nvim_get_current_win() == win then
-    local normal = normal_window(tab)
+    local normal = return_window(tab)
     if not normal then
       return false
     end
@@ -227,8 +243,15 @@ function M.buffer_anchor(buf, line, column)
     return nil
   end
 
-  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if vim.api.nvim_win_get_buf(win) == buf then
+  -- A buffer can be visible in several splits; anchor at the split the user
+  -- is working in (current window, then the window they came from) before
+  -- falling back to the tab's window order.
+  local candidates = { vim.api.nvim_get_current_win(), vim.fn.win_getid(vim.fn.winnr("#")) }
+  vim.list_extend(candidates, vim.api.nvim_tabpage_list_wins(0))
+  local seen = {}
+  for _, win in ipairs(candidates) do
+    if win ~= 0 and not seen[win] and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == buf then
+      seen[win] = true
       local position = vim.fn.screenpos(win, math.max(line or 1, 1), math.max((column or 0) + 1, 1))
       if position.row > 0 and position.col > 0 then
         return { row = position.row, col = position.col }
