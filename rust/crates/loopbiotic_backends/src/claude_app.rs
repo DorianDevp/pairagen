@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use loopbiotic_protocol::{BackendInfo, Card, TokenUsage};
+use loopbiotic_protocol::{BackendInfo, TokenUsage};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -521,10 +521,6 @@ impl ClaudeAppBackend {
             }
         }
     }
-
-    fn error_card(message: impl Into<String>) -> Card {
-        error_card("c_claude_error", "Claude error", message)
-    }
 }
 
 /// Reads the freshly spawned CLI's init/system event, which names the model
@@ -591,7 +587,11 @@ impl BackendAdapter for ClaudeAppBackend {
             }
         }
         let card = crate::parse_card(&output.text).unwrap_or_else(|error| {
-            Self::error_card(format!("{error}\n\nRaw output:\n{}", output.text))
+            error_card(
+                crate::UNPARSED_OUTPUT_CARD_ID,
+                "Claude error",
+                format!("{error}\n\nRaw output:\n{}", output.text),
+            )
         });
         let card = enforce_card_contract(card, &req.card_contract, "Claude", &output.text);
         let token_usage = output.token_usage.unwrap_or_else(|| {

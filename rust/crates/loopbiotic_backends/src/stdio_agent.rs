@@ -130,10 +130,6 @@ impl StdioAgentBackend {
 
         result
     }
-
-    fn error_card(message: impl Into<String>) -> Card {
-        error_card("c_agent_error", "Agent error", message)
-    }
 }
 
 /// Sends one turn to the agent and reads its stream until the result line.
@@ -197,8 +193,13 @@ impl BackendAdapter for StdioAgentBackend {
         let answer = self.ask(&req, progress.as_ref()).await?;
         let raw_output = answer.line;
         let output_tokens = estimate_tokens(&raw_output);
-        let card = parse_agent_output(&raw_output)
-            .unwrap_or_else(|error| Self::error_card(format!("{}\n\n{}", error, raw_output)));
+        let card = parse_agent_output(&raw_output).unwrap_or_else(|error| {
+            error_card(
+                crate::UNPARSED_OUTPUT_CARD_ID,
+                "Agent error",
+                format!("{}\n\n{}", error, raw_output),
+            )
+        });
         let card = enforce_card_contract(card, &req.card_contract, "Agent", &raw_output);
 
         Ok(BackendResponse {

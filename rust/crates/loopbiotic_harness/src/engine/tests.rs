@@ -11,9 +11,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use async_trait::async_trait;
 use loopbiotic_backends::{
     BackendAction, BackendAdapter, BackendMetadata, BackendRequest, BackendResponse, MockBackend,
+    UNPARSED_OUTPUT_CARD_ID,
 };
 use loopbiotic_protocol::{
-    BackendInfo, Cursor, FilePatch, FindingCard, HypothesisCard, Mode, PatchCard,
+    BackendInfo, Cursor, ErrorCard, FilePatch, FindingCard, HypothesisCard, Mode, PatchCard,
 };
 
 use super::*;
@@ -505,6 +506,58 @@ async fn repairs_invalid_patch_before_showing_it_to_user() {
     assert_eq!(result.attempts[1].outcome, "accepted");
     assert_eq!(result.attempts[1].violation_class, None);
     assert_eq!(result.turn_token_usage.total_tokens, 30);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retries_unparseable_backend_output_before_showing_the_error() {
+    let backend = Arc::new(UnparsedOutputBackend::default());
+    let mut engine = Engine::new(backend);
+    let start = engine.start(params()).await.unwrap();
+
+    let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+    let Card::Patch(card) = result.card else {
+        panic!("expected the re-emitted patch card");
+    };
+    assert_eq!(
+        card.patches[0].diff,
+        "@@ -1,1 +1,1 @@\n-placeholder\n+repaired\n"
+    );
+    assert_eq!(result.attempts.len(), 2);
+    assert_eq!(result.attempts[0].outcome, "contract_retry");
+    assert_eq!(
+        result.attempts[0].violation_class,
+        Some(loopbiotic_protocol::ViolationClass::UnparsedOutput)
+    );
+    assert!(
+        result.attempts[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("expected value")
+    );
+    assert_eq!(result.attempts[1].outcome, "accepted");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_the_unparsed_error_card_after_exhausting_retries() {
+    let backend = Arc::new(AlwaysUnparsedBackend);
+    let mut engine = Engine::new(backend);
+    let start = engine.start(params()).await.unwrap();
+
+    let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
+
+    let Card::Error(card) = result.card else {
+        panic!("expected the unparsed-output error card to stand");
+    };
+    assert!(card.message.contains("Raw output"));
+    assert_eq!(result.attempts.len(), 3);
+    assert_eq!(result.attempts[0].outcome, "contract_retry");
+    assert_eq!(result.attempts[1].outcome, "contract_retry");
+    assert_eq!(result.attempts[2].outcome, "rejected");
+    assert!(result.attempts.iter().all(|attempt| {
+        attempt.violation_class == Some(loopbiotic_protocol::ViolationClass::UnparsedOutput)
+    }));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1208,6 +1261,13 @@ struct RepairingPatchBackend {
     failed_once: AtomicBool,
 }
 
+#[derive(Default)]
+struct UnparsedOutputBackend {
+    failed_once: AtomicBool,
+}
+
+struct AlwaysUnparsedBackend;
+
 struct WrongTypeBackend;
 
 struct AlwaysFailBackend;
@@ -1525,6 +1585,105 @@ impl BackendAdapter for RepairingPatchBackend {
             can_read_project: false,
             can_use_tools: false,
         }
+    }
+}
+
+fn unparsed_output_card() -> Card {
+    Card::Error(ErrorCard {
+        id: UNPARSED_OUTPUT_CARD_ID.into(),
+        title: "Claude error".into(),
+        message: "expected value at line 1 column 245\n\nRaw output:\n{\"op\":\"patch\", \"explanation\":\"pod \u{201e}Data produkcji\", widoczne\"}".into(),
+        actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+    })
+}
+
+#[async_trait]
+impl BackendAdapter for UnparsedOutputBackend {
+    async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+        let card = match req.action {
+            BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                id: "c_1".into(),
+                title: "Start".into(),
+                claim: "The local representation needs one change.".into(),
+                evidence: None,
+                next_move: None,
+                flow_path: vec![],
+                actions: vec![Action::Fix, Action::Stop],
+            }),
+            BackendAction::User(Action::Fix) if !self.failed_once.swap(true, Ordering::SeqCst) => {
+                unparsed_output_card()
+            }
+            BackendAction::ContractRetry(reason) => {
+                assert!(reason.contains("could not be parsed"));
+                assert!(reason.contains("strict JSON"));
+                Card::Patch(PatchCard {
+                    id: "c_reemitted".into(),
+                    title: "Re-emitted op".into(),
+                    explanation: "Strict JSON this time.".into(),
+                    warnings: vec![],
+                    goal_complete: false,
+                    plan: None,
+                    patches: vec![FilePatch {
+                        id: "p_1".into(),
+                        file: "src/work.ts".into(),
+                        diff: "@@ -1,1 +1,1 @@\n-placeholder\n+repaired\n".into(),
+                        explanation: "Repair one line.".into(),
+                    }],
+                    actions: vec![Action::Apply, Action::Retry, Action::Stop],
+                })
+            }
+            _ => panic!("unexpected unparsed-output backend request"),
+        };
+
+        Ok(BackendResponse {
+            card,
+            raw_output: Some("{\"op\":\"patch\"".into()),
+            metadata: BackendMetadata {
+                backend: "unparsed_output".into(),
+                model: None,
+                token_usage: None,
+                activities: vec![],
+                attempts: vec![],
+            },
+        })
+    }
+
+    fn capabilities(&self) -> BackendInfo {
+        MockBackend::info()
+    }
+}
+
+#[async_trait]
+impl BackendAdapter for AlwaysUnparsedBackend {
+    async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+        let card = match req.action {
+            BackendAction::Start => Card::Hypothesis(HypothesisCard {
+                id: "c_1".into(),
+                title: "Start".into(),
+                claim: "The local representation needs one change.".into(),
+                evidence: None,
+                next_move: None,
+                flow_path: vec![],
+                actions: vec![Action::Fix, Action::Stop],
+            }),
+            _ => unparsed_output_card(),
+        };
+
+        Ok(BackendResponse {
+            card,
+            raw_output: Some("{\"op\":\"patch\"".into()),
+            metadata: BackendMetadata {
+                backend: "unparsed_output".into(),
+                model: None,
+                token_usage: None,
+                activities: vec![],
+                attempts: vec![],
+            },
+        })
+    }
+
+    fn capabilities(&self) -> BackendInfo {
+        MockBackend::info()
     }
 }
 

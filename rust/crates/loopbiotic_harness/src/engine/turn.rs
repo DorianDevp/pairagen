@@ -3,7 +3,9 @@
 //! failures into typed error cards.
 
 use anyhow::{Result, anyhow};
-use loopbiotic_backends::{BackendAction, BackendProgress, BackendResponse, ProgressReporter};
+use loopbiotic_backends::{
+    BackendAction, BackendProgress, BackendResponse, ProgressReporter, UNPARSED_OUTPUT_CARD_ID,
+};
 use loopbiotic_patch::{
     PatchCoherence, PatchNormalizer, PatchValidator, violation, violation_class,
 };
@@ -134,6 +136,58 @@ impl Engine {
                 return response;
             }
 
+            // The backend surfaced output it could not parse as an op at all.
+            // The model's previous text is already in its thread, so ask it to
+            // re-emit strict JSON instead of accepting the error card on the
+            // first try; after three failures the error card (with raw output)
+            // stands, exactly as before.
+            if let Card::Error(card) = &response.card
+                && card.id == UNPARSED_OUTPUT_CARD_ID
+            {
+                let detail = card
+                    .message
+                    .lines()
+                    .next()
+                    .unwrap_or("the response was not a parseable Loopbiotic op")
+                    .to_string();
+                attempts.push(agent_attempt(
+                    attempt + 1,
+                    &response,
+                    if attempt < 2 {
+                        "contract_retry"
+                    } else {
+                        "rejected"
+                    },
+                    Some(detail.clone()),
+                    attempt_usage,
+                    Some(ViolationClass::UnparsedOutput),
+                    true,
+                ));
+                if attempt < 2 {
+                    if let Some(progress) = &progress {
+                        progress(BackendProgress {
+                            session_id: session.id.clone(),
+                            phase: "repairing".into(),
+                            message: "The reply was not machine-readable; requesting strict JSON"
+                                .into(),
+                            preview: None,
+                        });
+                    }
+                    action = BackendAction::ContractRetry(format!(
+                        "Your previous response could not be parsed as a Loopbiotic op: {detail}. \
+                         Re-emit the complete op as exactly one strict JSON object with no prose \
+                         or code fences around it, and escape every double-quote character inside \
+                         string values (including typographic quotes such as \u{201e} and \u{201d})."
+                    ));
+                    attempt += 1;
+                    continue;
+                }
+
+                response.metadata.token_usage = token_usage;
+                response.metadata.attempts = attempts;
+                return response;
+            }
+
             if !matches!(expected, NextState::GoalWhy)
                 && let Some((key, reason)) = duplicate_observation(session, &response.card)
             {
@@ -240,7 +294,7 @@ impl Engine {
                         progress(BackendProgress {
                             session_id: session.id.clone(),
                             phase: "repairing".into(),
-                            message: "Patch contract failed; Codex is repairing the local step"
+                            message: "Patch contract failed; the agent is repairing the local step"
                                 .into(),
                             preview: None,
                         });

@@ -189,6 +189,8 @@ pub enum ViolationClass {
     DuplicateStep,
     /// A goal batch could not be validated coherently across its files.
     IncoherentBatch,
+    /// The backend response contained no parseable Loopbiotic op at all.
+    UnparsedOutput,
     /// A violation no construction site has classified.
     Other,
 }

@@ -57,10 +57,6 @@ impl GenericCliBackend {
     fn prompt(&self, req: &BackendRequest) -> String {
         generic_prompt(req)
     }
-
-    fn error_card(message: impl Into<String>) -> Card {
-        error_card("c_backend_error", "Backend error", message)
-    }
 }
 
 /// The op contract sent on every turn. A `const` so it can never interpolate
@@ -309,7 +305,11 @@ impl BackendAdapter for GenericCliBackend {
         let stdout = output.join("\n");
         let raw_output = format!("{stdout}{stderr}");
         let card = parse_card(&stdout).unwrap_or_else(|error| {
-            Self::error_card(format!("{}\n\n{}", error, excerpt(&raw_output)))
+            error_card(
+                crate::UNPARSED_OUTPUT_CARD_ID,
+                "Backend error",
+                format!("{}\n\n{}", error, excerpt(&raw_output)),
+            )
         });
         let card = enforce_card_contract(card, &req.card_contract, &backend_name, &raw_output);
 

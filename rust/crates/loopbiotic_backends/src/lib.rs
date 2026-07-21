@@ -195,6 +195,12 @@ impl Default for CardContract {
     }
 }
 
+/// Card id marking an error card that stands in for backend output which could
+/// not be parsed as a Loopbiotic op. The engine treats these as repairable
+/// contract violations (retry with a strict-JSON instruction) rather than
+/// terminal backend errors.
+pub const UNPARSED_OUTPUT_CARD_ID: &str = "c_backend_unparsed_output";
+
 pub fn enforce_card_contract(
     card: Card,
     contract: &CardContract,
