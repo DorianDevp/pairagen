@@ -25,6 +25,8 @@ pub(super) struct ResponseTurn {
     pub(super) text: String,
     pub(super) token_usage: Option<TokenUsage>,
     pub(super) reasoning_seen: bool,
+    /// Model name the completed response reported, when the server named one.
+    pub(super) model: Option<String>,
 }
 
 #[derive(Default)]
@@ -82,7 +84,7 @@ pub(super) async fn read_response_stream(
     }
 
     Err(anyhow!(
-        "LM Studio response stream ended without response.completed"
+        "OpenAI-compatible response stream ended without response.completed"
     ))
 }
 
@@ -204,6 +206,7 @@ impl Accumulator {
                     text,
                     token_usage: parse_usage(response.get("usage")),
                     reasoning_seen: self.reasoning_seen,
+                    model: completed_model(response),
                 }));
             }
             Some("response.failed" | "response.incomplete") => {
@@ -264,6 +267,17 @@ fn completed_calls(response: &Value, pending: &BTreeMap<String, PendingCall>) ->
         .collect()
 }
 
+/// The model the server actually ran for this response. Servers that alias or
+/// JIT-swap models (LM Studio among them) name the concrete model here.
+fn completed_model(response: &Value) -> Option<String> {
+    response
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+}
+
 fn completed_text(response: &Value) -> Option<String> {
     let parts = response
         .get("output")
@@ -304,7 +318,7 @@ fn response_error(event: &Value) -> String {
         .pointer("/error/message")
         .or_else(|| event.pointer("/response/error/message"))
         .and_then(Value::as_str)
-        .unwrap_or("LM Studio response failed")
+        .unwrap_or("OpenAI-compatible response failed")
         .to_string()
 }
 

@@ -1,7 +1,7 @@
 mod responses;
 mod tools;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex as StdMutex, PoisonError};
 use std::time::Duration;
@@ -59,6 +59,31 @@ struct ThreadState {
 #[derive(Default)]
 struct BackendState {
     threads: HashMap<String, ThreadState>,
+    /// Thread keys ordered oldest-to-newest by last store, so hitting the cap
+    /// evicts stale threads instead of clearing possibly-active sessions.
+    order: VecDeque<String>,
+}
+
+impl BackendState {
+    fn remove(&mut self, key: &str) {
+        self.threads.remove(key);
+        self.order.retain(|existing| existing != key);
+    }
+
+    /// Stores one thread and evicts the least recently stored entries above
+    /// the cap. The key being served sits at the back of the order, so it is
+    /// never the one evicted.
+    fn insert(&mut self, key: String, thread: ThreadState) {
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        self.threads.insert(key, thread);
+        while self.threads.len() > MAX_SESSION_THREADS {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.threads.remove(&oldest);
+        }
+    }
 }
 
 type ActiveTurns = HashMap<(String, u64), watch::Sender<bool>>;
@@ -91,6 +116,14 @@ struct TurnOutput {
     terminal_call_ids: Vec<String>,
     token_usage: Option<TokenUsage>,
     activities: Vec<String>,
+    /// Model name the server reported for this turn. Servers that alias or
+    /// JIT-swap models name the concrete model here; it beats the configured
+    /// alias in metadata so every turn reports the model it actually ran.
+    model: Option<String>,
+    /// Token estimate of the prompt this turn actually sent — the
+    /// continuation message for chained turns, the full structured prompt
+    /// otherwise. Used only when the server reports no usage.
+    estimated_input_tokens: usize,
 }
 
 impl OpenAiCompatibleBackend {
@@ -194,6 +227,7 @@ impl OpenAiCompatibleBackend {
         } else {
             crate::generic::structured_prompt(req)
         };
+        let mut estimated_input_tokens = estimate_tokens(&prompt);
         let mut input = previous_input(previous.as_ref(), prompt);
         let mut previous_response_id = previous.as_ref().map(|thread| thread.response_id.clone());
         let mut restartable_chain = previous.is_some();
@@ -206,6 +240,7 @@ impl OpenAiCompatibleBackend {
         };
         let mut usage = None;
         let mut activities = Vec::new();
+        let mut served_model = None;
         let cancellation = cancelled;
 
         loop {
@@ -215,7 +250,16 @@ impl OpenAiCompatibleBackend {
                 previous_response_id.as_deref(),
                 tools::definitions(include_reads),
             );
-            let response = match self.send_response(body).await {
+            // A stalled connect would otherwise run until the whole-turn
+            // deadline; racing the send keeps cancellation responsive before
+            // the first byte of the response arrives.
+            let sent = tokio::select! {
+                () = turn_cancelled(cancellation.clone()) => {
+                    return Err(anyhow!("local model turn was interrupted"));
+                }
+                response = self.send_response(body) => response,
+            };
+            let response = match sent {
                 Ok(response) => response,
                 Err(error) if restartable_chain && stale_chain_error(&error) => {
                     report_progress(
@@ -224,8 +268,10 @@ impl OpenAiCompatibleBackend {
                         "recovering",
                         "Local response chain expired; rebuilding context",
                     );
-                    self.state.lock().await.threads.remove(&thread_key);
-                    input = json!(crate::generic::structured_prompt(req));
+                    self.state.lock().await.remove(&thread_key);
+                    let prompt = crate::generic::structured_prompt(req);
+                    estimated_input_tokens = estimate_tokens(&prompt);
+                    input = json!(prompt);
                     previous_response_id = None;
                     restartable_chain = false;
                     continue;
@@ -241,6 +287,9 @@ impl OpenAiCompatibleBackend {
             .await?;
             restartable_chain = false;
             merge_usage(&mut usage, turn.token_usage.as_ref());
+            if turn.model.is_some() {
+                served_model = turn.model.clone();
+            }
             if turn.reasoning_seen && !activities.iter().any(|item| item == "Reasoned locally") {
                 activities.push("Reasoned locally".into());
             }
@@ -265,13 +314,23 @@ impl OpenAiCompatibleBackend {
                     terminal_call_ids,
                     token_usage: usage,
                     activities,
+                    model: served_model,
+                    estimated_input_tokens,
                 });
             }
 
             if remaining_tools == 0 {
                 return Err(anyhow!("local model exceeded the read-only tool budget"));
             }
-            let execution = tools::execute(&call, &req.context.cwd);
+            // Bounded reads still walk up to thousands of files with std::fs,
+            // so they run on the blocking pool instead of stalling this async
+            // worker for the duration of a large search.
+            let read_call = call.clone();
+            let workspace = req.context.cwd.clone();
+            let execution =
+                tokio::task::spawn_blocking(move || tools::execute(&read_call, &workspace))
+                    .await
+                    .map_err(|error| anyhow!("local tool execution failed: {error}"))?;
             report_progress(progress, &req.session.id, "reading", &execution.activity);
             activities.push(execution.activity);
             remaining_tools -= 1;
@@ -364,13 +423,8 @@ impl OpenAiCompatibleBackend {
     }
 
     async fn save_thread(&self, req: &BackendRequest, output: &TurnOutput) {
-        let mut state = self.state.lock().await;
-        let key = thread_key(req);
-        if state.threads.len() >= MAX_SESSION_THREADS && !state.threads.contains_key(&key) {
-            state.threads.clear();
-        }
-        state.threads.insert(
-            key,
+        self.state.lock().await.insert(
+            thread_key(req),
             ThreadState {
                 response_id: output.response_id.clone(),
                 terminal_call_ids: output.terminal_call_ids.clone(),
@@ -410,7 +464,7 @@ impl BackendAdapter for OpenAiCompatibleBackend {
         {
             // Abandon the interrupted response chain so the next turn rebuilds
             // full context instead of continuing a half-finished tool loop.
-            self.state.lock().await.threads.remove(&thread_key(&req));
+            self.state.lock().await.remove(&thread_key(&req));
         }
         let output = output?;
         self.save_thread(&req, &output).await;
@@ -426,16 +480,19 @@ impl BackendAdapter for OpenAiCompatibleBackend {
         let card = enforce_card_contract(card, &req.card_contract, &self.model, &output.text);
         let token_usage = output.token_usage.or_else(|| {
             Some(TokenUsage::estimated(
-                estimate_tokens(&crate::generic::structured_prompt(&req)),
+                output.estimated_input_tokens,
                 estimate_tokens(&output.text),
             ))
         });
+        // Servers may alias or JIT-swap models; when the response names the
+        // concrete model, report it instead of the configured alias.
+        let model = output.model.unwrap_or_else(|| self.model.clone());
         Ok(BackendResponse {
             card,
             raw_output: Some(output.text),
             metadata: BackendMetadata {
                 backend: "openai_compatible".into(),
-                model: Some(self.model.clone()),
+                model: Some(model),
                 token_usage,
                 activities: output.activities,
                 attempts: vec![],
@@ -614,6 +671,15 @@ fn thread_key(req: &BackendRequest) -> String {
     }
 }
 
+/// Resolves once the turn is cancelled. When the cancel sender is already
+/// gone the turn can never be cancelled again, so the future pends instead of
+/// resolving; the racing branch of the `select!` decides the outcome.
+async fn turn_cancelled(mut cancelled: watch::Receiver<bool>) {
+    if cancelled.wait_for(|cancelled| *cancelled).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 fn merge_usage(total: &mut Option<TokenUsage>, next: Option<&TokenUsage>) {
     let Some(next) = next else {
         return;
@@ -769,6 +835,31 @@ mod tests {
     }
 
     #[test]
+    fn thread_cap_evicts_only_the_oldest_stored_threads() {
+        let thread = || ThreadState {
+            response_id: "resp".into(),
+            terminal_call_ids: vec![],
+            context_fingerprint: 1,
+        };
+        let mut state = BackendState::default();
+        for index in 0..MAX_SESSION_THREADS {
+            state.insert(format!("s_{index}:goal"), thread());
+        }
+        // Re-storing an existing key refreshes its position instead of
+        // growing the map, so an active session never ages to the front.
+        state.insert("s_0:goal".into(), thread());
+        assert_eq!(state.threads.len(), MAX_SESSION_THREADS);
+
+        state.insert("s_new:goal".into(), thread());
+
+        assert_eq!(state.threads.len(), MAX_SESSION_THREADS);
+        assert!(state.threads.contains_key("s_new:goal"));
+        assert!(state.threads.contains_key("s_0:goal"));
+        assert!(!state.threads.contains_key("s_1:goal"));
+        assert!(state.threads.contains_key("s_2:goal"));
+    }
+
+    #[test]
     fn reasoning_effort_is_closed_and_defaults_to_none() {
         assert_eq!(parse_reasoning_effort(None).unwrap(), "none");
         assert_eq!(parse_reasoning_effort(Some("HIGH")).unwrap(), "high");
@@ -810,6 +901,7 @@ mod tests {
             text: String::new(),
             token_usage: None,
             reasoning_seen: false,
+            model: None,
         };
 
         assert_eq!(one_call(&turn).unwrap().call_id, "call_full");
@@ -972,6 +1064,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_reported_model_beats_the_configured_alias() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // The first response names the concrete model behind the alias;
+            // the second omits the field, as some servers do.
+            for model in [Some("loaded/model-q4"), None] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_http_json(&mut stream);
+                let mut response = json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_1",
+                        "status": "completed",
+                        "output": [{
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": SUBMIT_CARD_TOOL,
+                            "arguments": "{\"card\":{\"op\":\"hypothesis\",\"title\":\"T\",\"claim\":\"C\"}}"
+                        }]
+                    }
+                });
+                if let Some(model) = model {
+                    response["response"]["model"] = json!(model);
+                }
+                write_sse(&mut stream, &response);
+            }
+        });
+        let backend = OpenAiCompatibleBackend::new(
+            format!("http://{address}/v1"),
+            "local/alias",
+            None,
+            1024,
+            2,
+            "none",
+            true,
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let mut req = crate::test_request();
+        req.context.cwd = workspace.path().to_path_buf();
+
+        let first = backend.next_card(req.clone()).await.unwrap();
+        req.session.card_count = 1;
+        let second = backend.next_card(req).await.unwrap();
+        server.join().unwrap();
+
+        assert_eq!(first.metadata.model.as_deref(), Some("loaded/model-q4"));
+        assert_eq!(second.metadata.model.as_deref(), Some("local/alias"));
+    }
+
+    #[tokio::test]
+    async fn estimated_usage_covers_only_what_the_continuation_sent() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // Neither response reports usage, so both turns fall back to the
+            // estimate of what each request actually sent.
+            for sequence in 1..=2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_http_json(&mut stream);
+                let response = json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": format!("resp_{sequence}"),
+                        "status": "completed",
+                        "output": [{
+                            "type": "function_call",
+                            "call_id": format!("call_{sequence}"),
+                            "name": SUBMIT_CARD_TOOL,
+                            "arguments": "{\"card\":{\"op\":\"hypothesis\",\"title\":\"T\",\"claim\":\"C\"}}"
+                        }]
+                    }
+                });
+                write_sse(&mut stream, &response);
+            }
+        });
+        let backend = OpenAiCompatibleBackend::new(
+            format!("http://{address}/v1"),
+            "local/model",
+            None,
+            1024,
+            2,
+            "none",
+            true,
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let mut req = crate::test_request();
+        req.context.cwd = workspace.path().to_path_buf();
+
+        let first = backend.next_card(req.clone()).await.unwrap();
+        req.session.card_count = 1;
+        // The context is unchanged, so the second turn sends the compact
+        // continuation message and its estimate must cover exactly that.
+        let expected =
+            estimate_tokens(&crate::generic::structured_continuation_prompt(&req, false));
+        let second = backend.next_card(req).await.unwrap();
+        server.join().unwrap();
+
+        let first_usage = first.metadata.token_usage.unwrap();
+        let second_usage = second.metadata.token_usage.unwrap();
+        assert!(second_usage.estimated);
+        assert_eq!(second_usage.input_tokens, expected);
+        assert!(second_usage.input_tokens < first_usage.input_tokens);
+    }
+
+    #[tokio::test]
     async fn prose_answer_surfaces_an_error_card_carrying_the_raw_output() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1049,6 +1247,46 @@ mod tests {
         assert!(error.is::<TurnTimedOut>(), "unexpected error: {error}");
         assert!(error.to_string().contains("LOOPBIOTIC_TURN_TIMEOUT_SECS"));
         assert!(lock_active(&backend.active).is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_a_wedged_request_send() {
+        // A listener that never accepts: the kernel backlog completes the
+        // connect (or leaves it pending) and the request then wedges without
+        // a response forever. No server thread is involved, so the test never
+        // depends on the connection arriving before the cancel does. With no
+        // turn deadline, only cancellation can end the stalled send.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let backend = std::sync::Arc::new(OpenAiCompatibleBackend::with_turn_timeout(
+            format!("http://{address}/v1"),
+            "local/model",
+            None,
+            1024,
+            2,
+            "none",
+            true,
+            None,
+        ));
+        let turn = tokio::spawn({
+            let backend = backend.clone();
+            async move { backend.next_card(crate::test_request()).await }
+        });
+        while lock_active(&backend.active).is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        backend.cancel_turn("s_1").await.unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), turn)
+            .await
+            .expect("cancellation should interrupt the wedged send")
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("interrupted"),
+            "unexpected error: {error}"
+        );
     }
 
     fn read_http_json(stream: &mut std::net::TcpStream) -> Value {
