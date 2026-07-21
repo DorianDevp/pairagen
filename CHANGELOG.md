@@ -6,6 +6,8 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-21
+
 ### Added
 
 - Agents can now be steered from a Netrw directory listing and can propose

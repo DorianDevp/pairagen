@@ -140,7 +140,7 @@ state.goal = nil
 state.details_expanded = false
 
 local installer = require("loopbiotic.installer")
-assert(installer.artifact("x86_64-unknown-linux-musl") == "loopbioticd-v0.3.2-x86_64-unknown-linux-musl.tar.gz")
+assert(installer.artifact("x86_64-unknown-linux-musl") == "loopbioticd-v0.4.0-x86_64-unknown-linux-musl.tar.gz")
 
 local log = require("loopbiotic.log")
 local sanitized = log.sanitize({ buffer_text = "secret source", event = "kept" })

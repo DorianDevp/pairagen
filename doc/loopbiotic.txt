@@ -51,6 +51,16 @@ draft moves to its proposed hunk. AgentWindow remains attached to its owner tab:
 returns to that tab and restores it. Out-of-scope shortcuts are silent no-ops;
 for example Reply cannot activate while AgentWindow is Working.
 
+The prompt may also open from a Netrw directory listing. In fix or propose
+mode the agent can then return file operations instead of a diff: moves and
+renames of files or directories inside the workspace. AgentWindow shows the
+operation manifest (each move plus target directories that do not exist yet)
+with the usual Accept/Reject gate while Netrw shows the affected parent
+directory. `keymaps.draft_accept` applies the whole set transactionally —
+missing directories are created first, any failure rolls the moves back, and
+loaded buffers follow their files — then the goal continues, so import fix-ups
+arrive as ordinary reviewed patches. `keymaps.draft_reject` moves nothing.
+
 Long goals and patch explanations are compact by default. Focus the Loopbiotic card
 and press `z` to expand or collapse the full text. Configure this with
 `keymaps.details`.
