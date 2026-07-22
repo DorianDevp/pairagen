@@ -41,9 +41,9 @@ Use deny when you cannot or should not proceed (ambiguous prompt, missing inform
 If you can only proceed from a different file or location — for example the change belongs in another file than the supplied buffer — return open_location IMMEDIATELY with that exact place instead of attempting a patch. The editor asks the user for permission, opens the file, and the next message continues this same turn with a.kind "location_granted" and fresh ctx for that buffer; then produce the real op. Never draft a patch against a file that is not the supplied buffer. Use deny only for refusals that navigation cannot solve.
 limits.expected, when set, names the op you must return (deny is always allowed instead; a clarifying choice is also accepted for hypothesis and finding). When limits.expected is null, choose whichever op fits best and ask via choice when the request is ambiguous.
 Patch for fix/propose mode, fix actions, or when limits.goal_completion is true. The user-selected mode and limits.expected define the response contract; never infer or replace the mode. When limits.conversation_only is true, never return patch or summary. patch.diff must be unified diff hunks starting with @@ against the corresponding project source.
-When limits.goal_completion is true, advance the explicitly authorized goal one small, compilable hunk per work turn. Return at most one file and exactly one hunk within limits.changed_lines plus plan listing remaining coherent steps; a file may repeat. Set plan.complete=true only on the final step. Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary. Inspect only enough source for the next step, preserve completed_steps, and never repeat accepted work.
+When limits.goal_completion is true, advance the explicitly authorized goal with a bounded compiler-safe hunk batch in exactly one file. Each hunk stays within limits.changed_lines and must compile after preceding hunks are accepted. Put declarations and dependency producers before consumers, and include a plan listing coherent work after this batch; a file may repeat. Set plan.complete=true only when the complete batch finishes the goal. Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary. Inspect only enough source for the next batch, preserve completed_steps, and never repeat accepted work.
 When limits.goal_completion is true and limits.expected is finding because the user asked why, explain the currently pending hunk without replacing it or advancing the goal. The same draft remains pending after the answer.
-A patch is one small local pair-programming step: one file, one hunk, no more changed lines than the supplied limit. Non-goal patches have a null plan.
+A patch targets exactly one file and may contain a bounded same-file hunk batch. Every hunk is one uninterrupted block, stays within the supplied changed-line limit, and must compile after earlier hunks are accepted. Non-goal patches have a null plan.
 To move or rename files or directories — for example when the supplied buffer is a directory listing and the user asks to reorganize files — return a patch op whose file_ops lists {"kind":"move","from","to"} with workspace-relative paths and patches []. Never mix file_ops and patches in one op and never express a move as a diff; the editor reviews and applies the moves behind the same Accept gate, and content fix-ups (imports) follow as the next goal step.
 Prefer the supplied context; you may use at most two targeted read-only searches when it is insufficient. Never edit files or run commands."#;
 
@@ -720,6 +720,13 @@ fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
                 "expected": req.card_contract.expected_kind,
             }),
         ),
+        (
+            "response_guidance",
+            json!({
+                "language": crate::RESPONSE_LANGUAGE_GUIDELINE,
+                "mode": crate::mode_response_guideline(&req.session.mode),
+            }),
+        ),
     ];
 
     if goal_turn {
@@ -730,9 +737,9 @@ fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
                     req.action,
                     crate::BackendAction::User(loopbiotic_protocol::Action::Goal)
                 ) {
-                    "Continue with the next planned coherent step: one small hunk plus the refreshed plan."
+                    "Continue with the next planned coherent same-file hunk batch plus the refreshed plan."
                 } else {
-                    "Return exactly one small, compilable hunk plus plan {remaining:[{file,summary}],complete}."
+                    "Return exactly one file with a bounded compiler-safe hunk batch plus plan {remaining:[{file,summary}],complete}."
                 }
             ),
         ));
@@ -749,6 +756,7 @@ fn turn_prompt(req: &BackendRequest, include_context: bool) -> String {
         "interaction_feedback",
         json!(req.session.interaction_feedback),
     ));
+    fields.push(("latest_user_prompt", json!(req.session.latest_user_prompt)));
     fields.push(("a", action_value(&req.action)));
     fields.push(("last", json!(req.session.last_summary)));
     fields.push(("n", json!(req.session.card_count)));
@@ -1167,12 +1175,14 @@ mod tests {
         req.card_contract.allow_goal_completion = true;
         req.card_contract.expected_kind = None;
         let goal = turn_prompt(&req, true);
-        assert!(goal.contains("exactly one small, compilable hunk"));
+        assert!(goal.contains("exactly one file with a bounded compiler-safe hunk batch"));
         assert!(!goal.contains("next planned coherent step"));
 
         req.action = crate::BackendAction::User(loopbiotic_protocol::Action::Goal);
         let continuation = turn_prompt(&req, true);
-        assert!(continuation.contains("Continue with the next planned coherent step"));
+        assert!(
+            continuation.contains("Continue with the next planned coherent same-file hunk batch")
+        );
 
         // The goal "why" turn explains the pending hunk; it must not be asked
         // to produce another slice.
@@ -1189,6 +1199,20 @@ mod tests {
         assert!(with_context.contains("buffer_text"));
         assert!(!without_context.contains("buffer_text"));
         assert!(without_context.contains("unchanged"));
+    }
+
+    #[test]
+    fn turn_prompt_carries_latest_prompt_language_and_review_depth() {
+        let mut req = crate::test_request();
+        req.session.mode = loopbiotic_protocol::Mode::Review;
+        req.session.latest_user_prompt = "Oceń projekt tych typów".into();
+        req.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Finding);
+
+        let prompt = turn_prompt(&req, true);
+
+        assert!(prompt.contains("Oceń projekt tych typów"));
+        assert!(prompt.contains("natural language used by latest_user_prompt"));
+        assert!(prompt.contains("do not collapse the answer into one next move"));
     }
 
     #[test]

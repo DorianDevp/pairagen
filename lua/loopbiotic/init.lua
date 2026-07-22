@@ -323,7 +323,7 @@ function M.submit_reply(text, mode, selected_skills)
     session_id = session_id,
     text = text,
     mode = mode,
-    context = require("loopbiotic.widgets").attach(context.session()),
+    context = require("loopbiotic.widgets").attach(context.session(text)),
     skills = vim.deepcopy(selected_skills or require("loopbiotic.skills").snapshot()),
   }
   local request_id = thinking.start("Thinking", session_id)

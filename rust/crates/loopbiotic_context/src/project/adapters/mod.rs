@@ -2,6 +2,7 @@ mod cargo;
 mod compose;
 mod deno;
 mod editor;
+mod go;
 mod nx;
 mod package;
 
@@ -64,6 +65,7 @@ pub(super) fn builtins() -> Vec<Box<dyn ProjectAdapter>> {
         )),
         Box::new(deno::DenoAdapter),
         Box::new(nx::NxAdapter),
+        Box::new(go::GoWorkspaceAdapter),
         Box::new(cargo::CargoWorkspaceAdapter),
         Box::new(cargo::CargoTechnologyAdapter::new(
             "rust-axum",

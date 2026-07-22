@@ -29,7 +29,7 @@ use crate::state::{NextState, SessionState};
 
 use goal::{
     complete_goal_locally, completed_patch_signatures, completed_patch_steps, goal_progress,
-    queue_goal_patch_cards, update_goal_state,
+    queue_patch_cards, update_goal_state,
 };
 use observations::{observation_prompt_line, prepare_observation_card, record_observations};
 use prefetch::{Continuation, Prefetch};
@@ -353,6 +353,7 @@ impl Engine {
             // The redraft replaces the pending slice chain, so there is no
             // longer a planned continuation to speculate on.
             session.pending_patch_cards.clear();
+            session.local_review_batch_active = false;
             session.goal_slice_continues = false;
         }
 
@@ -433,6 +434,7 @@ impl Engine {
             session.goal_status = loopbiotic_protocol::GoalStatus::Paused;
         }
         session.mode = selected_mode;
+        session.latest_user_prompt = text.trim().to_string();
         let expected = if matches!(session.mode, Mode::Fix | Mode::Propose) {
             NextState::Patch
         } else {
@@ -568,6 +570,7 @@ impl Engine {
                     attempts: vec![],
                 });
             }
+            session.local_review_batch_active = false;
             if completes_goal {
                 if !was_goal_active {
                     self.cancel_accept_continuation(session).await;
@@ -608,6 +611,7 @@ impl Engine {
         session.rejected_patches.extend(result.patch_ids.clone());
         self.cancel_accept_continuation(session).await;
         session.pending_patch_cards.clear();
+        session.local_review_batch_active = false;
         session.goal_slice_continues = false;
         session.next_step = None;
         // Rejecting is a local review decision, not permission to spend
@@ -725,12 +729,35 @@ impl Engine {
             .get(session_id)
             .map(|session| {
                 (
-                    session.original_prompt.clone(),
+                    session.latest_user_prompt.clone(),
                     session.context_policy.clone(),
                 )
             })
             .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
         let context = self.optimize_context(context, &prompt, &policy);
+        self.sessions
+            .get_mut(session_id)
+            .expect("session checked above")
+            .context = context;
+
+        Ok(())
+    }
+
+    /// A Reply brings a new user-authored prompt together with fresh editor
+    /// context. Rank that context against the Reply rather than the stable
+    /// original goal before the turn snapshot is updated.
+    pub fn update_context_for_prompt(
+        &mut self,
+        session_id: &str,
+        context: ContextBundle,
+        prompt: &str,
+    ) -> Result<()> {
+        let policy = self
+            .sessions
+            .get(session_id)
+            .map(|session| session.context_policy.clone())
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        let context = self.optimize_context(context, prompt, &policy);
         self.sessions
             .get_mut(session_id)
             .expect("session checked above")
@@ -778,6 +805,7 @@ impl Engine {
             expected_kind,
             allow_goal_completion,
             conversation_only: matches!(expected, NextState::Conversation),
+            max_body_chars: response_body_limit(&session.mode),
             ..CardContract::default()
         };
 
@@ -785,6 +813,7 @@ impl Engine {
             session: SessionSnapshot {
                 id: session.id.clone(),
                 prompt: session.original_prompt.clone(),
+                latest_user_prompt: session.latest_user_prompt.clone(),
                 interaction_feedback: session.interaction_feedback.clone(),
                 completed_steps: session.completed_steps.clone(),
                 known_observations: session
@@ -861,11 +890,7 @@ impl Engine {
         if !matches!(next_state, NextState::GoalWhy) {
             record_observations(session, &received);
         }
-        let card = if matches!(next_state, NextState::GoalLoop) {
-            queue_goal_patch_cards(session, received)?
-        } else {
-            received
-        };
+        let card = queue_patch_cards(session, received)?;
 
         update_goal_state(session, &card, &next_state);
         session.state = state_after_card(&card, &next_state);
@@ -1047,6 +1072,15 @@ fn expected_card_kind(
                 Some(CardKind::Summary)
             }
         },
+    }
+}
+
+fn response_body_limit(mode: &Mode) -> usize {
+    match mode {
+        Mode::Review => 3_600,
+        Mode::Explain => 2_400,
+        Mode::Investigate => 1_600,
+        Mode::Fix | Mode::Propose => CardContract::default().max_body_chars,
     }
 }
 

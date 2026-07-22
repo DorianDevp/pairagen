@@ -20,6 +20,10 @@ pub struct Session {
     pub initial_cursor: Cursor,
     pub initial_selection: Option<Selection>,
     pub original_prompt: String,
+    /// Most recently submitted user-authored prompt. The original prompt
+    /// remains the goal statement; this value owns response language and
+    /// current conversational phrasing across backend-only continuations.
+    pub latest_user_prompt: String,
     pub mode: Mode,
     pub cards: Vec<Card>,
     pub accepted_patches: Vec<PatchId>,
@@ -29,8 +33,11 @@ pub struct Session {
     pub completed_steps: Vec<String>,
     pub completed_step_signatures: Vec<(PathBuf, String)>,
     pub pending_patch_cards: VecDeque<PatchCard>,
-    /// True while the explicit goal plan says another small hunk follows; the
-    /// engine speculatively requests it during local review.
+    /// True while one backend response is being reviewed as a local sequence
+    /// of same-file hunks. No speculative model turn may run inside it.
+    pub local_review_batch_active: bool,
+    /// True while the explicit goal plan says another one-file slice follows.
+    /// The engine may speculate only when no local same-file batch is active.
     pub goal_slice_continues: bool,
     pub goal_status: GoalStatus,
     pub next_step: Option<String>,
@@ -56,13 +63,15 @@ pub struct Session {
 impl Session {
     pub fn new(params: StartSessionParams) -> Self {
         let context = ContextBundle::from_start(params.clone());
+        let prompt = params.prompt.trim().to_string();
         Self {
             id: format!("s_{}", Uuid::new_v4().simple()),
             cwd: params.cwd,
             initial_file: params.file,
             initial_cursor: params.cursor,
             initial_selection: params.selection,
-            original_prompt: params.prompt.trim().to_string(),
+            original_prompt: prompt.clone(),
+            latest_user_prompt: prompt,
             mode: params.mode,
             cards: vec![],
             accepted_patches: vec![],
@@ -72,6 +81,7 @@ impl Session {
             completed_steps: vec![],
             completed_step_signatures: vec![],
             pending_patch_cards: VecDeque::new(),
+            local_review_batch_active: false,
             goal_slice_continues: false,
             goal_status: GoalStatus::Idle,
             next_step: None,

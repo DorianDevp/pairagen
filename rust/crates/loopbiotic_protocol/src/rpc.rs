@@ -179,8 +179,12 @@ pub enum ViolationClass {
     MalformedDiff,
     /// The patch targets a different file than the accepted source location.
     WrongFile,
-    /// The card exceeds the file/hunk/changed-line limits.
+    /// One `@@` hunk still contains multiple disconnected change runs.
     MultiHunk,
+    /// A patch response targets more than the single allowed file.
+    MultiFile,
+    /// A one-file response exceeds its hunk, operation, or changed-line bound.
+    OversizedBatch,
     /// A required card field is empty or structurally invalid.
     MissingField,
     /// The card kind is not allowed in the current session state.
@@ -275,6 +279,18 @@ mod tests {
         assert_eq!(
             parsed.violation_class,
             Some(ViolationClass::ContextMismatch)
+        );
+    }
+
+    #[test]
+    fn multi_file_is_distinct_from_multi_hunk_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(ViolationClass::MultiFile).unwrap(),
+            json!("multi_file")
+        );
+        assert_eq!(
+            serde_json::to_value(ViolationClass::MultiHunk).unwrap(),
+            json!("multi_hunk")
         );
     }
 

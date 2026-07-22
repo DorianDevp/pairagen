@@ -1,6 +1,6 @@
 use std::fs;
 
-use loopbiotic_protocol::{ProjectLspClient, ProjectSignals};
+use loopbiotic_protocol::{ProjectLspClient, ProjectSignals, validate_project_metadata};
 
 use super::ProjectProfiler;
 
@@ -105,4 +105,104 @@ fn unrelated_root_does_not_activate_technology_adapters() {
     assert_eq!(profile.kind, "source_workspace");
     assert!(profile.adapters.is_empty());
     assert!(profile.technologies.is_empty());
+}
+
+#[test]
+fn go_module_reports_toolchain_dependencies_and_test_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        root,
+        "go.mod",
+        r#"module example.com/service
+
+go 1.24.0
+toolchain go1.24.5
+
+require (
+    github.com/jackc/pgx/v5 v5.7.5
+    golang.org/x/sync v0.15.0 // indirect
+)
+"#,
+    );
+
+    let profile = ProjectProfiler.inspect(root, &ProjectSignals::default());
+
+    assert_eq!(profile.kind, "go_module");
+    assert_eq!(profile.adapters, ["go-workspace"]);
+    assert_eq!(technology(&profile, "Go"), "toolchain go1.24.5");
+    assert_eq!(profile.areas.len(), 1);
+    assert_eq!(profile.areas[0].name, "example.com/service");
+    assert_eq!(profile.areas[0].path, std::path::Path::new("."));
+    assert_eq!(
+        profile.areas[0].dependencies,
+        [
+            "github.com/jackc/pgx/v5@v5.7.5",
+            "golang.org/x/sync@v0.15.0"
+        ]
+    );
+    assert!(
+        profile
+            .commands
+            .iter()
+            .any(|command| command.command == "go test ./...")
+    );
+    validate_project_metadata(Some(&profile), &[]).unwrap();
+}
+
+#[test]
+fn go_work_reports_bounded_workspace_modules() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(
+        root,
+        "go.work",
+        r#"go 1.24.0
+
+use (
+    ./services/api
+    ./libs/model
+    ../outside
+)
+"#,
+    );
+    write(
+        root,
+        "services/api/go.mod",
+        "module example.com/api\n\ngo 1.24.0\nrequire example.com/model v0.0.0\n",
+    );
+    write(
+        root,
+        "libs/model/go.mod",
+        "module example.com/model\n\ngo 1.24.0\n",
+    );
+
+    let profile = ProjectProfiler.inspect(root, &ProjectSignals::default());
+
+    assert_eq!(profile.kind, "go_workspace");
+    assert_eq!(technology(&profile, "Go"), "go 1.24.0");
+    assert_eq!(profile.areas.len(), 2);
+    assert_eq!(profile.areas[0].path, std::path::Path::new("libs/model"));
+    assert_eq!(profile.areas[1].path, std::path::Path::new("services/api"));
+    assert_eq!(profile.areas[1].dependencies, ["example.com/model@v0.0.0"]);
+    assert_eq!(
+        profile.commands[0].command,
+        "go test ./libs/model/... ./services/api/..."
+    );
+    validate_project_metadata(Some(&profile), &[]).unwrap();
+}
+
+#[test]
+fn go_and_javascript_mark_the_root_as_polyglot() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write(root, "go.mod", "module example.com/api\n\ngo 1.23.0\n");
+    write(root, "package.json", r#"{"private":true}"#);
+
+    let profile = ProjectProfiler.inspect(root, &ProjectSignals::default());
+
+    assert_eq!(profile.kind, "polyglot_monorepo");
+    assert!(profile.adapters.contains(&"go-workspace".into()));
+    assert!(profile.adapters.contains(&"package-workspace".into()));
+    validate_project_metadata(Some(&profile), &[]).unwrap();
 }

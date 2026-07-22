@@ -57,6 +57,12 @@ The two Windows create a psychological boundary:
   contains work, explanations, and safe representations, never an invitation to
   surrender the next decision.
 
+AgentWindow answers in the natural language of the most recently submitted
+PromptWindow text unless that text explicitly asks for another output language.
+Technical identifiers stay exact. A Reply therefore sounds like a continuation
+of the user's current conversation, not a reset to the language of the original
+goal.
+
 Reusing AgentWindow across thinking, response, and Widget Views creates
 continuity. Spawning a new Window for progress, callstack, files, recovery, or a
 new answer feels fragmented and violates the product character even if each
@@ -130,6 +136,14 @@ authorized. Reject feels respected immediately: no model interpretation, no
 replacement attempt, and no token-spending rejection turn.
 Until that decision is made, the ordinary prompt route stays quiet; a pending
 mutation is never abandoned through a side door.
+
+Several hunks in one file should feel like one prepared thought reviewed at a
+human pace, not like repeated model negotiations. Their dependency-rated order
+puts declarations and producers before consumers, while AgentWindow exposes
+only the current hunk and its place in the sequence. Accept advances locally and
+quietly. Reject stops the sequence completely; the model does not speculate
+about a replacement until the user submits a Reply. A multi-file response is a
+different boundary and must never be disguised as this local sequence.
 
 After Reject, PromptWindow opens without removing AgentWindow. The user can
 explain the objection, close PromptWindow and return focus to the paused
@@ -316,6 +330,12 @@ continues prior authorization; Reject pauses without asking the model to react.
 Offer useful structure and explanations. Preserve provenance and name incomplete
 knowledge.
 
+Compactness must increase signal rather than erase substance. A broad review
+names the concrete types or symbols involved, the invariant at stake, why each
+recommendation matters, and meaningful trade-offs. Several related priorities
+may live in one Finding; a bare instruction to “improve” or “refactor” is not a
+useful structured answer.
+
 Confidence means honoring the visible mode exactly. The agent does not guess
 whether prose means investigation or implementation. When the user selects
 `fix` or `propose`, it prepares the reviewed diff instead of inserting a Finding
@@ -352,6 +372,10 @@ counters, action rows, and persistent chrome.
 - Instruction selection feels deliberate because autoload is marked, optional
   files are explicitly chosen, and the selection lasts exactly one session.
 - Structured explanations feel grounded in real editor data.
+- Responses retain the language of the latest user prompt, including across
+  Reply and internal repair turns.
+- Review answers are compact but concrete enough to support a decision, rather
+  than merely naming work that should be done.
 - Waiting feels observable and interruptible, not theatrical.
 - Completion and Stop remain quiet.
 - A direct implementation request feels understood: it reaches Patch Review

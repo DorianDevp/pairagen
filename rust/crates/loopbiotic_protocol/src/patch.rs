@@ -6,10 +6,15 @@ use crate::context::ContextBundle;
 
 pub type PatchId = String;
 
+/// A backend response may target only one file. Cross-file work remains a
+/// sequence of separately generated and reviewed turns.
 pub const MAX_PATCH_FILES: usize = 1;
-/// Maximum unified-diff headers per patch. The patch validator additionally
-/// requires one contiguous change run inside that header.
-pub const MAX_HUNKS_PER_PATCH: usize = 1;
+/// Maximum unified-diff headers accepted for one file from a backend response.
+/// The harness splits them into one-hunk review cards before anything is shown.
+pub const MAX_HUNKS_PER_PATCH: usize = 16;
+/// Maximum total review steps materialized from one backend response, including
+/// separate change runs that arrived under one unified-diff header.
+pub const MAX_REVIEW_QUEUE_HUNKS: usize = 16;
 pub const MAX_CHANGED_LINES: usize = 32;
 /// Maximum filesystem operations (moves/renames) in one reviewed proposal.
 pub const MAX_FILE_OPS: usize = 16;

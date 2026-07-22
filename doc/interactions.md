@@ -121,6 +121,17 @@ continues until completion, explicit cancellation, prompt interruption, or Stop.
   `explain` and `review` require Finding; `investigate` requires Hypothesis.
   Choice, denial, location, and error remain valid safety exits where allowed.
   The backend must never infer a different mode from keywords or phrasing.
+- The submitted text becomes the session's latest user prompt. Every backend
+  writes user-visible card fields in that prompt's natural language unless the
+  prompt explicitly requests another output language. Source identifiers,
+  paths, commands, and excerpts remain exact. Backend-only continuations and
+  contract repairs reuse the same language because no newer user prompt exists.
+- A broad `review` request is answered across its requested scope: one Finding
+  body may carry two to four prioritized, related findings or alternatives with
+  exact types or symbols, the relevant invariant, why the change matters, and
+  its trade-off. It must not collapse to a vague “improve/refactor this” or an
+  arbitrary single next move. `explain` answers the causal question directly;
+  `investigate` remains one falsifiable hypothesis with exact next evidence.
 - Context selected in Widgets is presented separately from implicit ranked
   context. The user can inspect and remove it before submit.
 - Submitting sends one immutable snapshot of prompt text, the mode visible at
@@ -154,11 +165,13 @@ inspect an immutable fact set in parallel; their outputs are merged and sorted
 deterministically. The profile lists the adapter IDs that contributed evidence.
 
 The shipped POC includes package-workspace, TypeScript, Angular, React,
-Excalidraw, RxJS, Deno, Nx, Cargo/Rust, Axum, SQLx, Tokio, Docker Compose, and
-Neovim-LSP adapters. It resolves installed npm versions from `deno.lock`, Nx
-areas and `implicitDependencies`, Cargo workspace members, Rust edition and
-selected framework dependencies, Compose services, Deno tasks, and bounded
-language-server capabilities. No adapter knows the Libregraf project name.
+Excalidraw, RxJS, Deno, Nx, Go, Cargo/Rust, Axum, SQLx, Tokio, Docker Compose,
+and Neovim-LSP adapters. It resolves installed npm versions from `deno.lock`,
+Nx areas and `implicitDependencies`, Go modules, language/toolchain versions and
+versioned requirements from `go.work` and `go.mod`, Cargo workspace members,
+Rust edition and selected framework dependencies, Compose services, Deno tasks,
+and bounded language-server capabilities. No adapter knows the Libregraf
+project name.
 
 Instruction discovery lists safe `.md` files at the workspace root and any
 configured autoload paths. Entries must remain inside the workspace, be regular
@@ -171,6 +184,12 @@ The selection persists from session start through every Reply. Reply snapshots
 the current selection and updates the harness before the turn begins. Stop and
 Reset clear the catalog, selection, and ProjectProfile. A different workspace
 cannot replace this metadata inside an active session.
+
+The session retains the original prompt as its stable goal and separately stores
+the most recently submitted user prompt. Before each Reply, prompt-driven
+workspace-symbol hints and ranked source context are recomputed from the Reply
+text, then included in that turn's immutable snapshot. They do not stay pinned
+to vocabulary from the original goal.
 
 The OpenAI-compatible local backend may supplement submitted context through a
 Rust-owned evidence loop. It uses provider-stored response chains per session
@@ -198,7 +217,8 @@ Submitting a Reply through PromptWindow carries that Reply Window's selected
 mode through `session/reply`. In `fix` or `propose`, Patch is required;
 explanation, investigation, and review modes keep their typed response contracts.
 A Reply must never silently inherit or infer a backend-only mode that is absent
-from its visible PromptWindow.
+from its visible PromptWindow. The Reply text also becomes the language and
+prompt-relevance source for the turn and later backend-only continuations.
 
 ## Agent response behavior
 
@@ -370,13 +390,23 @@ The current editable diff and explicit review gate remain canonical.
 3. The user may edit the proposed content before deciding.
 4. Accept verifies source freshness, applies the edited proposal, and reports the
    accepted step.
-5. When an authorized Goal has remaining work, Accept continues it automatically
-   until the next review boundary or Goal completion.
-6. Reject restores accepted source, pauses the Goal locally, and does not run the
+5. A backend response may contain a bounded set of hunks for exactly one file.
+   Rust also separates multiple change runs that arrived under one `@@` header,
+   dependency-rates the resulting hunks, and stably prioritizes declarations and
+   other producers before consumers. Multi-file responses remain invalid and
+   are reported as `multi_file`, never as a `multi_hunk` failure.
+6. AgentWindow presents only the first rated hunk. Accept applies it and presents
+   the next queued hunk locally with zero model turns; source context is
+   revalidated at every boundary. Speculative continuation is disabled until
+   the local queue is fully accepted.
+7. When an authorized Goal has remaining work after the queue drains, Accept
+   continues it automatically until the next review boundary or Goal completion.
+8. Reject restores accepted source, discards every unaccepted hunk from that
+   response, pauses the Goal locally, and does not run the
    model or ask it to interpret the rejection.
-7. AgentWindow changes from Review to a `paused/rejected` View containing Reply
+9. AgentWindow changes from Review to a `paused/rejected` View containing Reply
    and Quit. The rejected proposal can no longer be accepted.
-8. Reject opens PromptWindow while keeping that AgentWindow View visible. The
+10. Reject opens PromptWindow while keeping that AgentWindow View visible. The
    user may explain the rejection and submit a revised request, close
    PromptWindow and return to AgentWindow, or Quit the session.
 
@@ -440,6 +470,10 @@ rejects a mixed card and asks the model to sequence them as separate steps.
 - proposed and accepted source remain distinguishable;
 - stale-source and path validation occur again at Accept time;
 - rejection never generates an automatic replacement;
+- same-file multi-hunk responses are split, dependency-rated, and reviewed
+  locally; multi-file responses are never folded into that queue;
+- rejecting any queued hunk discards the remaining local queue, and only a
+  later PromptWindow submission may authorize another strategy;
 - each accepted incremental boundary must compile/type-check independently;
 - Accept may continue only an already authorized Goal.
 

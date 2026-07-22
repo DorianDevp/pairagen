@@ -164,8 +164,9 @@ fn goal_loop_schema(contract: &crate::CardContract) -> Value {
     let mut patches = patch_schema(contract)["properties"]["patches"].clone();
     patches["type"] = json!(["array", "null"]);
     schema["properties"]["patches"] = patches;
-    // Goal patch turns return one hunk plus the remaining coherent steps.
-    // Null stays legal for attention cards and a planless final hunk.
+    // Goal patch turns may return a same-file hunk batch plus the remaining
+    // coherent steps. Null stays legal for attention cards and a planless
+    // final batch.
     schema["properties"]["plan"] = json!({
         "anyOf": [plan_schema(), {"type": "null"}]
     });
@@ -412,7 +413,10 @@ mod tests {
         assert!(patch["properties"].get("diff").is_none());
         assert_eq!(patch["properties"]["hunks"]["type"], "array");
         assert_eq!(schema["properties"]["patches"]["maxItems"], 1);
-        assert_eq!(patch["properties"]["hunks"]["maxItems"], 1);
+        assert_eq!(
+            patch["properties"]["hunks"]["maxItems"],
+            loopbiotic_protocol::MAX_HUNKS_PER_PATCH
+        );
     }
 
     #[test]

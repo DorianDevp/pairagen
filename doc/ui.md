@@ -129,6 +129,21 @@ Window. Progress must become the response in the same Window. A Widget detail or
 file chooser replaces or nests within AgentWindow rather than floating as a new
 surface.
 
+Every user-visible response uses the natural language of the most recently
+submitted PromptWindow text. An explicit request for a different output language
+wins. Identifiers, paths, commands, and source excerpts remain exact. Internal
+continuations and contract repairs retain that language because they do not
+introduce newer user intent.
+
+The selected non-mutating mode also controls the response's useful shape. A
+review of a broad design question may place two to four prioritized, related
+findings or alternatives in one Finding body, with concrete symbols, invariants,
+reasons, and trade-offs; it is not reduced to a generic recommendation or one
+arbitrary next move. Explain answers the requested causal scope directly, while
+Investigate stays focused on one falsifiable hypothesis and the next evidence
+that would confirm or reject it. These are Views inside the existing
+AgentWindow, not additional cards or product Windows.
+
 In `fix` or `propose`, the next AgentWindow response is Patch Review unless the
 agent must deny, report an error, request a location, or ask a genuinely blocking
 question. The agent cannot silently downgrade a selected patch mode to a
@@ -192,6 +207,12 @@ the agent comment and review controls. The editor is not a third Loopbiotic
 Window.
 
 - Modified files use the current editable inline diff presentation.
+- A same-file backend batch is represented as a locally ordered sequence of
+  ordinary Patch Review Views. AgentWindow and the editor show exactly one hunk
+  at a time, with its position in the sequence. Accept replaces it with the next
+  queued hunk; no additional Window or model response appears between them.
+- Multi-file patch responses are not a review sequence. They fail the backend
+  contract and must be regenerated as separate one-file responses.
 - A new file is reviewed as a diff from empty content.
 - A new directory has no textual diff, so AgentWindow shows a concise creation
   manifest containing the exact workspace-relative path.

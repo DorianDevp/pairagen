@@ -21,11 +21,16 @@ There is no automatic intent-routing mode. Every Prompt and Reply visibly owns
 one user-selected mode. Fix and propose require a reviewed patch; explain,
 investigate, and review require their non-mutating response kinds. The safe
 configured default is investigate. A patch remains inert until explicit Accept.
-Goal turns remain small: one file, one uninterrupted change block, at most 32
-changed lines, plus a plan of the remaining coherent steps. Changed lines
-separated by unchanged context count as multiple hunks even under one `@@`
-header and are rejected. Only an active goal may prepare the next patch while
-the current hunk is reviewed.
+Patch responses remain bound to exactly one file but may contain a bounded batch
+of hunks, with at most 32 changed lines per hunk. Changed runs separated by
+unchanged context under one `@@` header are split locally too. Loopbiotic rates
+dependencies, places declarations and other producers before consumers, and
+shows one inert hunk at a time. Multi-file responses remain invalid.
+
+Accept shows the next queued hunk without contacting the model. No speculative
+turn runs while that queue is active. Reject discards its unaccepted remainder
+without a model turn and opens Reply; only a submitted user response may ask for
+a different strategy.
 
 Every proposed patch must compile and type-check when applied by itself to the
 currently accepted source. Dependencies come first: declarations, interfaces,
@@ -87,13 +92,20 @@ model for the current mode's phase (patch for fix/propose, discovery otherwise)
 and persists per agent like |:LoopbioticModel| / |:LoopbioticDiscoveryModel|,
 keeping the prompt window and text open.
 
+Agent responses use the natural language of the latest submitted Prompt or
+Reply unless that prompt explicitly requests another output language. Review
+answers cover the requested scope with concrete prioritized findings, reasons,
+and trade-offs rather than a generic single next step. Reply also refreshes
+prompt-driven source context from its own text instead of remaining tied to the
+original goal's vocabulary.
+
 PROJECT INTELLIGENCE AND SKILLS                  *loopbiotic-project-skills*
 
 Loopbiotic derives a bounded ProjectProfile in Rust. A registry automatically
 activates independent adapters from root markers such as deno.json,
-package.json, nx.json, Cargo.toml, and Compose files. Root facts are read
-concurrently and matching adapters run in parallel; no adapter knows a project
-name. Lua contributes only facts from already-active Neovim LSP clients.
+package.json, nx.json, go.work, go.mod, Cargo.toml, and Compose files. Root facts
+are read concurrently and matching adapters run in parallel; no adapter knows a
+project name. Lua contributes only facts from already-active Neovim LSP clients.
 
 Detection is local and deterministic: it does not run commands, contact the
 network, call MCP, or spend an agent turn. The profile carries activated adapter

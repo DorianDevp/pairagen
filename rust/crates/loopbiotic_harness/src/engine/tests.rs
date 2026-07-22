@@ -101,7 +101,7 @@ async fn rejects_apply_before_patch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn explicit_goal_repairs_two_change_blocks_to_declaration_first() {
+async fn explicit_goal_queues_same_file_hunks_declaration_first_without_retry() {
     let backend = Arc::new(BatchGoalBackend::default());
     let reads = Arc::new(AtomicUsize::new(0));
     let mut engine = Engine::new(backend.clone());
@@ -124,26 +124,94 @@ async fn explicit_goal_repairs_two_change_blocks_to_declaration_first() {
         .await
         .unwrap();
 
-    let Card::Patch(card) = result.card else {
+    let Card::Patch(card) = &result.card else {
         panic!("expected a repaired declaration-first patch");
     };
     assert_eq!(
         card.patches[0].diff,
-        "@@ -1,1 +1,2 @@\n+interface Work {}\n first\n"
+        "@@ -1,2 +1,3 @@\n+interface Work {}\n first\n middle\n"
     );
-    assert_eq!(result.attempts.len(), 2);
-    assert_eq!(result.attempts[0].outcome, "contract_retry");
+    assert_eq!(result.attempts.len(), 1);
+    assert_eq!(result.attempts[0].outcome, "accepted");
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
     assert_eq!(
-        result.attempts[0].violation_class,
-        Some(loopbiotic_protocol::ViolationClass::MultiHunk)
+        engine.sessions[&result.session_id]
+            .pending_patch_cards
+            .len(),
+        1
     );
-    assert_eq!(result.attempts[1].outcome, "accepted");
+    assert!(engine.sessions[&result.session_id].local_review_batch_active);
     assert_eq!(
         reads.load(Ordering::SeqCst),
         0,
         "current-file validation must reuse the fresh action context"
     );
+    assert!(engine.prefetches.is_empty());
     assert!(engine.continuations.is_empty());
+
+    let second = engine
+        .apply_result(accept(
+            &result.session_id,
+            &result.card,
+            "interface Work {}\nfirst\nmiddle\nlast",
+        ))
+        .await
+        .unwrap();
+    let Card::Patch(second_card) = &second.card else {
+        panic!("expected locally queued consumer hunk");
+    };
+    assert!(second_card.patches[0].diff.contains("-last\n+Work"));
+    assert_eq!(second.turn_token_usage.total_tokens, 0);
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+
+    let rejected = engine
+        .apply_result(PatchApplyResult {
+            session_id: second.session_id.clone(),
+            card_id: second.card.id().into(),
+            accepted: false,
+            patch_ids: vec![second_card.patches[0].id.clone()],
+            changed_files: vec![],
+            error: None,
+            context: editor_context("interface Work {}\nfirst\nmiddle\nlast"),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(rejected.card, Card::Error(_)));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    assert!(!engine.sessions[&second.session_id].local_review_batch_active);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn same_file_batch_expands_a_partial_active_buffer_before_validation() {
+    let backend = Arc::new(BatchGoalBackend::default());
+    let reads = Arc::new(AtomicUsize::new(0));
+    let mut engine = Engine::new(backend.clone());
+    let observed_reads = reads.clone();
+    engine.set_source_context_provider(Arc::new(move |file, _session_id| {
+        let observed_reads = observed_reads.clone();
+        Box::pin(async move {
+            observed_reads.fetch_add(1, Ordering::SeqCst);
+            let mut context = editor_context("first\nmiddle\nlast");
+            context.file = file;
+            Some(context)
+        })
+    }));
+    let mut goal = params();
+    goal.mode = Mode::Investigate;
+    goal.buffer_text = "middle\nlast".into();
+    goal.buffer_start_line = 2;
+    let start = engine.start(goal).await.unwrap();
+
+    let result = engine
+        .action(&start.session_id, Action::Goal)
+        .await
+        .unwrap();
+
+    assert!(matches!(result.card, Card::Patch(_)));
+    assert_eq!(result.attempts.len(), 1);
+    assert_eq!(result.attempts[0].outcome, "accepted");
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -180,7 +248,7 @@ async fn explicit_goal_rejects_a_multi_file_batch() {
 
     assert!(matches!(result.card, Card::Error(_)));
     assert!(result.attempts.iter().all(|attempt| {
-        attempt.violation_class == Some(loopbiotic_protocol::ViolationClass::MultiHunk)
+        attempt.violation_class == Some(loopbiotic_protocol::ViolationClass::MultiFile)
     }));
     assert_eq!(reads.load(Ordering::SeqCst), 0);
     assert!(engine.continuations.is_empty());
@@ -1849,7 +1917,15 @@ async fn rejecting_a_patch_cancels_read_only_speculation_without_redrafting() {
     );
 }
 
-type RecordedExpectation = (Option<CardKind>, String, Vec<String>, bool, Vec<String>);
+type RecordedExpectation = (
+    Option<CardKind>,
+    String,
+    Vec<String>,
+    bool,
+    Vec<String>,
+    String,
+    usize,
+);
 
 #[derive(Default)]
 struct ExpectationRecorder {
@@ -1870,6 +1946,8 @@ impl BackendAdapter for ExpectationRecorder {
                 .as_ref()
                 .map(|profile| profile.adapters.clone())
                 .unwrap_or_default(),
+            req.session.latest_user_prompt.clone(),
+            req.card_contract.max_body_chars,
         ));
         self.inner.next_card(req).await
     }
@@ -1877,6 +1955,34 @@ impl BackendAdapter for ExpectationRecorder {
     fn capabilities(&self) -> BackendInfo {
         self.inner.capabilities()
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reply_becomes_the_language_and_context_prompt_for_later_turns() {
+    let backend = Arc::new(ExpectationRecorder::default());
+    let mut engine = Engine::new(backend.clone());
+    let mut start_params = params();
+    start_params.prompt = "Review the relation tree".into();
+    start_params.mode = Mode::Review;
+    let start = engine.start(start_params).await.unwrap();
+
+    engine
+        .reply(
+            &start.session_id,
+            "Porównaj konkretne warianty typów".into(),
+            Mode::Review,
+        )
+        .await
+        .unwrap();
+
+    let requests = backend.requests.lock().unwrap().clone();
+    assert_eq!(requests[0].5, "Review the relation tree");
+    assert_eq!(requests[1].5, "Porównaj konkretne warianty typów");
+    assert_eq!(requests[1].6, 3_600);
+    assert_eq!(
+        engine.get(&start.session_id).unwrap().latest_user_prompt,
+        "Porównaj konkretne warianty typów"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -23,8 +23,9 @@ pub(super) struct Prefetch {
     handle: tokio::task::JoinHandle<Result<BackendResponse>>,
 }
 
-/// A speculative goal-continuation turn: while the user reviews one explicit
-/// goal hunk, the next small hunk is generated on the same backend session.
+/// A speculative goal-continuation turn: while the user reviews a single-hunk
+/// goal slice, the next one-file slice is generated on the same backend
+/// session. Same-file batches explicitly disable this path.
 pub(super) struct Continuation {
     handle: tokio::task::JoinHandle<Result<BackendResponse>>,
 }
@@ -63,7 +64,11 @@ impl Engine {
         let Some(session) = self.sessions.get(session_id) else {
             return;
         };
-        if session.state != SessionState::PatchShown || session.goal_active {
+        if session.state != SessionState::PatchShown
+            || session.goal_active
+            || !session.pending_patch_cards.is_empty()
+            || session.local_review_batch_active
+        {
             return;
         }
         if !matches!(
@@ -122,9 +127,9 @@ impl Engine {
     }
 
     /// Speculatively requests the next goal slice in the background while the
-    /// user still reviews the current slice's hunks. Only fires when the
-    /// pending slice's plan says more slices follow; consumed by
-    /// `take_goal_continuation` once the review queue drains.
+    /// user reviews a single-hunk slice. A same-file batch is drained entirely
+    /// through the local queue first. Only fires when the plan says more slices
+    /// follow; consumed by `take_goal_continuation` after acceptance.
     pub(super) async fn schedule_goal_continuation(&mut self, session_id: &str) {
         let Some(session) = self.sessions.get(session_id) else {
             return;
@@ -132,6 +137,8 @@ impl Engine {
         if !session.goal_active
             || !session.goal_slice_continues
             || session.state != SessionState::PatchShown
+            || !session.pending_patch_cards.is_empty()
+            || session.local_review_batch_active
         {
             return;
         }

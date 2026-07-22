@@ -103,16 +103,17 @@ pub(super) fn completed_patch_steps(session: &Session) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Result<Card> {
+pub(super) fn queue_patch_cards(session: &mut Session, card: Card) -> Result<Card> {
     let Card::Patch(card) = card else {
         session.pending_patch_cards.clear();
+        session.local_review_batch_active = false;
         session.goal_slice_continues = false;
         return Ok(card);
     };
 
-    // Validation already guarantees one file and one hunk. A plan describes
-    // the remaining coherent steps; a planless card may only complete via
-    // its explicit goal_complete flag.
+    // Validation guarantees one file, while a backend response may contain a
+    // bounded batch of hunks. A plan describes work beyond this local batch;
+    // every queued hunk remains inert behind its own Accept/Reject gate.
     let plan = card.plan.clone();
     let completes = plan
         .as_ref()
@@ -126,27 +127,21 @@ pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Resul
         let mut card = card;
         card.goal_complete = completes;
         session.pending_patch_cards.clear();
+        session.local_review_batch_active = false;
         return Ok(Card::Patch(card));
     }
 
+    let batch_id = card.id.clone();
+    let batch_title = card.title.clone();
+    let single_patch_id = card.patches.first().map(|patch| patch.id.clone());
     let mut cards = Vec::new();
     for patch in card.patches {
         let diff = loopbiotic_patch::UnifiedDiff::parse(&patch.diff)?;
-        let hunk_count = diff.hunks.len();
         for (index, hunk) in diff.hunks.into_iter().enumerate() {
-            let suffix = if hunk_count == 1 {
-                String::new()
-            } else {
-                format!(" ({}/{hunk_count})", index + 1)
-            };
-            let explanation = if hunk_count == 1 {
-                patch.explanation.clone()
-            } else {
-                format!("{} Hunk {}/{}.", patch.explanation, index + 1, hunk_count)
-            };
+            let explanation = patch.explanation.clone();
             cards.push(loopbiotic_protocol::PatchCard {
                 id: format!("{}_h{}", card.id, cards.len() + 1),
-                title: format!("{}{}", card.title, suffix),
+                title: batch_title.clone(),
                 explanation: explanation.clone(),
                 warnings: card.warnings.clone(),
                 goal_complete: false,
@@ -160,6 +155,26 @@ pub(super) fn queue_goal_patch_cards(session: &mut Session, card: Card) -> Resul
                 file_ops: vec![],
                 actions: card.actions.clone(),
             });
+        }
+    }
+
+    loopbiotic_patch::PatchCoherence::order_review_cards(&mut cards);
+    let review_count = cards.len();
+    session.local_review_batch_active = review_count > 1;
+    if review_count == 1 {
+        cards[0].id = batch_id;
+        if let (Some(original), Some(patch)) = (single_patch_id, cards[0].patches.first_mut()) {
+            patch.id = original;
+        }
+    } else {
+        for (index, card) in cards.iter_mut().enumerate() {
+            card.title = format!("{} ({}/{review_count})", batch_title, index + 1);
+            card.explanation = format!(
+                "{} Review step {}/{}; declarations and dependencies are ordered before consumers where detectable.",
+                card.explanation,
+                index + 1,
+                review_count
+            );
         }
     }
 

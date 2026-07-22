@@ -6,6 +6,13 @@ return function(t)
   local surfaces = require("loopbiotic.surfaces")
   local ui = require("loopbiotic.ui")
 
+  t.test("workspace symbol queries keep the concrete short subject", function()
+    t.eq(
+      context.workspace_queries("How would you improve the tree types and why?", 3),
+      { "types", "tree" }
+    )
+  end)
+
   local function fixture()
     local root = vim.fn.tempname()
     vim.fn.mkdir(root .. "/apps/web-angular", "p")

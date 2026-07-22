@@ -189,6 +189,13 @@ title. Press `<C-k>` (`keymaps.modes`) inside the prompt to choose `fix`,
 and attached context and sends nothing until submit. Both a new session and a
 Reply transmit the mode visible at submit time.
 
+Agent responses follow the natural language of the latest submitted prompt;
+an explicit output-language request takes precedence, while identifiers and
+source text remain exact. Review answers cover the requested scope with
+prioritized concrete findings, reasons, and trade-offs instead of being forced
+into one generic “next move.” Explain remains a direct answer, and investigate
+remains one falsifiable hypothesis with the evidence needed next.
+
 ```lua
 require("loopbiotic").setup({
   agents = {
@@ -217,19 +224,21 @@ require("loopbiotic").setup({
 Loopbiotic gives every backend a deterministic `ProjectProfile` alongside the
 ranked source context. Lua only contributes cheap facts from already-active
 Neovim LSP clients. On session start, a Rust registry activates adapters from
-root markers such as `deno.json`, `package.json`, `nx.json`, `Cargo.toml`, and
-Compose files. Root facts are read concurrently, matching adapters run in
-parallel, and their results are merged deterministically. No adapter knows a
-project name.
+root markers such as `deno.json`, `package.json`, `nx.json`, `go.work`,
+`go.mod`, `Cargo.toml`, and Compose files. Root facts are read concurrently,
+matching adapters run in parallel, and their results are merged
+deterministically. No adapter knows a project name.
 
 The first POC includes independent adapters for package workspaces, TypeScript,
-Angular, React, Excalidraw, RxJS, Deno, Nx, Cargo/Rust, Axum, SQLx, Tokio,
+Angular, React, Excalidraw, RxJS, Deno, Nx, Go, Cargo/Rust, Axum, SQLx, Tokio,
 Docker Compose, and Neovim LSP. It records the adapter IDs that fired, exact
-versions from `deno.lock`, Nx project areas and dependencies, Cargo workspace
-members, project tasks, selected runtime/infrastructure versions, and bounded
-LSP capabilities. Profiling runs without an agent turn, command execution,
-network request, or MCP. This keeps frontier models on a direct evidence path
-while giving smaller local models facts they are less likely to infer reliably.
+versions from `deno.lock`, Nx project areas and dependencies, Go workspace
+modules, language/toolchain versions and versioned requirements, Cargo
+workspace members, project tasks, selected runtime/infrastructure versions, and
+bounded LSP capabilities. Profiling runs without an agent turn, command
+execution, network request, or MCP. This keeps frontier models on a direct
+evidence path while giving smaller local models facts they are less likely to
+infer reliably.
 
 The reproducible real-model A/B runner compares no profile/Skills, profile only,
 and profile plus selected Skills across the fixtures in
@@ -298,28 +307,31 @@ submission until cancellation settles. Slow-turn timing is recorded in the local
 compact, content-free instruction is injected into the next turn so the agent
 prioritizes an earlier useful response.
 
-For an explicit goal, each backend turn may return at most one file, one
-uninterrupted change block, and 32 changed lines, plus a plan of the remaining
-coherent steps. A single `@@` containing changed lines separated by unchanged
-context is still a batch and is rejected as multiple hunks. The next hunk may
-be prepared while the current one is reviewed.
-Accepting normally surfaces the next review boundary immediately. Rejecting is
-token-free: it restores accepted source, pauses the goal, changes AgentWindow to
-Reply/Quit, and opens PromptWindow for the user's explanation. No replacement is
-generated automatically. Source navigation stays inside the workspace, and
-every edit remains an inert draft until accepted.
+Each backend patch response may target exactly one file and contain a bounded
+batch of hunks, with at most 32 changed lines per hunk, plus a plan of coherent
+work beyond that batch. A single `@@` containing change runs separated by
+unchanged context is split locally too. Rust dependency-rates the resulting
+hunks, prioritizing declarations and other producers before consumers, then
+presents one editable hunk at a time. A multi-file response remains invalid and
+is returned to the model for a one-file correction.
+
+Accepting a hunk surfaces the next locally queued hunk with no model turn or
+token cost. No speculative continuation runs while that local queue is active.
+Rejecting any hunk discards the unaccepted remainder, restores accepted source,
+pauses the goal, changes AgentWindow to Reply/Quit, and opens PromptWindow for
+the user's explanation. Only a submitted Reply may ask the model for another
+strategy. Source navigation stays inside the workspace, and every edit remains
+an inert draft until accepted.
 
 Compiler acceptance is an invariant at every review boundary. Applying one
-proposed patch to the currently accepted source must leave the project compiling
-and type-checking without relying on a later patch. Dependency-producing work is
-ordered first: declarations, interfaces, types, imports, fields, functions, and
-compatibility shims must exist in an independently valid patch before a later
-patch references or implements them. For interface extraction this means one
-patch introduces the valid interface declaration; only after it is accepted may
-another patch replace the inline type or implement that interface. If no valid
-intermediate state fits one uninterrupted block, including the project's unused
-declaration checks, the agent must stop for a real decision instead of returning
-broken code or a batch.
+visible hunk after all previously accepted hunks must leave the project compiling
+and type-checking without relying on a later queued hunk. Dependency-producing
+work is ordered first: declarations, interfaces, types, fields, functions, and
+compatibility shims precede hunks that reference or implement them. For
+interface extraction this means the declaration is reviewed before replacement
+or implementation. If no compiler-valid same-file ordering exists, including
+the project's unused declaration or import checks, the agent must stop for a
+real decision instead of returning a broken sequence.
 
 Location-bearing responses do not move the editor asynchronously. Use the local
 Go-to control to open their evidence. Draft review moves to the proposed hunk;
@@ -338,7 +350,8 @@ exception because it resolves a pending source mutation.
 
 By default `backend.prefetch = "read_only"` prepares the next goal step while an
 ordinary draft is reviewed. It remains inert and can surface only after that
-draft is accepted. Set it to `"off"` to disable this.
+draft is accepted. Prefetch pauses while a same-file hunk batch is being reviewed.
+Set it to `"off"` to disable this.
 
 Cards show raw, cached, and non-cached turn and session usage against
 `backend.token_budget` (50,000 raw tokens by default).
@@ -376,7 +389,9 @@ configurable deadlines. Results outside the project root are discarded and
 duplicate locations from multiple language servers or methods are merged. This
 lets existing clients such as typescript-language-server, Angular LS, gopls,
 Intelephense and rust-analyzer act as a cheap semantic index. Diagnostics from
-clippy remain available through `vim.diagnostic`.
+clippy remain available through `vim.diagnostic`. A Reply recomputes its prompt
+hints and ranked context from the Reply text instead of retaining only the
+original goal's vocabulary.
 
 Codex app-server threads also fingerprint their supplied context. An unchanged
 buffer and unchanged ranked fragments are referenced from the preceding turn

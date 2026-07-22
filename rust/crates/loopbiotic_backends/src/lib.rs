@@ -32,7 +32,32 @@ pub use stream::*;
 /// Prompt guidance is backed by the patch validator's one-change-run gate;
 /// the dependency-order clauses cover compiler errors that cannot be inferred
 /// reliably from language-agnostic diff syntax alone.
-pub const IMPLEMENTATION_GUIDELINES: &str = "Compiler acceptance is a hard invariant for every patch. Applying this one proposed patch by itself to the currently accepted source must leave the project compiling and type-checking; never rely on a later patch to repair undefined symbols, missing declarations or imports, incompatible signatures, producer/consumer mismatches, schema drift, or an incomplete refactor. Order work by dependencies: introduce each declaration, type, interface, function, import, field, and compatibility shim in an independently compiler-valid patch before any later patch first references, implements, or depends on it. For interface or named-type extraction, the first patch contains ONLY the independently valid declaration and leaves every existing use byte-for-byte unchanged; only after that declaration patch is accepted may a later patch replace the inline type or implement the interface. A declaration-only preparation must also satisfy the project's unused-declaration compiler and lint rules; use the project's appropriate exported/public/annotation mechanism, or return choice/deny when no clean standalone declaration is valid. Never combine a declaration and its separated consumer change on one card, even when both fit inside one @@ header. Emit exactly one uninterrupted change block. In structured hunk lines, after the first add/remove record, a context record ends the change block and no later add/remove record is allowed. Prefer backward-compatible preparation such as declarations, adapters, overloads, defaults, or optional fields before changing consumers. If no compiler-valid intermediate state fits one uninterrupted block, return a blocking choice or deny instead of broken code or a batch.";
+pub const IMPLEMENTATION_GUIDELINES: &str = "Compiler acceptance is a hard invariant at every review boundary. A patch response targets exactly one file and may contain a bounded batch of hunks; Loopbiotic locally separates, dependency-rates, and presents those hunks one at a time. Never batch multiple files. Order same-file hunks by dependencies: introduce each declaration, type, interface, function, field, and compatibility shim before any hunk that first references, implements, or depends on it. Every hunk must be independently compiler-valid after the earlier hunks in that response have been accepted; never rely on a later hunk to repair undefined symbols, missing declarations or imports, incompatible signatures, producer/consumer mismatches, schema drift, or an incomplete refactor. For interface or named-type extraction, emit the independently valid declaration before the consumer replacement. A declaration-only preparation must also satisfy the project's unused-declaration compiler and lint rules; use the project's appropriate exported/public/annotation mechanism, or return choice/deny when no compiler-safe ordering exists. Each hunk contains one uninterrupted change block; a context record after add/remove ends that hunk's change block. Prefer backward-compatible preparation such as declarations, adapters, overloads, defaults, or optional fields before changing consumers.";
+
+/// Shared language contract for every model-backed adapter. The latest user
+/// prompt is carried separately from the stable original goal so a Reply can
+/// change the conversational language without losing goal continuity.
+pub const RESPONSE_LANGUAGE_GUIDELINE: &str = "Write every user-visible card field in the natural language used by latest_user_prompt. If that prompt explicitly requests another output language, follow that request. Do not translate code identifiers, paths, commands, or quoted source. When a backend-only continuation has no new user message, latest_user_prompt remains the authoritative language. Never fall back to the original session prompt when the latest prompt uses a different language.";
+
+/// Mode-specific depth and evidence contract. One structured card may still
+/// contain several prioritized review points; the card boundary is not a
+/// reason to collapse a broad design question into one vague recommendation.
+pub fn mode_response_guideline(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Review => {
+            "Review mode: answer the user's review question at its requested scope. For a broad design or API review, do not collapse the answer into one next move. Put 2-4 prioritized concrete findings or alternatives in the one Finding body when the evidence supports them. Name the exact types, symbols, or relationships involved; state the intended invariant; explain why the change helps; and include the relevant cost or tradeoff. Distinguish observed defects from design recommendations and optional follow-ups. Never answer only that something should be improved or refactored."
+        }
+        Mode::Explain => {
+            "Explain mode: answer the question directly and completely enough to remove the user's uncertainty. Ground the explanation in exact symbols and behavior, connect cause to effect, and include relevant limitations. Do not turn the answer into a generic next-step recommendation."
+        }
+        Mode::Investigate => {
+            "Investigate mode: return one falsifiable hypothesis grounded in the strongest available evidence, explain why it is currently most likely, and name the exact next location or observation that would confirm or disprove it."
+        }
+        Mode::Fix | Mode::Propose => {
+            "Patch mode: return the required reviewed patch and explain the concrete behavior it changes; do not substitute a finding for the requested patch."
+        }
+    }
+}
 
 /// Contract shared by every backend for the editor-resolved static Flow
 /// graph. Keeping this text identical prevents adapters from silently
@@ -293,7 +318,11 @@ pub fn estimate_tokens(text: &str) -> usize {
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionSnapshot {
     pub id: String,
+    /// Original session goal. This remains stable for goal continuation.
     pub prompt: String,
+    /// Latest explicitly submitted PromptWindow text. Backends use its
+    /// language for user-visible card fields, including host continuations.
+    pub latest_user_prompt: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interaction_feedback: Vec<String>,
     pub completed_steps: Vec<String>,
@@ -324,6 +353,7 @@ pub(crate) fn test_request() -> BackendRequest {
         session: SessionSnapshot {
             id: "s_1".into(),
             prompt: "payload is empty".into(),
+            latest_user_prompt: "payload is empty".into(),
             interaction_feedback: vec![],
             completed_steps: vec![],
             known_observations: vec![],

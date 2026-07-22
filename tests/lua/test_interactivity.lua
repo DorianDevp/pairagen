@@ -242,6 +242,40 @@ return function(t)
     cleanup()
   end)
 
+  t.test("Reply refreshes workspace hints from its own prompt", function()
+    cleanup()
+    local source_buf = source()
+    vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "type Relation struct{}" })
+    state.session_id = "s_reply_context"
+
+    local context = require("loopbiotic.context")
+    local rpc = require("loopbiotic.rpc")
+    local original_workspace_hints = context.workspace_hints
+    local original_request = rpc.request
+    local queried_prompt
+    local sent
+    context.workspace_hints = function(prompt)
+      queried_prompt = prompt
+      return { { file = "schema.go", start_line = 1, end_line = 8, kind = "definition" } }
+    end
+    rpc.request = function(method, params)
+      sent = { method = method, params = params }
+    end
+
+    local ok, err = pcall(require("loopbiotic").submit_reply, "Wyjaśnij typ Relation", "review")
+    context.workspace_hints = original_workspace_hints
+    rpc.request = original_request
+    if not ok then
+      cleanup()
+      error(err, 0)
+    end
+
+    t.eq(queried_prompt, "Wyjaśnij typ Relation")
+    t.eq(sent.method, "session/reply")
+    t.eq(sent.params.context.hints[1].file, "schema.go")
+    cleanup()
+  end)
+
   t.test("Review prints and binds only the mutation decision plus local navigation", function()
     cleanup()
     local draft = source()

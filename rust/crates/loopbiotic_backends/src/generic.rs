@@ -96,6 +96,7 @@ pub(crate) fn structured_continuation_prompt(
                     "expected": req.card_contract.expected_kind,
                 },
                 "action": action_value(&req.action),
+                "response_guidance": crate::mode_response_guideline(&req.session.mode),
                 "last": req.session.last_summary,
                 "card_count": req.session.card_count,
             }),
@@ -107,6 +108,7 @@ pub(crate) fn structured_continuation_prompt(
             "interaction_feedback",
             json!(req.session.interaction_feedback),
         ),
+        ("latest_user_prompt", json!(req.session.latest_user_prompt)),
         (
             "ctx",
             if include_context {
@@ -131,10 +133,12 @@ fn prompt_with_contract(req: &BackendRequest, api_contract: &str) -> String {
             "For non-fix actions, do not return a patch op unless limits.goal_completion is true."
         ),
         json!(
-            "A non-goal patch is one small local pair-programming step: one file, one hunk, and no more changed lines than the supplied limit; its plan is null."
+            "A non-goal patch targets exactly one file and may contain a bounded same-file hunk batch. Each hunk has no more changed lines than the supplied limit and must compile after earlier hunks are accepted; its plan is null."
         ),
         json!(crate::IMPLEMENTATION_GUIDELINES),
         json!(crate::FLOW_GUIDELINES),
+        json!(crate::RESPONSE_LANGUAGE_GUIDELINE),
+        json!(crate::mode_response_guideline(&req.session.mode)),
         json!(
             "Explain why the next coherent block matters and return control to the user after that step."
         ),
@@ -143,7 +147,7 @@ fn prompt_with_contract(req: &BackendRequest, api_contract: &str) -> String {
     // the rules array survives across goal and non-goal turns.
     if req.card_contract.allow_goal_completion {
         rules.push(json!(
-            "Goal turn: return one small, compilable hunk within limits.changed_lines plus plan {remaining:[{file,summary}],complete}. Remaining entries are coherent steps and may repeat a file. Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary."
+            "Goal turn: return exactly one file with a bounded compiler-safe hunk batch, limits.changed_lines per hunk, plus plan {remaining:[{file,summary}],complete}. Put declarations and dependency producers before consumers. Remaining entries describe work after this batch and may repeat a file. Return choice only when a genuine user decision blocks all safe progress; otherwise keep advancing with patch or summary."
         ));
         rules.push(json!(
             "On a goal continuation (a.action is goal), continue with the next planned coherent step."
@@ -208,6 +212,7 @@ fn prompt_with_contract(req: &BackendRequest, api_contract: &str) -> String {
             "interaction_feedback",
             json!(req.session.interaction_feedback),
         ),
+        ("latest_user_prompt", json!(req.session.latest_user_prompt)),
         ("a", action_value(&req.action)),
         ("last", json!(req.session.last_summary)),
         ("n", json!(req.session.card_count)),
@@ -459,14 +464,13 @@ mod tests {
     #[test]
     fn generic_prompt_adds_the_slice_rule_only_on_goal_turns() {
         let mut req = crate::test_request();
-        assert!(!generic_prompt(&req).contains("one small, compilable hunk"));
         assert!(generic_prompt(&req).contains("Compiler acceptance is a hard invariant"));
-        assert!(generic_prompt(&req).contains("exactly one uninterrupted change block"));
+        assert!(generic_prompt(&req).contains("bounded same-file hunk batch"));
         assert!(generic_prompt(&req).contains("Do not use tools or searches to re-enumerate"));
 
         req.card_contract.allow_goal_completion = true;
         let goal = generic_prompt(&req);
-        assert!(goal.contains("one small, compilable hunk"));
+        assert!(goal.contains("bounded compiler-safe hunk batch"));
         assert!(goal.contains("plan {remaining:[{file,summary}],complete}"));
         assert!(goal.contains("next planned coherent step"));
     }
@@ -558,6 +562,20 @@ mod tests {
             "session bytes leaked into the static block: shared {shared} < static {static_block_len}"
         );
         assert!(a.starts_with("{\"api\":"));
+    }
+
+    #[test]
+    fn generic_review_uses_latest_prompt_language_and_concrete_review_guidance() {
+        let mut request = crate::test_request();
+        request.session.mode = loopbiotic_protocol::Mode::Review;
+        request.session.latest_user_prompt = "Porównaj warianty tych typów".into();
+        request.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Finding);
+
+        let prompt = generic_prompt(&request);
+
+        assert!(prompt.contains("Porównaj warianty tych typów"));
+        assert!(prompt.contains("natural language used by latest_user_prompt"));
+        assert!(prompt.contains("do not collapse the answer into one next move"));
     }
 
     #[test]

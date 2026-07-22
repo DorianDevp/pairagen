@@ -259,11 +259,11 @@ impl CodexAppBackend {
             "You are a local Loopbiotic pair-programming partner. You may use at most two targeted read-only project tool calls to find the next relevant code block. Stop searching once the supplied context supports an exact location. Never edit files. Return exactly one final JSON object matching the supplied output schema and no prose."
         };
         let developer_instructions = if goal_loop {
-            "Advance an explicitly authorized goal one small, compilable hunk at a time. Return one patch hunk plus a plan of remaining coherent steps, or a concise finding/choice when user attention is needed. Loopbiotic reviews every hunk locally. Preserve accepted progress and never repeat completed work."
+            "Advance an explicitly authorized goal through a compiler-safe same-file hunk batch plus a plan of remaining coherent steps, or a concise finding/choice when user attention is needed. Loopbiotic dependency-rates and reviews every hunk locally, one at a time. Preserve accepted progress and never repeat completed work."
         } else if patch_turn {
-            "Work as an equal pair-programming partner. Propose one coherent local block at the supplied location and explain why this is the useful next move. Do not take over the whole task. Return one structured patch hunk as an editable draft, not a finished agenda."
+            "Work as an equal pair-programming partner. Propose a bounded compiler-safe batch of structured hunks in exactly one file and explain why it is useful. Loopbiotic dependency-rates and reviews the hunks locally one at a time. Do not batch files or take over unrelated work."
         } else {
-            "Work as an equal pair-programming partner. Inspect only enough code to identify one coherent next move. Explain what you noticed, why it matters, and how the code reveals it. Do not dictate line-by-line work or plan the whole task. Return one exact location so the keyboard can pass back to the user."
+            "Work as an equal pair-programming partner. Honor the user-selected discovery mode and the per-turn response guidance. Answer the actual question at its requested scope, ground every claim in concrete code evidence, and use the structured card fields to return control to the user."
         };
 
         debug("starting codex thread");
@@ -473,8 +473,12 @@ impl CodexAppBackend {
         Ok(catalog)
     }
 
-    fn error_card(message: impl Into<String>) -> Card {
-        error_card("c_codex_app_error", "Codex app-server error", message)
+    fn unparsed_card(message: impl Into<String>) -> Card {
+        error_card(
+            crate::UNPARSED_OUTPUT_CARD_ID,
+            "Codex response was not machine-readable",
+            message,
+        )
     }
 }
 
@@ -508,7 +512,7 @@ impl BackendAdapter for CodexAppBackend {
     ) -> Result<BackendResponse> {
         let output = self.ask(&req, progress.as_ref()).await?;
         let card = parse::parse_card(&output.text, &req.card_contract)
-            .unwrap_or_else(|error| Self::error_card(format!("{}\n\n{}", error, output.text)));
+            .unwrap_or_else(|error| Self::unparsed_card(format!("{}\n\n{}", error, output.text)));
         let card = enforce_card_contract(card, &req.card_contract, "Codex", &output.text);
 
         Ok(BackendResponse {
@@ -654,16 +658,16 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
         let lead = if goal_action && continuing_goal {
             "- Continue with the next planned coherent step; the previous hunk was accepted.\n"
         } else if goal_action {
-            "- Begin with the earliest dependency-producing, independently compiler-valid step. Return that step only; no consumer or implementation may share its card.\n"
+            "- Begin with the earliest dependency-producing same-file batch. Put independently compiler-valid declarations before every consumer hunk.\n"
         } else {
             ""
         };
         format!(
             "{lead}\
              - Continue executing the original session goal from the accepted progress; never restart or repeat a completed step.\n\
-             - Return at most one file and exactly one uninterrupted, compilable change block changing at most {} added/removed lines. One @@ header is not enough: after context follows the first add/remove record, there must be no later add/remove record.\n\
-             - Inspect only enough project context to produce that next step. Tool reads are valid patch source because Loopbiotic verifies the hunk before review.\n\
-             - With the patch return plan: list the remaining coherent steps, each with its target file and one-line summary. A file may appear more than once. Set complete=true only when this hunk is the final step.\n\
+             - Return exactly one file with at most {} added/removed lines per hunk. You may return a bounded same-file hunk batch; each hunk contains one uninterrupted change block and must compile after the preceding hunks are accepted. Put declarations and dependency producers before consumers.\n\
+             - Inspect only enough project context to produce that next same-file batch. Tool reads are valid patch source because Loopbiotic verifies every hunk before review.\n\
+             - With the patch return plan: list coherent work remaining after this batch, each with its target file and one-line summary. A file may appear more than once. Set complete=true only when accepting every hunk in this response completes the goal.\n\
              - Create a missing file incrementally before steps that reference it.\n\
              - To move or rename files or directories, return a patch whose file_ops is [{{kind:\"move\",from,to}}] with workspace-relative paths and patches []. Never mix file_ops with hunks and never express a move as a diff; content fix-ups (imports) follow as the next step.\n\
              - Use open_location only when a required source cannot be inspected with read-only project tools.\n\
@@ -675,11 +679,10 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
         )
     } else if patch_turn {
         format!(
-            "- Return exactly one file and exactly one hunk changing at most {} added/removed lines.\n\
-             - Change one coherent local block in the supplied excerpt. Leave later blocks for later Loopbiotic cards.\n\
-             - Explain why this draft is the useful next move, not merely what lines it changes.\n\
-             - The step must be internally coherent: do not introduce undefined symbols or dangling references.\n\
-             - The code must remain type-correct after this hunk. Never change a field type while deferring its producer/initializer to a later card.\n\
+            "- Return exactly one file and a bounded batch of hunks, each changing at most {} added/removed lines.\n\
+             - Each hunk is one coherent local block; Loopbiotic orders and reviews them one at a time without another model turn.\n\
+             - Explain why this draft is useful, not merely what lines it changes.\n\
+             - Order declarations and dependency producers before consumers. Every hunk must leave the code type-correct after the preceding hunks are accepted.\n\
              - If a safe step needs unseen references or more changed lines, limit this hunk to self-contained preparation such as adding only the new struct definition.\n\
              - Context and remove lines must be exact, contiguous source lines from the supplied buffer; never omit source lines between two context lines.\n\
              - Use the supplied buffer excerpt as the only patch source. Diagnostics and ranked context are evidence only; never patch a different file or unseen block.\n\
@@ -689,21 +692,22 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
             req.card_contract.max_changed_lines
         )
     } else {
-        "- Find only one useful next move, not a plan for the whole solution.\n\
-         - Treat an editor diagnostic at or nearest the cursor as the strongest direct signal unless the source disproves it; a distant warning or deprecation must not displace a cursor-local error.\n\
-         - Inspect the supplied ranked project context first. Use targeted project search only when those fragments are insufficient.\n\
-         - Do not stop just because the initial excerpt is indirect or missing.\n\
-         - When the user names a destination or consumer such as a template, API, caller, or renderer, prefer that consumer block as the next location before changing its producer.\n\
-         - Explain what you noticed, why it matters now, and how the code led you there. Do not dictate keystrokes or a line-by-line walkthrough.\n\
-         - Return a concrete evidence/next/location pointing to that block so the editor can move there before Fix.\n\
-         - Never return a patch or completion summary on a conversational turn; hand the keyboard back after the answer."
-            .into()
+        format!(
+            "- {}\n\
+             - Treat an editor diagnostic at or nearest the cursor as the strongest direct signal unless the source disproves it; a distant warning or deprecation must not displace a cursor-local error.\n\
+             - Inspect the supplied ranked project context first. Use targeted project search only when those fragments are insufficient.\n\
+             - Do not stop just because the initial excerpt is indirect or missing.\n\
+             - When the user names a destination or consumer such as a template, API, caller, or renderer, inspect that consumer before making claims about its producer.\n\
+             - Use the card location as the strongest source anchor; the Finding body may cover multiple related review points when the question requires them.\n\
+             - Never return a patch or completion summary on a conversational turn; hand the keyboard back after the answer.",
+            crate::mode_response_guideline(&req.session.mode)
+        )
     };
 
     let output_contract = if goal_question {
         "- finding: concise explanation of the pending hunk"
     } else if goal_loop {
-        "- patch: one small structured hunk for local review; include goal_complete and plan {remaining: [{file, summary}], complete}\n\
+        "- patch: one same-file structured hunk batch for sequential local review; include goal_complete and plan {remaining: [{file, summary}], complete}\n\
 - open_location: when the next hunk belongs in another buffer; put the target in location (not next) and the explanation in reason (not message)\n\
 - choice: only for a blocking user decision\n\
 - summary: only when the complete original goal is satisfied"
@@ -736,7 +740,7 @@ fn prompt(req: &BackendRequest, include_context: bool) -> String {
     };
     let diagnostics = editor_diagnostics(req);
     let immediate_directive = if first_goal_patch {
-        "FIRST GOAL PATCH ONLY: return the earliest dependency-producing standalone change and nothing that consumes it. For interface or named-type extraction, add only the independently compiler-valid declaration now; leave the existing inline type, implementation, and every consumer byte-for-byte unchanged. Set goal_complete=false and put the consumer replacement in plan.remaining."
+        "FIRST GOAL BATCH: target exactly one file and order its independently compiler-valid hunks by dependencies. For interface or named-type extraction, put the standalone declaration hunk before replacement and implementation hunks. Put work outside this same-file batch in plan.remaining."
             .to_string()
     } else if let crate::BackendAction::ContractRetry(reason) = &req.action {
         format!("REPAIR THIS EXACT VIOLATION NOW: {reason}")
@@ -789,10 +793,12 @@ Allowed ops:
 {output_contract}
 
 Rules:
+{response_language}
 {turn_rules}
 {flow_guidelines}
 
 Session prompt: {prompt}
+Latest user prompt: {latest_user_prompt}
 Mode: {mode}
 Rust-adapter project profile: {project_profile}
 Active instruction skills:
@@ -808,6 +814,8 @@ Last card: {last}
 
 Immediate directive (highest priority for this response): {immediate_directive}"#,
         prompt = req.session.prompt,
+        latest_user_prompt = req.session.latest_user_prompt,
+        response_language = crate::RESPONSE_LANGUAGE_GUIDELINE,
         flow_guidelines = crate::FLOW_GUIDELINES,
         completed_steps =
             serde_json::to_string(&req.session.completed_steps).unwrap_or_else(|_| "[]".into()),
@@ -891,6 +899,7 @@ mod tests {
             session: crate::SessionSnapshot {
                 id: "s_1".into(),
                 prompt: "inspect target".into(),
+                latest_user_prompt: "inspect target".into(),
                 interaction_feedback: vec![],
                 completed_steps: vec![],
                 known_observations: vec![],
@@ -1110,6 +1119,30 @@ mod tests {
     }
 
     #[test]
+    fn review_prompt_keeps_the_latest_user_language_and_demands_concrete_tradeoffs() {
+        let mut request = request();
+        request.session.mode = loopbiotic_protocol::Mode::Review;
+        request.session.latest_user_prompt = "Jak poprawić te typy i dlaczego?".into();
+        request.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Finding);
+
+        let prompt = prompt(&request, true);
+
+        assert!(prompt.contains("Latest user prompt: Jak poprawić te typy i dlaczego?"));
+        assert!(prompt.contains("natural language used by latest_user_prompt"));
+        assert!(prompt.contains("2-4 prioritized concrete findings or alternatives"));
+        assert!(!prompt.contains("Find only one useful next move"));
+    }
+
+    #[test]
+    fn malformed_codex_output_uses_the_shared_contract_retry_card() {
+        let Card::Error(card) = CodexAppBackend::unparsed_card("invalid JSON") else {
+            panic!("expected error card");
+        };
+
+        assert_eq!(card.id, crate::UNPARSED_OUTPUT_CARD_ID);
+    }
+
+    #[test]
     fn unchanged_context_is_not_repeated_in_thread_prompt() {
         let request = request();
 
@@ -1227,12 +1260,12 @@ mod tests {
         let prompt = prompt(&request, true);
 
         assert!(prompt.contains("Tool reads are valid patch source"));
-        assert!(prompt.contains("exactly one uninterrupted, compilable change block"));
+        assert!(prompt.contains("bounded same-file hunk batch"));
         assert!(prompt.contains("With the patch return plan"));
-        assert!(prompt.contains("complete=true only when this hunk is the final step"));
+        assert!(prompt.contains("accepting every hunk in this response completes the goal"));
         assert!(prompt.contains("Compiler acceptance is a hard invariant"));
-        assert!(prompt.contains("first patch contains ONLY the independently valid declaration"));
-        assert!(prompt.contains("after the first add/remove record"));
+        assert!(prompt.contains("emit the independently valid declaration before"));
+        assert!(prompt.contains("Each hunk contains one uninterrupted change block"));
         assert!(!prompt.contains("Continue with the next planned coherent step"));
     }
 
@@ -1249,7 +1282,7 @@ mod tests {
         let prompt = prompt(&request, true);
 
         assert!(prompt.contains("Continue with the next planned coherent step"));
-        assert!(prompt.contains("exactly one uninterrupted, compilable change block"));
+        assert!(prompt.contains("bounded same-file hunk batch"));
     }
 
     #[test]
@@ -1262,9 +1295,9 @@ mod tests {
         let prompt = prompt(&request, true);
 
         assert!(prompt.contains("Begin with the earliest dependency-producing"));
-        assert!(prompt.contains("Return that step only"));
-        assert!(prompt.contains("FIRST GOAL PATCH ONLY"));
-        assert!(prompt.contains("leave the existing inline type"));
+        assert!(prompt.contains("Put independently compiler-valid declarations before"));
+        assert!(prompt.contains("FIRST GOAL BATCH"));
+        assert!(prompt.contains("standalone declaration hunk before replacement"));
         assert!(!prompt.contains("previous hunk was accepted"));
     }
 
@@ -1276,7 +1309,7 @@ mod tests {
         let patch_prompt = prompt(&request, true);
         assert!(!patch_prompt.contains("With the patch return plan"));
         assert!(patch_prompt.contains("Compiler acceptance is a hard invariant"));
-        assert!(patch_prompt.contains("before any later patch first references, implements"));
+        assert!(patch_prompt.contains("before any hunk that first references, implements"));
 
         request.card_contract.expected_kind = Some(loopbiotic_protocol::CardKind::Hypothesis);
         let discovery_prompt = prompt(&request, true);

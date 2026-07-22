@@ -6,6 +6,38 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Project Intelligence now recognizes Go modules and workspaces from `go.mod`
+  and `go.work`. The bounded, command-free adapter reports Go language or
+  toolchain versions, workspace modules, versioned requirements, and the
+  workspace-aware Go test command without requiring an active `gopls` client.
+
+### Changed
+
+- All backends now answer in the natural language of the latest submitted Prompt
+  or Reply unless the user explicitly requests another output language. Review
+  guidance asks for prioritized concrete findings, reasons, and trade-offs
+  across the requested scope instead of forcing every review into one next move.
+- Reply recomputes prompt-driven workspace-symbol hints and ranked context from
+  its own text rather than retaining the original prompt's vocabulary.
+- Same-file multi-hunk patch responses are now split and dependency-rated
+  locally, including separated change runs under one `@@` header. Declarations
+  and other producers are reviewed before consumers, one hunk at a time, while
+  multi-file responses remain invalid and carry their own `multi_file`
+  diagnostic instead of being mislabeled `multi_hunk`. Accept advances the
+  local queue without a model turn; Reject discards its remainder and waits for
+  an explicit Reply.
+
+### Fixed
+
+- Malformed structured output from Codex app-server now enters the shared
+  contract-repair retry instead of surfacing immediately as a terminal backend
+  error.
+- A same-file patch just outside the cursor-bounded active excerpt is validated
+  against the full live editor buffer before `context_mismatch` can trigger a
+  model retry.
+
 ## [0.4.0] - 2026-07-21
 
 ### Added

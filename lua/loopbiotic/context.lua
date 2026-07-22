@@ -15,9 +15,14 @@ function M.current(prompt, mode)
   return value, source
 end
 
-function M.session()
-  local value = M.capture(require("loopbiotic.state").source_buf).value
-  value.hints = M.merge_hints(value.hints, require("loopbiotic.state").workspace_hints or {})
+function M.session(prompt)
+  local state = require("loopbiotic.state")
+  local captured = M.capture(state.source_buf)
+  local value = captured.value
+  if type(prompt) == "string" and prompt ~= "" then
+    state.workspace_hints = M.workspace_hints(prompt, value.cwd, captured.buf)
+  end
+  value.hints = M.merge_hints(value.hints, state.workspace_hints or {})
   value.call_hierarchy = require("loopbiotic.flow").bundle(require("loopbiotic.state").call_hierarchy)
 
   return value
@@ -329,7 +334,9 @@ function M.workspace_hints(prompt, cwd, buf)
   local timeout = options.workspace_timeout_ms or options.timeout_ms or 120
   local started = vim.uv.hrtime()
 
-  for _, query in ipairs(queries) do
+  local query_quota = math.max(1, math.floor(limit / math.max(#queries, 1)))
+  for query_index, query in ipairs(queries) do
+    local query_limit = query_index == #queries and limit or math.min(limit, #hints + query_quota)
     for _, client in ipairs(clients or {}) do
       if #hints >= limit then
         return hints
@@ -349,7 +356,7 @@ function M.workspace_hints(prompt, cwd, buf)
             response.result,
             "definition",
             (client.name or "lsp") .. ":workspace_symbol",
-            limit,
+            query_limit,
             cwd
           )
         end
@@ -362,17 +369,31 @@ end
 
 function M.workspace_queries(prompt, limit)
   local ignored = {
+    about = true,
+    better = true,
+    could = true,
     concrete = true,
+    dlaczego = true,
+    explain = true,
+    improve = true,
+    please = true,
     potem = true,
+    proszę = true,
+    review = true,
     rzecz = true,
+    should = true,
     struct = true,
     ["structów"] = true,
     template = true,
+    tego = true,
+    this = true,
+    what = true,
+    would = true,
   }
   local weighted = {}
   local seen = {}
   for term in tostring(prompt or ""):lower():gmatch("[%w_%-]+") do
-    if #term >= 5 and not ignored[term] and not seen[term] then
+    if #term >= 4 and not ignored[term] and not seen[term] then
       seen[term] = true
       table.insert(weighted, {
         term = term,

@@ -488,7 +488,7 @@ impl Server {
                     self.engine
                         .lock()
                         .await
-                        .update_context(&params.session_id, context)
+                        .update_context_for_prompt(&params.session_id, context, &params.text)
                         .map_err(server_error(&id))?;
                 }
                 self.engine

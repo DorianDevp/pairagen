@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use loopbiotic_protocol::{
     Card, ContextBundle, FileOp, FilePatch, MAX_CHANGED_LINES, MAX_FILE_OPS, MAX_HUNKS_PER_PATCH,
-    MAX_PATCH_FILES, ViolationClass,
+    MAX_PATCH_FILES, MAX_REVIEW_QUEUE_HUNKS, PatchCard, ViolationClass,
 };
 
-use crate::unified_diff::{DiffLine, UnifiedDiff};
+use crate::unified_diff::{DiffLine, Hunk, UnifiedDiff};
 use crate::violation::violation;
 
 pub struct PatchValidator;
@@ -58,6 +58,222 @@ impl PatchCoherence {
             }
         }
     }
+
+    /// Orders already-split, same-file review cards without another model
+    /// turn. Explicit declarations that provide identifiers consumed by later
+    /// hunks form hard ordering edges; the remaining ties use a conservative
+    /// compiler-safety rating and preserve source order.
+    pub fn order_review_cards(cards: &mut Vec<PatchCard>) {
+        if cards.len() < 2 {
+            return;
+        }
+
+        let metadata = cards.iter().map(review_metadata).collect::<Vec<_>>();
+        let mut outgoing = vec![Vec::new(); cards.len()];
+        let mut indegree = vec![0usize; cards.len()];
+        for producer in 0..cards.len() {
+            for consumer in 0..cards.len() {
+                if producer == consumer
+                    || metadata[producer]
+                        .produces
+                        .is_disjoint(&metadata[consumer].consumes)
+                {
+                    continue;
+                }
+                outgoing[producer].push(consumer);
+                indegree[consumer] += 1;
+            }
+        }
+
+        let mut remaining = (0..cards.len()).collect::<BTreeSet<_>>();
+        let mut order = Vec::with_capacity(cards.len());
+        while !remaining.is_empty() {
+            let next = remaining
+                .iter()
+                .copied()
+                .filter(|index| indegree[*index] == 0)
+                .max_by_key(|index| (metadata[*index].rating, usize::MAX - *index))
+                // Cyclic/ambiguous identifier references are not a reason to
+                // call the model. Break the cycle by the same stable rating.
+                .or_else(|| {
+                    remaining
+                        .iter()
+                        .copied()
+                        .max_by_key(|index| (metadata[*index].rating, usize::MAX - *index))
+                })
+                .expect("non-empty review order");
+            remaining.remove(&next);
+            order.push(next);
+            for dependent in &outgoing[next] {
+                indegree[*dependent] = indegree[*dependent].saturating_sub(1);
+            }
+        }
+
+        let original = cards.clone();
+        *cards = order
+            .into_iter()
+            .map(|index| original[index].clone())
+            .collect();
+    }
+}
+
+#[derive(Default)]
+struct ReviewMetadata {
+    rating: i32,
+    produces: BTreeSet<String>,
+    consumes: BTreeSet<String>,
+}
+
+fn review_metadata(card: &PatchCard) -> ReviewMetadata {
+    let Some(patch) = card.patches.first() else {
+        return ReviewMetadata::default();
+    };
+    let Ok(diff) = UnifiedDiff::parse(&patch.diff) else {
+        return ReviewMetadata::default();
+    };
+    let added = diff
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter_map(|line| match line {
+            DiffLine::Add(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut produces = BTreeSet::new();
+    let mut has_declaration = false;
+    let mut has_import = false;
+    for line in &added {
+        let trimmed = line.trim_start();
+        let tokens = identifiers(trimmed);
+        if let Some(identifier) = declared_identifier(&tokens) {
+            produces.insert(identifier);
+            has_declaration = true;
+        }
+        if is_import_line(trimmed) {
+            produces.extend(tokens);
+            has_import = true;
+        }
+    }
+    let mut consumes = added
+        .iter()
+        .flat_map(|line| identifiers(line))
+        .collect::<BTreeSet<_>>();
+    for identifier in &produces {
+        consumes.remove(identifier);
+    }
+
+    let test_file = patch
+        .file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.contains("_test.")
+                || name.contains(".test.")
+                || name.contains(".spec.")
+                || name.starts_with("test_")
+        });
+    let rating = if has_declaration {
+        400
+    } else if has_import {
+        300
+    } else if added.is_empty() {
+        100
+    } else {
+        200
+    } - if test_file { 75 } else { 0 };
+
+    ReviewMetadata {
+        rating,
+        produces,
+        consumes,
+    }
+}
+
+fn declared_identifier(tokens: &[String]) -> Option<String> {
+    const DECLARATIONS: &[&str] = &[
+        "class",
+        "const",
+        "def",
+        "enum",
+        "fn",
+        "function",
+        "interface",
+        "let",
+        "mod",
+        "static",
+        "struct",
+        "trait",
+        "type",
+        "var",
+    ];
+    tokens.windows(2).find_map(|pair| {
+        DECLARATIONS
+            .contains(&pair[0].as_str())
+            .then(|| pair[1].clone())
+    })
+}
+
+fn is_import_line(line: &str) -> bool {
+    let line = line.trim_start_matches("pub ").trim_start();
+    line.starts_with("import ")
+        || line.starts_with("from ")
+        || line.starts_with("use ")
+        || line.starts_with("require(")
+}
+
+fn split_hunk_change_runs(hunk: Hunk) -> Vec<Hunk> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (index, line) in hunk.lines.iter().enumerate() {
+        let changed = matches!(line, DiffLine::Remove(_) | DiffLine::Add(_));
+        match (start, changed) {
+            (None, true) => start = Some(index),
+            (Some(run_start), false) => {
+                runs.push((run_start, index));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(run_start) = start {
+        runs.push((run_start, hunk.lines.len()));
+    }
+    if runs.len() <= 1 {
+        return vec![hunk];
+    }
+
+    runs.iter()
+        .enumerate()
+        .map(|(index, _)| {
+            // The unchanged gap is deliberately shared by neighboring hunks:
+            // it gives both local cards stable source context without making
+            // either card own another change run.
+            let slice_start = if index == 0 { 0 } else { runs[index - 1].1 };
+            let slice_end = if index + 1 == runs.len() {
+                hunk.lines.len()
+            } else {
+                runs[index + 1].0
+            };
+            let old_offset = hunk.lines[..slice_start]
+                .iter()
+                .filter(|line| matches!(line, DiffLine::Context(_) | DiffLine::Remove(_)))
+                .count();
+            let new_offset = hunk.lines[..slice_start]
+                .iter()
+                .filter(|line| matches!(line, DiffLine::Context(_) | DiffLine::Add(_)))
+                .count();
+            let mut split = Hunk {
+                old_start: hunk.old_start + old_offset,
+                old_len: 0,
+                new_start: hunk.new_start + new_offset,
+                new_len: 0,
+                lines: hunk.lines[slice_start..slice_end].to_vec(),
+            };
+            recompute_hunk_lengths(&mut split);
+            split
+        })
+        .collect()
 }
 
 impl PatchNormalizer {
@@ -207,6 +423,34 @@ impl PatchNormalizer {
 
         Ok(())
     }
+
+    /// Turns every separated change run into its own unified-diff hunk. Models
+    /// sometimes place several edits under one `@@` header; those are a valid
+    /// local review batch, not a reason to spend a repair turn.
+    pub fn split_change_runs(card: &mut Card) -> Result<()> {
+        let Card::Patch(card) = card else {
+            return Ok(());
+        };
+        let mut total = 0usize;
+        for patch in &mut card.patches {
+            let diff = UnifiedDiff::parse(&patch.diff)?;
+            let mut hunks = Vec::new();
+            for hunk in diff.hunks {
+                hunks.extend(split_hunk_change_runs(hunk));
+            }
+            total += hunks.len();
+            patch.diff = UnifiedDiff { hunks }.render();
+        }
+        if total > MAX_REVIEW_QUEUE_HUNKS {
+            return Err(violation(
+                ViolationClass::OversizedBatch,
+                format!(
+                    "patch contains {total} review hunks; maximum batch size is {MAX_REVIEW_QUEUE_HUNKS}"
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl PatchValidator {
@@ -247,7 +491,7 @@ impl PatchValidator {
         }
         if card.patches.len() > max_patch_files {
             return Err(violation(
-                ViolationClass::MultiHunk,
+                ViolationClass::MultiFile,
                 format!(
                     "patch card changes {} files; maximum is {max_patch_files}",
                     card.patches.len(),
@@ -255,8 +499,18 @@ impl PatchValidator {
             ));
         }
 
+        let mut total_hunks = 0usize;
         for patch in &card.patches {
             Self::validate_file_patch_with_limits(patch, max_hunks_per_patch, max_changed_lines)?;
+            total_hunks += UnifiedDiff::parse(&patch.diff)?.hunks.len();
+        }
+        if total_hunks > MAX_REVIEW_QUEUE_HUNKS {
+            return Err(violation(
+                ViolationClass::OversizedBatch,
+                format!(
+                    "patch contains {total_hunks} review hunks; maximum batch size is {MAX_REVIEW_QUEUE_HUNKS}"
+                ),
+            ));
         }
 
         Ok(())
@@ -268,7 +522,7 @@ impl PatchValidator {
     pub fn validate_file_ops(file_ops: &[FileOp]) -> Result<()> {
         if file_ops.len() > MAX_FILE_OPS {
             return Err(violation(
-                ViolationClass::MultiHunk,
+                ViolationClass::OversizedBatch,
                 format!(
                     "patch card proposes {} file operations; maximum is {MAX_FILE_OPS}",
                     file_ops.len(),
@@ -366,7 +620,7 @@ impl PatchValidator {
         let diff = UnifiedDiff::parse(&patch.diff)?;
         if diff.hunks.len() > max_hunks_per_patch {
             return Err(violation(
-                ViolationClass::MultiHunk,
+                ViolationClass::OversizedBatch,
                 format!(
                     "patch has {} hunks; maximum is {max_hunks_per_patch}",
                     diff.hunks.len(),
@@ -517,7 +771,7 @@ fn validate_hunk_counts(hunk: &crate::Hunk, max_changed_lines: usize) -> Result<
         .count();
     if changed_lines > max_changed_lines {
         return Err(violation(
-            ViolationClass::MultiHunk,
+            ViolationClass::OversizedBatch,
             format!("hunk changes {changed_lines} lines; maximum is {max_changed_lines}"),
         ));
     }
@@ -875,7 +1129,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_more_than_one_hunk() {
+    fn accepts_a_bounded_same_file_hunk_batch() {
         let patch = FilePatch {
             id: "p_1".into(),
             file: PathBuf::from("src/work.ts"),
@@ -883,9 +1137,7 @@ mod tests {
             explanation: String::new(),
         };
 
-        let error = PatchValidator::validate_file_patch(&patch).unwrap_err();
-
-        assert!(error.to_string().contains("maximum is 1"));
+        PatchValidator::validate_file_patch(&patch).unwrap();
     }
 
     #[test]
@@ -906,6 +1158,71 @@ mod tests {
         );
         assert!(error.to_string().contains("2 separate change blocks"));
         assert!(error.to_string().contains("compiler-safe patches"));
+    }
+
+    #[test]
+    fn splits_separated_change_runs_without_a_model_retry() {
+        let mut card = patch_card(file_patch(
+            "src/work.ts",
+            "@@ -1,4 +1,5 @@\n+interface Work {}\n context one\n context two\n-old_type\n+Work\n context three\n",
+        ));
+
+        PatchNormalizer::normalize_hunk_headers(&mut card).unwrap();
+        PatchNormalizer::split_change_runs(&mut card).unwrap();
+        PatchValidator::validate_card(&card).unwrap();
+
+        let Card::Patch(card) = card else {
+            unreachable!();
+        };
+        let diff = UnifiedDiff::parse(&card.patches[0].diff).unwrap();
+        assert_eq!(diff.hunks.len(), 2);
+        assert_eq!(diff.hunks[0].old_start, 1);
+        assert_eq!(diff.hunks[1].old_start, 1);
+        assert!(matches!(diff.hunks[0].lines[0], DiffLine::Add(_)));
+        assert!(
+            diff.hunks[1]
+                .lines
+                .iter()
+                .any(|line| matches!(line, DiffLine::Remove(text) if text == "old_type"))
+        );
+    }
+
+    #[test]
+    fn dependency_rating_places_a_declaration_before_its_consumer() {
+        let consumer = loopbiotic_protocol::PatchCard {
+            id: "consumer".into(),
+            title: "Use Work".into(),
+            explanation: "Use the type.".into(),
+            warnings: vec![],
+            goal_complete: false,
+            plan: None,
+            patches: vec![file_patch(
+                "src/work.ts",
+                "@@ -3,1 +3,1 @@\n-old_type\n+Work\n",
+            )],
+            file_ops: vec![],
+            actions: vec![loopbiotic_protocol::Action::Apply],
+        };
+        let declaration = loopbiotic_protocol::PatchCard {
+            id: "declaration".into(),
+            title: "Declare Work".into(),
+            explanation: "Declare the type.".into(),
+            warnings: vec![],
+            goal_complete: false,
+            plan: None,
+            patches: vec![file_patch(
+                "src/work.ts",
+                "@@ -1,1 +1,2 @@\n+interface Work {}\n first\n",
+            )],
+            file_ops: vec![],
+            actions: vec![loopbiotic_protocol::Action::Apply],
+        };
+        let mut cards = vec![consumer, declaration];
+
+        PatchCoherence::order_review_cards(&mut cards);
+
+        assert_eq!(cards[0].id, "declaration");
+        assert_eq!(cards[1].id, "consumer");
     }
 
     #[test]

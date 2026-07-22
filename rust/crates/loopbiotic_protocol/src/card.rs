@@ -142,11 +142,13 @@ pub struct PatchCard {
     pub explanation: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// This one reviewed hunk finishes the current explicit goal.
+    /// Accepting this card — or every locally queued hunk derived from its
+    /// backend batch — finishes the current explicit goal.
     #[serde(default, skip_serializing_if = "is_false")]
     pub goal_complete: bool,
-    /// Explicit goal turns return one hunk plus a plan of coherent steps that
-    /// remain. A later step may target the same file again.
+    /// Explicit goal turns return one file's hunk batch plus a plan of coherent
+    /// work that remains after that batch. A later step may target the same
+    /// file again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<GoalPlan>,
     pub patches: Vec<FilePatch>,

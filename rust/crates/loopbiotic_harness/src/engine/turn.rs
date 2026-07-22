@@ -265,8 +265,8 @@ impl Engine {
             }
 
             let mut candidate = response.card.clone();
-            let validation = if matches!(expected, NextState::GoalLoop) {
-                self.normalize_goal_batch(&mut candidate, &context, &session.id)
+            let validation = if matches!(candidate, Card::Patch(_)) {
+                self.normalize_patch_batch(&mut candidate, &context, &session.id, expected)
                     .await
             } else {
                 PatchNormalizer::normalize_card(&mut candidate, &context)
@@ -344,19 +344,19 @@ impl Engine {
         response
     }
 
-    async fn normalize_goal_batch(
+    async fn normalize_patch_batch(
         &self,
         candidate: &mut Card,
         current: &ContextBundle,
         session_id: &str,
+        expected: &NextState,
     ) -> Result<()> {
-        if !matches!(candidate, Card::Patch(_)) {
-            return validate_backend_card(candidate, &NextState::GoalLoop, current);
-        }
-
         validate_one_card(candidate)?;
         // Correct miscounted hunk headers before the count check rejects them.
         PatchNormalizer::normalize_hunk_headers(candidate)?;
+        // Several `@@` hunks — or several separated change runs hidden under
+        // one header — are a local review queue, not a model contract failure.
+        PatchNormalizer::split_change_runs(candidate)?;
         PatchValidator::validate_card(candidate)?;
         let Card::Patch(card) = candidate else {
             // Guarded by the `matches!` early return above; degrade to a
@@ -399,7 +399,7 @@ impl Engine {
                 ));
             }
 
-            let mut single = Card::Patch(loopbiotic_protocol::PatchCard {
+            let original = Card::Patch(loopbiotic_protocol::PatchCard {
                 id: card.id.clone(),
                 title: card.title.clone(),
                 explanation: card.explanation.clone(),
@@ -410,10 +410,30 @@ impl Engine {
                 file_ops: vec![],
                 actions: card.actions.clone(),
             });
-            PatchNormalizer::normalize_card(&mut single, &source)
-                .map_err(|error| error.context(file.display().to_string()))?;
-            PatchValidator::validate_card_against_context(&single, &source)
-                .map_err(|error| error.context(file.display().to_string()))?;
+            let mut single = original.clone();
+            let mut validation = PatchNormalizer::normalize_card(&mut single, &source)
+                .and_then(|()| PatchValidator::validate_card_against_context(&single, &source));
+
+            // The active editor capture is cursor-bounded. If a valid hunk for
+            // that same file sits just outside the excerpt, ask the editor for
+            // its full live buffer before blaming the model or spending a
+            // repair turn.
+            if validation.as_ref().err().and_then(violation_class)
+                == Some(ViolationClass::ContextMismatch)
+                && context_targets(current, &file)
+                && let Some(provider) = &self.source_context_provider
+                && let Some(full_source) = provider(file.clone(), session_id.to_string()).await
+            {
+                single = original;
+                validation =
+                    PatchNormalizer::normalize_card(&mut single, &full_source).and_then(|()| {
+                        PatchValidator::validate_card_against_context(&single, &full_source)
+                    });
+            }
+            validation.map_err(|error| {
+                let class = violation_class(&error).unwrap_or(ViolationClass::Other);
+                violation(class, format!("{}: {error:#}", file.display()))
+            })?;
 
             let Card::Patch(single) = single else {
                 // Constructed as a patch card just above and normalization
@@ -434,17 +454,29 @@ impl Engine {
             })?;
         }
 
-        NextState::GoalLoop.validate(candidate)
+        expected.validate(candidate)
     }
 }
 
 fn repair_instruction(expected: &NextState, class: ViolationClass) -> &'static str {
-    if class == ViolationClass::MultiHunk {
+    if class == ViolationClass::MultiFile {
         if matches!(expected, NextState::GoalLoop) {
-            return "DO NOT repeat or reformat the batch. Return ONLY one of its separated change blocks. If one block declares an interface, type, function, field, import, or compatibility shim and another block uses it, return ONLY the dependency-producing declaration block now and leave every consumer byte-for-byte unchanged. Mark goal_complete=false and put the consumer change in plan.remaining. In structured hunk lines, after the first add/remove record, context ends the change block: no later add/remove record is allowed. This patch alone must compile and type-check. If no isolated block is compiler-valid, return choice or deny instead of a patch.";
+            return "The response targeted multiple files. Return exactly ONE FILE. Keep that file's bounded hunks together, put declarations and dependency producers before consumers, and move every other file into plan.remaining. Every hunk must compile after the preceding hunks are accepted. Do not collapse a valid same-file multi-hunk batch into one arbitrary change.";
         }
 
-        return "DO NOT repeat or reformat the batch. Return ONLY one of its separated change blocks. If one block declares an interface, type, function, field, import, or compatibility shim and another block uses it, return ONLY the dependency-producing declaration block now and leave every consumer byte-for-byte unchanged. In structured hunk lines, after the first add/remove record, context ends the change block: no later add/remove record is allowed. This patch alone must compile and type-check. If no isolated block is compiler-valid, return choice or deny instead of a patch.";
+        return "The response targeted multiple files. Return exactly ONE FILE, preferably the supplied active file. Keep its bounded hunks together, put declarations and dependency producers before consumers, and omit every other file. Every hunk must compile after the preceding hunks are accepted. Do not collapse a valid same-file multi-hunk batch into one arbitrary change.";
+    }
+
+    if class == ViolationClass::OversizedBatch {
+        if matches!(expected, NextState::GoalLoop) {
+            return "The one-file response exceeded a local review bound. Keep exactly ONE FILE and return only a bounded, dependency-ordered prefix of its hunks; move the overflow into plan.remaining. Every returned hunk must compile after the preceding hunks are accepted.";
+        }
+
+        return "The one-file response exceeded a local review bound. Keep exactly ONE FILE and return a smaller dependency-ordered hunk batch within the stated limits. Every returned hunk must compile after the preceding hunks are accepted.";
+    }
+
+    if class == ViolationClass::MultiHunk {
+        return "Keep the response in exactly ONE FILE, but represent each disconnected change run as its own hunk. Preserve dependency order, with declarations and producers before consumers. Every hunk must compile after preceding hunks are accepted.";
     }
 
     if class == ViolationClass::ContextMismatch {
@@ -456,9 +488,9 @@ fn repair_instruction(expected: &NextState, class: ViolationClass) -> &'static s
     }
 
     if matches!(expected, NextState::GoalLoop) {
-        "Re-read the affected block with read-only tools and return the corrected patch with the same small scope plus its refreshed plan. It must contain exactly one uninterrupted change block. Preserve compiler acceptance after this patch alone and order declarations or interfaces before every later use or implementation. Context/remove lines must be exact and contiguous. Use open_location only if the required source cannot be inspected."
+        "Re-read the affected block with read-only tools and return the corrected same-file hunk batch with the same scope plus its refreshed plan. Every hunk contains one uninterrupted change block and must compile after preceding hunks are accepted. Order declarations or interfaces before every use or implementation. Context/remove lines must be exact and contiguous. Use open_location only if the required source cannot be inspected."
     } else {
-        "Rebuild the same step as exactly one uninterrupted change block. Source context/remove lines must be exact and contiguous in the supplied buffer; added lines do not replace omitted source context. The resulting local step must compile and type-check by itself without work deferred to a later card. Introduce declarations or interfaces in an independently valid patch before any later use or implementation. If the change belongs in a different file than the supplied buffer, return an open_location op with that place instead of another patch."
+        "Rebuild the same same-file hunk batch. Every hunk contains one uninterrupted change block; source context/remove lines must be exact and contiguous in the supplied buffer, and added lines do not replace omitted source context. Each hunk must compile after preceding hunks are accepted. Put declarations or interfaces before every use or implementation. If the change belongs in a different file than the supplied buffer, return an open_location op instead of another patch."
     }
 }
 
@@ -632,14 +664,24 @@ mod tests {
     }
 
     #[test]
-    fn multi_hunk_repair_demands_dependency_only_before_consumer() {
-        let instruction = repair_instruction(&NextState::GoalLoop, ViolationClass::MultiHunk);
+    fn multi_file_repair_preserves_same_file_hunks() {
+        let instruction = repair_instruction(&NextState::GoalLoop, ViolationClass::MultiFile);
 
-        assert!(instruction.contains("Return ONLY one of its separated change blocks"));
-        assert!(instruction.contains("ONLY the dependency-producing declaration block"));
-        assert!(instruction.contains("leave every consumer byte-for-byte unchanged"));
-        assert!(instruction.contains("goal_complete=false"));
-        assert!(instruction.contains("no later add/remove record is allowed"));
+        assert!(instruction.contains("targeted multiple files"));
+        assert!(instruction.contains("Return exactly ONE FILE"));
+        assert!(instruction.contains("Keep that file's bounded hunks together"));
+        assert!(instruction.contains("dependency producers before consumers"));
+        assert!(instruction.contains("plan.remaining"));
+        assert!(instruction.contains("Do not collapse a valid same-file multi-hunk batch"));
+    }
+
+    #[test]
+    fn oversized_batch_repair_keeps_the_file_and_defers_only_overflow() {
+        let instruction = repair_instruction(&NextState::GoalLoop, ViolationClass::OversizedBatch);
+
+        assert!(instruction.contains("one-file response exceeded"));
+        assert!(instruction.contains("dependency-ordered prefix"));
+        assert!(instruction.contains("overflow into plan.remaining"));
     }
 
     #[test]
