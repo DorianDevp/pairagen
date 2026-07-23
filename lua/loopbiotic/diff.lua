@@ -23,8 +23,37 @@ local function bind(buf, keys, callback)
   end
 end
 
+-- Put the window the user was working in back to its pre-preview view. The
+-- preview deliberately jumps to the change; when it ends without the user
+-- resolving it (background supersede, reject, inert failure after
+-- navigation), that jump must not survive. View only — focus is owned by the
+-- caller. Applies only while the window still shows the recorded buffer.
+local function restore_origin_view(origin)
+  if
+    not origin
+    or not vim.api.nvim_win_is_valid(origin.win)
+    or not vim.api.nvim_buf_is_valid(origin.buf)
+    or vim.api.nvim_win_get_buf(origin.win) ~= origin.buf
+  then
+    return false
+  end
+  local view = vim.deepcopy(origin.view)
+  view.lnum = math.min(view.lnum, vim.api.nvim_buf_line_count(origin.buf))
+  vim.api.nvim_win_call(origin.win, function()
+    vim.fn.winrestview(view)
+  end)
+  return true
+end
+
 function M.show(card, opts)
   opts = opts or {}
+  -- Captured before any navigation so an unresolved preview can always be
+  -- unwound to exactly where the user was working.
+  local origin = {
+    win = vim.api.nvim_get_current_win(),
+    buf = vim.api.nvim_get_current_buf(),
+    view = vim.fn.winsaveview(),
+  }
   local patch = (card.patches or {})[1]
 
   if not patch then
@@ -61,6 +90,7 @@ function M.show(card, opts)
     source_buf = apply.buffer(patch.file)
   end
   if not source_buf or not vim.api.nvim_buf_is_valid(source_buf) then
+    restore_origin_view(origin)
     ui.notify("Open the proposed location before editing the patch", vim.log.levels.WARN)
     return false
   end
@@ -78,18 +108,21 @@ function M.show(card, opts)
   local source_lines = vim.api.nvim_buf_get_lines(source_buf, 0, -1, false)
   local hunk_ok, hunk = pcall(apply.parse_hunk, patch.diff)
   if not hunk_ok then
+    restore_origin_view(origin)
     log.write("patch preview failed", { kind = "malformed", error = hunk })
     ui.notify(hunk, vim.log.levels.ERROR)
     return false
   end
   local start_ok, source_start = pcall(apply.resolve_start, source_lines, hunk)
   if not start_ok then
+    restore_origin_view(origin)
     log.write("patch preview failed", { kind = "drift", error = source_start })
     ui.notify(source_start, vim.log.levels.ERROR)
     return false
   end
   local draft_ok, draft_lines = pcall(apply.apply_diff, source_lines, patch.diff)
   if not draft_ok then
+    restore_origin_view(origin)
     log.write("patch preview failed", { kind = "drift", error = draft_lines })
     ui.notify(draft_lines, vim.log.levels.ERROR)
     return false
@@ -104,12 +137,14 @@ function M.show(card, opts)
       column = change_cursor[2] + 1,
     })
   then
+    restore_origin_view(origin)
     ui.notify("Source location is not visible", vim.log.levels.WARN)
     return false
   end
 
   local source_win = vim.api.nvim_get_current_win()
   if vim.api.nvim_get_current_buf() ~= source_buf then
+    restore_origin_view(origin)
     ui.notify("Patch target did not open in the active editor window", vim.log.levels.WARN)
     return false
   end
@@ -129,6 +164,7 @@ function M.show(card, opts)
   state.diff_win = source_win
   state.diff_source_buf = source_buf
   state.diff_source_tick = vim.api.nvim_buf_get_changedtick(source_buf)
+  state.diff_origin = origin
 
   state.diff_first_row = annotations.first_row
   state.diff_cursor = change_cursor
@@ -546,6 +582,12 @@ function M.restore_source(cursor, opts)
         vim.api.nvim_win_set_cursor(win, { math.max(line, 1), cursor[2] })
       end
     end
+    if not cursor then
+      -- The preview ended without the user deciding at its location (reject,
+      -- or a superseding non-patch card): undo the preview's jump so the
+      -- cursor is not stranded at a change that is no longer on screen.
+      restore_origin_view(state.diff_origin)
+    end
   end
 
   -- Close the parent-directory split opened for new-file review, unless it is
@@ -583,15 +625,17 @@ function M.restore_source(cursor, opts)
   state.diff_source_tick = nil
   state.diff_first_row = nil
   state.diff_cursor = nil
+  state.diff_origin = nil
 end
 
 function M.send_accept(patch_ids, changed_files)
   local session_id = state.session_id
+  local card_id = state.card and state.card.id or ""
   local request_id = thinking.start("Continuing", session_id)
 
   rpc.request("patch/apply_result", {
     session_id = session_id,
-    card_id = state.card and state.card.id or "",
+    card_id = card_id,
     accepted = true,
     patch_ids = patch_ids,
     changed_files = changed_files,
@@ -635,6 +679,18 @@ function M.send_accept(patch_ids, changed_files)
       return
     end
 
+    -- The backend may yield the next proposal (agent/turn_ready) before this
+    -- apply result returns. That newer review owns the editor; rendering a
+    -- late working/summary card would tear the unresolved patch down behind
+    -- the user's back and strand the cursor at the vanished change.
+    local superseded = state.card ~= nil and state.card.id ~= card_id and M.valid_preview()
+    if superseded then
+      log.event("stale_apply_result_superseded", {
+        accepted_card = card_id,
+        current_card = state.card.id,
+      })
+    end
+
     -- Accepting a patch now runs a real patch-phase turn on the daemon, which
     -- reports the model it actually ran; adopt it so the displayed model and
     -- cost attribution reflect the accepted turn rather than the previous
@@ -642,6 +698,7 @@ function M.send_accept(patch_ids, changed_files)
     session.apply_turn_result(message.result, {
       update_model = true,
       track_backend_error = true,
+      show_card = not superseded,
     })
   end)
 end

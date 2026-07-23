@@ -26,6 +26,7 @@
 ---@field diff_source_tick integer|nil changedtick guard for the draft
 ---@field diff_first_row integer|nil
 ---@field diff_cursor integer[]|nil
+---@field diff_origin table|nil pre-preview { win, buf, view } used to unwind an unresolved review
 ---@field thinking_timer userdata|nil
 ---@field thinking_frame integer|nil
 ---@field thinking_request_id string|nil
@@ -76,6 +77,7 @@ local defaults = {
   diff_source_tick = vim.NIL,
   diff_first_row = vim.NIL,
   diff_cursor = vim.NIL,
+  diff_origin = vim.NIL,
   thinking_timer = vim.NIL,
   thinking_frame = vim.NIL,
   thinking_request_id = vim.NIL,

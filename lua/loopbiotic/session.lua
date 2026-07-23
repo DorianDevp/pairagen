@@ -64,8 +64,9 @@ end
 -- Call-site-specific handling (thinking guards, stale-session checks,
 -- session_id adoption) stays at the call sites.
 ---@param result table backend turn result
----@param opts? { update_model?: boolean, track_backend_error?: boolean }
---- update_model=false keeps state.backend_model untouched; track_backend_error=false marks a local result
+---@param opts? { update_model?: boolean, track_backend_error?: boolean, show_card?: boolean }
+--- update_model=false keeps state.backend_model untouched; track_backend_error=false marks a local result;
+--- show_card=false records the result without rendering its card (stale-response guards)
 function M.apply_turn_result(result, opts)
   opts = opts or {}
   state.token_usage = type(result.token_usage) == "table" and result.token_usage or nil
@@ -98,7 +99,7 @@ function M.apply_turn_result(result, opts)
   if result.card and result.card.kind ~= "working" then
     state.cancelled_turn_id = nil
   end
-  if type(result.card) == "table" then
+  if type(result.card) == "table" and opts.show_card ~= false then
     require("loopbiotic.card").show(result.card)
   end
 end

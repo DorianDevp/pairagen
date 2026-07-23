@@ -390,6 +390,11 @@ Example integration-test flow:
 ## Focus and source navigation
 
 - Async AgentWindow renders do not steal focus.
+- Opening a patch review deliberately moves the cursor to the change. A review
+  that ends without a user decision — Reject, or a superseding non-patch card —
+  returns the editor to the exact pre-review cursor and scroll position instead
+  of leaving the cursor stranded at the vanished change. An accepted patch
+  keeps the cursor at the applied change.
 - Closing a focused Frame returns the cursor to the window it was entered
   from, never to the tab's first split. When a buffer is visible in several
   splits, anchoring, cursor capture, and navigation use the split the user is
@@ -526,6 +531,9 @@ rejects a mixed card and asks the model to sequence them as separate steps.
   locally; multi-file responses are never folded into that queue;
 - rejecting any queued hunk discards the remaining local queue, and only a
   later PromptWindow submission may authorize another strategy;
+- a late apply result arriving after the backend already yielded the next
+  proposal records its usage and goal but never replaces or tears down that
+  newer unresolved review; the supersede is logged;
 - each accepted incremental boundary must compile/type-check independently;
 - Accept may continue only an already authorized Goal.
 
