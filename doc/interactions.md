@@ -231,6 +231,7 @@ AgentWindow may contain:
 - plain explanatory content;
 - a structured finding, question, denial, error, or summary;
 - progress and provisional output;
+- a mid-turn location-permission request with explicit `Accept` / `Deny`;
 - a registered Widget;
 - explanatory content attached to Widget nodes.
 
@@ -248,9 +249,57 @@ While Review is unresolved, the ordinary PromptWindow shortcut is out of scope;
 the user must Accept or Reject so the pending mutation cannot be abandoned
 implicitly.
 
+The mid-turn location permission gate is the second deliberate exception: its
+`Accept` / `Deny` resolves an agent request to open another workspace file
+inside the already running turn. Neither choice introduces new intent — Accept
+grants context to the turn the user already submitted, and Deny refuses it
+without a model turn (see “Mid-turn location permission”).
+
 Local actions remain valid inside AgentWindow when they do not contact the
 backend or mutate source: scroll, expand, collapse, filter, navigate, select,
 deselect, inspect details, go back, wrap, and restore.
+
+## Mid-turn location permission
+
+A running turn may discover that it can only continue from a workspace file
+other than the supplied buffer. The backend recognizes that request as the
+typed `open_location` op, reports a `permission` progress phase, and blocks
+the turn on an `editor/open_location` request instead of guessing or drafting
+a patch against the wrong buffer.
+
+Recognition is mechanical, not dependent on the model choosing the right op.
+A patch-expected turn that answers with a denial pointing at a different
+workspace file is the same ask worded differently, and the backend converts
+it into the identical permission request; declining that conversion returns
+the model's own denial unchanged. After any grant, the continuation action
+names the granted file and restates the contract — produce the expected op
+for exactly that buffer, do not ask again — and contract retries for
+wrong-file patches steer the model to `open_location` rather than repeating
+or substituting a workaround in the supplied buffer.
+
+AgentWindow then shows a permission View: the workspace-relative target with
+its line, the agent's reason in the user's language, and explicit
+`Accept` / `Deny` on the same review keys as Patch Review. The keys work from
+any window for the lifetime of the request; the user does not have to focus
+AgentWindow to answer, and the View itself never steals focus.
+
+- `Accept` opens the requested location as a deliberate, user-authorized
+  editor navigation, captures fresh context for that buffer, and the same
+  turn continues; the number of grants per turn is bounded on the backend. A
+  missing workspace file is granted as empty new-file context without
+  navigating anywhere.
+- `Deny` answers the request without a model turn; the backend converts the
+  refusal into a deny card offering `Retry`, `Edit prompt`, and `Stop`.
+- A target outside the workspace is denied without user interaction; the
+  workspace boundary is not a per-request decision.
+- Stop, Reset, prompt interruption, and a failed turn resolve a pending
+  request as denied before any other backend request is sent, because the
+  daemon defers unrelated client requests while it waits for this answer.
+- An unanswered request expires on the backend as denied; the resulting deny
+  card supersedes the gate and a later editor answer is dropped as stale.
+- While the gate is visible the turn counts as active: opening PromptWindow
+  remains an interrupt, and a backgrounded turn that yields its working card
+  keeps that state without repainting over the pending decision.
 
 ## Widget contract and provenance
 
@@ -350,6 +399,9 @@ Example integration-test flow:
   fallback center to the source cursor.
 - Opening a Widget source reference is a local editor navigation action, not an
   agent request.
+- Accepting a mid-turn location request deliberately opens the requested
+  location, like patch review's jump to the change; the permission View itself
+  never moves focus while it waits.
 - Navigation should reuse the owning tab's editor windows where possible and
   clamp positions to live buffers.
 - Opening source does not migrate AgentWindow to the destination tab. If a
@@ -490,6 +542,10 @@ rejects a mixed card and asks the model to sequence them as separate steps.
 - Selected Widget context is visible, removable, provenance-preserving, and sent
   only with an explicitly submitted prompt.
 - Late async output can never overwrite a newer prompt or turn.
+- A mid-turn location request stays inert until explicit `Accept`; Deny, Stop,
+  interruption, Reset, and backend expiry resolve it as denied without a model
+  turn, and Accept grants context to the running turn without introducing new
+  intent.
 - Source mutation keeps the editable diff and explicit `Accept` / `Reject` gate.
 - Reject performs no model turn, pauses the Goal, and opens PromptWindow without
   closing AgentWindow.
@@ -556,7 +612,7 @@ gaps` must enumerate every shipped contradiction until it is repaired.
 
 Primary reconciliation sources: `lua/loopbiotic/init.lua`, `prompt.lua`,
 `surfaces.lua`, `scope.lua`, `card.lua`, `flow.lua`, `widgets.lua`,
-`creation.lua`, `navigation.lua`, `thinking.lua`, `state.lua`, `commands.lua`,
+`creation.lua`, `navigation.lua`, `permission.lua`, `thinking.lua`, `state.lua`, `commands.lua`,
 `keymaps.lua`, protocol card/context schemas, the Rust session/turn engine and
 context project-adapter registry, and Lua interactivity, Flow, prompt, and
 navigation tests.

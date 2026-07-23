@@ -8,6 +8,24 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- A mid-turn agent request to open another workspace file is now an explicit
+  permission gate. AgentWindow presents the target file, its line, and the
+  agent's reason with `Accept` / `Deny` on the review keys, working from any
+  window. Accept opens the location as a deliberate navigation and lets the
+  same turn continue with fresh context; Deny, Stop, prompt interruption,
+  Reset, and backend expiry all resolve the request as denied without a model
+  turn. Previously the editor granted these requests silently in the
+  background, leaving no visible way to react. The daemon-side wait is sized
+  for a human decision (5 minutes).
+- The permission gate no longer depends on the model choosing the typed
+  `open_location` op. A patch-expected turn that denies while pointing at a
+  different workspace file is mechanically converted into the same permission
+  request; declining returns the model's own denial unchanged. After a grant
+  the continuation action names the granted file and restates the contract,
+  and wrong-file contract retries steer the model to `open_location` instead
+  of letting it repeat or substitute a workaround patch in the supplied
+  buffer.
+
 - Project Intelligence now recognizes Go modules and workspaces from `go.mod`
   and `go.work`. The bounded, command-free adapter reports Go language or
   toolchain versions, workspace modules, versioned requirements, and the
@@ -31,6 +49,13 @@ The project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Generated framework cache subtrees (Symfony `var/cache`, `var/log`,
+  `var/sessions`, Laravel `storage/framework`, `bootstrap/cache`) and common
+  Python/tooling caches (`.venv`, `venv`, `.tox`, `.mypy_cache`,
+  `.pytest_cache`, `.ruff_cache`, `.terraform`) are excluded from the context
+  index, so editor LSP hints can no longer pull generated container code into
+  the ranked context budget. A plain `var` or `storage` source directory
+  remains indexable.
 - Malformed structured output from Codex app-server now enters the shared
   contract-repair retry instead of surfacing immediately as a terminal backend
   error.

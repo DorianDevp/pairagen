@@ -50,6 +50,7 @@
 ---@field details_expanded boolean
 ---@field cancelled_turn_id string|nil
 ---@field turn_barrier boolean true while an interrupted backend turn is settling
+---@field permission table|nil pending mid-turn location request awaiting Accept/Deny
 ---@field pending_widget_context table<string, table> visible context selected in AgentWindow Widgets
 ---@field creation table|nil validated pending new-file plan
 ---@field file_ops table|nil validated pending file-operation plan (moves)
@@ -99,6 +100,7 @@ local defaults = {
   details_expanded = false,
   cancelled_turn_id = vim.NIL,
   turn_barrier = false,
+  permission = vim.NIL,
   pending_widget_context = {},
   creation = vim.NIL,
   creation_context_win = vim.NIL,

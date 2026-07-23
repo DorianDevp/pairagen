@@ -32,6 +32,26 @@ const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
     ".dart_tool",
     ".yarn",
     ".pnpm-store",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".terraform",
+];
+
+/// Generated-tree exclusions that need more than one path segment: `var` or
+/// `storage` alone are legitimate source directories, but their framework
+/// cache subtrees (Symfony `var/cache`, Laravel `storage/framework`) are
+/// generated code that must never be indexed, ranked, or matched by editor
+/// hints.
+const DEFAULT_EXCLUDED_PATHS: &[&str] = &[
+    "var/cache",
+    "var/log",
+    "var/sessions",
+    "storage/framework",
+    "bootstrap/cache",
 ];
 
 pub(crate) const SOURCE_EXTENSIONS: &[&str] = &[
@@ -247,13 +267,18 @@ fn excluded(relative: &Path, policy: &ContextPolicy) -> bool {
         return true;
     }
     let normalized = relative.to_string_lossy().replace('\\', "/");
-    policy.exclude.iter().any(|pattern| {
+    let matches_pattern = |pattern: &str| {
         let pattern = pattern.trim_matches('/');
         !pattern.is_empty()
             && (normalized == pattern
                 || normalized.starts_with(&format!("{pattern}/"))
                 || normalized.contains(&format!("/{pattern}/")))
-    })
+    };
+    DEFAULT_EXCLUDED_PATHS
+        .iter()
+        .copied()
+        .any(matches_pattern)
+        || policy.exclude.iter().map(String::as_str).any(matches_pattern)
 }
 
 fn source_file(path: &Path) -> bool {
@@ -321,6 +346,48 @@ mod tests {
                 .artifacts
                 .iter()
                 .any(|artifact| artifact.file == Path::new("src/preview.rs"))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn excludes_framework_cache_subtrees_but_keeps_source_var_directories() {
+        let root =
+            std::env::temp_dir().join(format!("loopbiotic-context-symfony-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("var/cache/dev/ContainerAbc")).unwrap();
+        fs::create_dir_all(root.join("src/var")).unwrap();
+        fs::write(
+            root.join("var/cache/dev/ContainerAbc/getMaker_FileManagerService.php"),
+            "<?php function provide_invoices_cache() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/provider.php"),
+            "<?php function provide_invoices() {}\n",
+        )
+        .unwrap();
+        // `var` alone is a legitimate source directory name; only the
+        // framework cache subtrees are generated code.
+        fs::write(
+            root.join("src/var/provide_invoices_helper.php"),
+            "<?php function provide_invoices_helper() {}\n",
+        )
+        .unwrap();
+
+        let mut optimizer = ContextOptimizer::default();
+        let optimized = optimizer.optimize(
+            context(&root, "<?php\n"),
+            "Fix provide_invoices",
+            &ContextPolicy::default(),
+        );
+
+        assert_eq!(optimized.report.as_ref().unwrap().indexed_files, 2);
+        assert!(
+            optimized
+                .artifacts
+                .iter()
+                .all(|artifact| !artifact.file.starts_with("var"))
         );
         let _ = fs::remove_dir_all(root);
     }

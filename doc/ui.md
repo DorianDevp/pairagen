@@ -119,6 +119,8 @@ is reused for every agent View:
 - preparing and thinking;
 - streamed, provisional content;
 - a final explanation, finding, question, denial, error, or summary;
+- a mid-turn location-permission request naming the target file and the
+  agent's reason, with explicit `Accept` / `Deny`;
 - structured code or diagnostic information;
 - patch Review with the agent comment and explicit `Accept` / `Reject` gate;
 - one or more Widgets;
@@ -161,6 +163,12 @@ not alternative prompts. Accept may continue an already authorized Goal. Reject
 does not ask the model to process the rejection. Once rejected, the Review View
 becomes a `paused/rejected` View with `Reply` and `Quit`; the rejected proposal is
 no longer acceptable.
+
+The mid-turn location-permission View is the second deliberate exception: when
+the agent asks to open another workspace file, AgentWindow shows the target,
+the reason, and `Accept` / `Deny` on the review keys. Accept opens the file and
+lets the already running turn continue; Deny refuses without a model turn.
+Neither is a next-intent command.
 
 An unresolved Review does not show Reply and blocks the ordinary PromptWindow
 route. Accept or Reject is required before new intent can be composed.
@@ -332,6 +340,9 @@ spacing and hierarchy, not decoration, carry the design.
   ownership or focus.
 - Patch Review retains the diff, agent comment, and explicit `Accept` / `Reject`
   inside the two-Window model.
+- A mid-turn location request is a View inside AgentWindow with explicit
+  `Accept` / `Deny`; it never becomes a popup, a third Window, or an
+  auto-granted background action.
 - Netrw is editor context for creation review, never a third product Window or
   the source of acceptance truth.
 - Every Widget renders inside AgentWindow through a registered, versioned schema.

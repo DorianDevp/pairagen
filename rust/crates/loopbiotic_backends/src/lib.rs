@@ -186,8 +186,9 @@ pub enum BackendAction {
     Reply(String),
     ContractRetry(String),
     // The editor granted an open_location request mid-turn; the request's
-    // context carries the freshly opened buffer.
-    LocationGranted,
+    // context carries the freshly opened buffer. The path names that buffer
+    // so the continuation can be pinned to it explicitly.
+    LocationGranted(std::path::PathBuf),
 }
 
 #[derive(Clone, Debug, Serialize)]

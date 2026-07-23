@@ -113,6 +113,11 @@ function M.progress(progress)
 end
 
 function M.render()
+  if state.permission then
+    -- A pending location-permission gate owns AgentWindow; the spinner keeps
+    -- its request tracking and resumes rendering once the gate resolves.
+    return
+  end
   local lines = M.lines(state.thinking_frame or 0)
   local drafting = type(state.thinking_preview) == "table"
   surfaces.render_agent(lines, {

@@ -136,7 +136,14 @@ pub(crate) fn action_value(action: &BackendAction) -> Value {
         BackendAction::ContractRetry(reason) => {
             json!({"kind": "contract_retry", "reason": reason})
         }
-        BackendAction::LocationGranted => json!({"kind": "location_granted"}),
+        // The grant names the buffer and restates the contract inline: a model
+        // that asked for navigation (typed op or a deny worded as a request)
+        // must now deliver the real op instead of asking again.
+        BackendAction::LocationGranted(file) => json!({
+            "kind": "location_granted",
+            "file": file,
+            "instruction": "The user granted opening this file; ctx now carries its buffer. Return the expected op for exactly this buffer now. Do not ask again, do not deny, and do not target any other file.",
+        }),
     }
 }
 

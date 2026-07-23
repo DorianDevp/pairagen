@@ -110,6 +110,10 @@ Progress reassures without performing intelligence. Elapsed time and a few
 concrete phases are enough. Wrapping or changing tabs yields visual space without
 pretending work has stopped.
 
+When the agent needs another file mid-turn, it asks like a colleague would:
+AgentWindow names the exact file and why, and waits for `Accept` / `Deny`.
+Nothing opens behind the user's back, and refusing costs no model turn.
+
 ### Inspect
 
 Plain content is enough for plain answers. Widgets appear when structure improves
@@ -211,6 +215,9 @@ Trust comes from boundaries that remain visible:
   arbitrary backend controls.
 - **Context boundary:** selected references keep provenance and appear before
   submission.
+- **Reach boundary:** the agent asks before pulling another file into its
+  running turn; Accept is an explicit grant, Deny is respected immediately
+  without a model turn.
 - **Instruction boundary:** project facts are host-derived; Markdown Skills are
   bounded inert text with visible selection, provenance, and content hashes.
   Neither grants execution.
@@ -240,7 +247,8 @@ Preferred patterns:
 Avoid:
 
 - general agent-command buttons in AgentWindow (`Draft`, `Retry`, `Goal`,
-  `Follow`); Review's `Accept` / `Reject` is the intentional exception;
+  `Follow`); Review's `Accept` / `Reject` and the location-permission gate's
+  `Accept` / `Deny` are the intentional exceptions;
 - praise, celebration, emojis, or anthropomorphic filler;
 - vague busy language such as “Doing magic” or “Almost there”;
 - blame when state drift or invalid data is the cause;

@@ -1054,7 +1054,7 @@ fn expected_card_kind(
             Mode::Investigate => Some(CardKind::Hypothesis),
         },
         BackendAction::ContractRetry(_) => None,
-        BackendAction::LocationGranted => None,
+        BackendAction::LocationGranted(_) => None,
         BackendAction::User(action) => match action {
             Action::Fix => Some(CardKind::Patch),
             Action::Goal | Action::CancelTurn => None,

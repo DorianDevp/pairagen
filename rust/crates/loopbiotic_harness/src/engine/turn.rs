@@ -109,7 +109,7 @@ impl Engine {
                         ));
                         session.context = granted.clone();
                         context = granted;
-                        action = BackendAction::LocationGranted;
+                        action = BackendAction::LocationGranted(request.location.file.clone());
                         grants += 1;
                         continue;
                     }
@@ -131,6 +131,64 @@ impl Engine {
                     location: Some(request.location),
                     actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
                 });
+                response.metadata.token_usage = token_usage;
+                response.metadata.attempts = attempts;
+                return response;
+            }
+
+            // Deterministic fallback for a mis-worded permission request: a
+            // patch-expected turn that denies while pointing at a different
+            // workspace file is mechanically the same ask as open_location
+            // ("confirm opening X"), so it runs the same permission gate
+            // instead of dead-ending on the model's choice of op. Declining
+            // returns the model's own deny card unchanged.
+            if let Card::Deny(deny) = &response.card
+                && matches!(expected, NextState::Patch | NextState::GoalLoop)
+                && let Some(location) = deny.location.clone()
+                && !context_targets(&context, &location.file)
+                && grants < MAX_LOCATION_GRANTS
+                && let Some(granter) = &self.location_granter
+            {
+                if let Some(progress) = &progress {
+                    progress(BackendProgress {
+                        session_id: session.id.clone(),
+                        phase: "permission".into(),
+                        message: format!("Agent asks to open {}", location.file.display()),
+                        preview: None,
+                    });
+                }
+
+                let request = loopbiotic_protocol::OpenLocationCard {
+                    id: session.next_card_id("nav"),
+                    reason: deny.reason.clone(),
+                    location: location.clone(),
+                };
+                if let Some(granted) = granter(request, session.id.clone()).await {
+                    attempts.push(agent_attempt(
+                        attempt + 1,
+                        &response,
+                        "location_granted",
+                        Some(location.file.display().to_string()),
+                        attempt_usage,
+                        None,
+                        false,
+                    ));
+                    session.context = granted.clone();
+                    context = granted;
+                    action = BackendAction::LocationGranted(location.file);
+                    grants += 1;
+                    continue;
+                }
+
+                attempts.push(agent_attempt(
+                    attempt + 1,
+                    &response,
+                    "location_declined",
+                    Some(location.file.display().to_string()),
+                    attempt_usage,
+                    None,
+                    false,
+                ));
                 response.metadata.token_usage = token_usage;
                 response.metadata.attempts = attempts;
                 return response;
@@ -477,6 +535,10 @@ fn repair_instruction(expected: &NextState, class: ViolationClass) -> &'static s
 
     if class == ViolationClass::MultiHunk {
         return "Keep the response in exactly ONE FILE, but represent each disconnected change run as its own hunk. Preserve dependency order, with declarations and producers before consumers. Every hunk must compile after preceding hunks are accepted.";
+    }
+
+    if class == ViolationClass::WrongFile {
+        return "The response targeted a file other than the supplied buffer. Do not retry the same patch and do not substitute a workaround change in the supplied buffer. If the correct change belongs in that other file, return an open_location op for it: the editor asks the user for permission and this same turn continues there with fresh ctx. Otherwise return the patch for exactly the supplied buffer.";
     }
 
     if class == ViolationClass::ContextMismatch {

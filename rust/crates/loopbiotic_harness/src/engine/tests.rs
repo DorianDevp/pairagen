@@ -2099,7 +2099,7 @@ impl BackendAdapter for NavigatingBackend {
                     },
                 })
             }
-            BackendAction::LocationGranted => {
+            BackendAction::LocationGranted(_) => {
                 let old_line = req.context.buffer_text.lines().next().unwrap_or_default();
                 Card::Patch(PatchCard {
                     id: "c_patch".into(),
@@ -2226,4 +2226,157 @@ async fn open_location_without_granter_becomes_a_deny_card() {
     let result = engine.action(&start.session_id, Action::Fix).await.unwrap();
 
     assert!(matches!(result.card, Card::Deny(_)));
+}
+
+/// A model that words its navigation request as a denial ("confirm opening
+/// the service file") instead of the typed open_location op. The harness must
+/// recognize the ask mechanically in patch-expected turns.
+#[derive(Default)]
+struct DenyNavigatingBackend {
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl BackendAdapter for DenyNavigatingBackend {
+    async fn next_card(&self, req: BackendRequest) -> Result<BackendResponse> {
+        self.calls.lock().unwrap().push(format!("{:?}", req.action));
+
+        let card = match req.action {
+            BackendAction::Start | BackendAction::User(Action::Fix) => {
+                Card::Deny(loopbiotic_protocol::DenyCard {
+                    id: "c_deny_nav".into(),
+                    title: "Wrong layer chosen".into(),
+                    reason: "The correct fix belongs in the service file; confirm opening it."
+                        .into(),
+                    location: Some(loopbiotic_protocol::Location {
+                        file: "src/component.ts".into(),
+                        line: 3,
+                        column: 1,
+                    }),
+                    actions: vec![Action::Retry, Action::EditPrompt, Action::Stop],
+                })
+            }
+            BackendAction::LocationGranted(_) => {
+                let old_line = req.context.buffer_text.lines().next().unwrap_or_default();
+                Card::Patch(PatchCard {
+                    id: "c_patch".into(),
+                    title: "Adjust icon size".into(),
+                    explanation: "Sets the icon size on the component.".into(),
+                    warnings: vec![],
+                    goal_complete: false,
+                    plan: None,
+                    patches: vec![FilePatch {
+                        id: "p_1".into(),
+                        file: req.context.file.clone(),
+                        diff: format!("@@ -1,1 +1,1 @@\n-{old_line}\n+const size = 16\n"),
+                        explanation: "Shrinks the icon.".into(),
+                    }],
+                    file_ops: vec![],
+                    actions: vec![
+                        Action::Apply,
+                        Action::Retry,
+                        Action::EditPrompt,
+                        Action::Stop,
+                    ],
+                })
+            }
+            other => panic!("unexpected action {other:?}"),
+        };
+
+        Ok(BackendResponse {
+            card,
+            raw_output: None,
+            metadata: BackendMetadata {
+                backend: "deny-navigating".into(),
+                model: None,
+                token_usage: Some(loopbiotic_protocol::TokenUsage::estimated(10, 5)),
+                activities: vec![],
+                attempts: vec![],
+            },
+        })
+    }
+
+    fn capabilities(&self) -> BackendInfo {
+        BackendInfo {
+            name: "deny-navigating".into(),
+            streaming: false,
+            patches: true,
+            reasoning: false,
+            can_use_tools: false,
+            can_read_project: false,
+        }
+    }
+}
+
+fn fix_params() -> StartSessionParams {
+    let mut params = params();
+    params.mode = Mode::Fix;
+    params.prompt = "fix the sizing".into();
+    params
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deny_asking_for_another_file_runs_the_permission_gate() {
+    let backend = Arc::new(DenyNavigatingBackend::default());
+    let granted: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let granted_log = granted.clone();
+    let mut engine = Engine::new(backend.clone());
+    engine.set_location_granter(Arc::new(move |request, _session| {
+        granted_log
+            .lock()
+            .unwrap()
+            .push(request.location.file.display().to_string());
+        Box::pin(async move { Some(granted_context()) })
+    }));
+
+    let result = engine.start(fix_params()).await.unwrap();
+
+    let Card::Patch(card) = result.card else {
+        panic!("expected patch card, got {:?}", result.card);
+    };
+    assert_eq!(card.patches[0].file, PathBuf::from("src/component.ts"));
+    assert_eq!(granted.lock().unwrap().as_slice(), ["src/component.ts"]);
+    let calls = backend.calls.lock().unwrap().clone();
+    assert!(calls.iter().any(|call| call.contains("LocationGranted")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn declined_deny_navigation_returns_the_original_deny_card() {
+    let backend = Arc::new(DenyNavigatingBackend::default());
+    let mut engine = Engine::new(backend);
+    engine.set_location_granter(Arc::new(|_, _| Box::pin(async { None })));
+
+    let result = engine.start(fix_params()).await.unwrap();
+
+    // Declining keeps the model's own denial, not a synthetic replacement.
+    let Card::Deny(card) = result.card else {
+        panic!("expected deny card, got {:?}", result.card);
+    };
+    assert_eq!(card.title, "Wrong layer chosen");
+    assert_eq!(
+        card.location.as_ref().map(|l| l.file.clone()),
+        Some(PathBuf::from("src/component.ts"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deny_with_location_in_a_discovery_turn_is_not_a_permission_request() {
+    let backend = Arc::new(DenyNavigatingBackend::default());
+    let granted: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let granted_log = granted.clone();
+    let mut engine = Engine::new(backend);
+    engine.set_location_granter(Arc::new(move |request, _session| {
+        granted_log
+            .lock()
+            .unwrap()
+            .push(request.location.file.display().to_string());
+        Box::pin(async move { Some(granted_context()) })
+    }));
+
+    // Investigate expects no patch; a deny location is evidence, not a
+    // navigation request, so the gate must not fire.
+    let result = engine.start(params()).await.unwrap();
+
+    assert!(matches!(result.card, Card::Deny(_)));
+    assert!(granted.lock().unwrap().is_empty());
 }

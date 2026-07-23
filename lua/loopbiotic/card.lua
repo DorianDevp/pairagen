@@ -31,6 +31,22 @@ local M = {}
 
 function M.show(card, opts)
   opts = opts or {}
+  local permission = require("loopbiotic.permission")
+  if permission.pending() then
+    if card.kind == "working" then
+      -- A turn yielding to the background while its location request is
+      -- still on screen must not repaint over the user's pending decision.
+      -- The working card is recorded so agent/turn_ready can still deliver
+      -- the final result; the gate stays visible.
+      state.card = card
+      surfaces.set_agent_working(true)
+      return
+    end
+    -- A real turn result (typically the daemon-side wait expiring into a
+    -- deny card) supersedes the request; the late answer is dropped as
+    -- stale on the daemon.
+    permission.settle("superseded by a turn result")
+  end
   if state.card ~= card then
     state.card_flow_active = false
   end

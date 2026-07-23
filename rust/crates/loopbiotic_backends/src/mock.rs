@@ -49,7 +49,7 @@ impl BackendAdapter for MockBackend {
                 }
                 BackendAction::Reply(text) => reply_card(text),
                 BackendAction::ContractRetry(_) => finding_card(),
-                BackendAction::LocationGranted => patch_card(&req),
+                BackendAction::LocationGranted(_) => patch_card(&req),
             }
         };
 

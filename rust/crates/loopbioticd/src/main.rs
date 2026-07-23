@@ -20,7 +20,11 @@ use serde_json::{Value, json};
 mod ab_report;
 mod token_report;
 
-const OPEN_LOCATION_TIMEOUT: Duration = Duration::from_secs(120);
+/// An open_location answer now carries a human decision (the editor presents
+/// the request with explicit Accept / Deny), so the wait is sized for a
+/// person, not an RPC round-trip. Expiry resolves as denied; a later editor
+/// response is dropped as stale.
+const OPEN_LOCATION_TIMEOUT: Duration = Duration::from_secs(300);
 const READ_FILE_TIMEOUT: Duration = Duration::from_secs(10);
 /// JSON-RPC error code returned by `initialize` when the client announces a
 /// protocol version that differs from [`loopbiotic_protocol::PROTOCOL_VERSION`].

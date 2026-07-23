@@ -16,6 +16,8 @@ local util = require("loopbiotic.util")
 local M = {}
 
 local function show_agent_error(message, has_session)
+  -- A failed turn cannot answer a pending location request anymore.
+  require("loopbiotic.permission").settle("agent error")
   local lines = { "Agent error", tostring(message or "The agent turn failed."), "" }
   table.insert(lines, has_session and "[m] Reply   [q] Quit" or "[p] Prompt")
   surfaces.render_agent(lines, {
@@ -90,22 +92,13 @@ rpc.on_request("editor/read_file", function(params, respond)
   respond({ granted = value ~= nil, context = value })
 end)
 
--- A running goal may need its next buffer. Opening a workspace file is
--- reversible and the resulting hunk still requires explicit acceptance, so
--- navigation itself does not interrupt the process with another prompt.
+-- A running turn may need another buffer before it can produce its card.
+-- That is a real permission request: AgentWindow presents the file and the
+-- agent's reason with explicit Accept / Deny, and the turn stays blocked on
+-- the backend until the user decides (or the daemon-side wait expires as
+-- denied). Out-of-workspace targets are denied without asking.
 rpc.on_request("editor/open_location", function(params, respond)
-  local location = params.location or {}
-  local file = location.file or "?"
-  local target = vim.fn.fnamemodify(file, ":p")
-  local missing = vim.uv.fs_stat(target) == nil and vim.fn.bufloaded(target) == 0
-
-  if M.workspace_location(file) and missing then
-    respond({ granted = true, context = context.new_file(file) })
-  elseif M.workspace_location(file) and navigation.open_location(location, { focus = false }) then
-    respond({ granted = true, context = context.session() })
-  else
-    respond({ granted = false })
-  end
+  require("loopbiotic.permission").request(params, respond)
 end)
 
 function M.workspace_location(file)
@@ -141,6 +134,9 @@ function M.prompt(mode)
 end
 
 function M.interrupt_for_prompt()
+  -- The daemon defers other requests while a location permission waits, so
+  -- the pending request must be answered before cancel_turn is sent.
+  require("loopbiotic.permission").settle("interrupted for prompt")
   local session_id = state.session_id
   local active_card = state.card
   if active_card and active_card.kind == "working" then
@@ -369,7 +365,9 @@ function M.stop()
 
   -- Finishing a session is a local lifecycle action, not an agent turn.
   -- Tear down the UI immediately and notify the daemon in the background;
-  -- never show Thinking or a redundant "Stopped" receipt.
+  -- never show Thinking or a redundant "Stopped" receipt. A pending location
+  -- permission is answered first so the daemon can process session/stop.
+  require("loopbiotic.permission").settle("session stopped")
   require("loopbiotic.diff").restore_source()
   require("loopbiotic.fileops").clear()
   thinking.stop(true)
@@ -447,6 +445,7 @@ function M.hide()
 end
 
 function M.reset()
+  require("loopbiotic.permission").settle("reset")
   require("loopbiotic.diff").restore_source()
   require("loopbiotic.fileops").clear()
   thinking.stop(true)

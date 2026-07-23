@@ -29,8 +29,11 @@ progress states, file choosers, and Widgets do not create additional product
 Windows.
 
 Do not introduce a third product Window. AgentWindow does not render general
-next-intent actions. Its deliberate exception is patch review: the agent comment
-and `Accept` / `Reject` remain the explicit source-mutation gate. `Accept` may
+next-intent actions. Its deliberate exceptions are patch review — the agent
+comment and `Accept` / `Reject` remain the explicit source-mutation gate — and
+the mid-turn location-permission gate, whose `Accept` / `Deny` resolves an
+agent request to open another workspace file inside the already running turn.
+Neither exception introduces new intent. `Accept` may
 continue an already authorized Goal; `Reject` pauses it and opens PromptWindow
 without running the model. A Widget may change local representation or pending
 prompt context, but only an explicit PromptWindow submission may introduce new
