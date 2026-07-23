@@ -3,6 +3,7 @@ local config = require("loopbiotic.config")
 local context = require("loopbiotic.context")
 local log = require("loopbiotic.log")
 local navigation = require("loopbiotic.navigation")
+local positions = require("loopbiotic.positions")
 local prompt = require("loopbiotic.prompt")
 local rpc = require("loopbiotic.rpc")
 local session = require("loopbiotic.session")
@@ -111,9 +112,20 @@ function M.workspace_location(file)
   return util.in_workspace(file)
 end
 
+local position_log_unsubscribe = nil
+
 function M.setup(opts)
   config.setup(opts)
   surfaces.setup()
+  positions.setup()
+  -- Root is the single observer of window geometry: every emission lands in
+  -- the JSONL session trace, stamped with the active backend session.
+  if position_log_unsubscribe then
+    position_log_unsubscribe()
+  end
+  position_log_unsubscribe = positions.subscribe(function(event)
+    log.event("window_geometry", vim.tbl_extend("force", event, { session_id = state.session_id }))
+  end)
   require("loopbiotic.commands").setup()
   require("loopbiotic.keymaps").setup()
 end

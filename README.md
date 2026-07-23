@@ -520,8 +520,11 @@ and protocol handshake, structured RPC requests/responses, progress events,
 cards, goals, token usage, and backend errors. Every completed backend turn also
 emits an `agent_attempts` event. Each attempt records its
 accepted/retry/rejected outcome, retry metadata, per-attempt token usage and
-compact tool activity. Content-bearing fields are represented by redaction
-metadata unless full-content logging is explicitly enabled.
+compact tool activity. Plugin windows also emit `window_geometry` events:
+PromptWindow, AgentWindow, and picker frames report position, size, and cursor
+changes to a root observer, stamped with the active session id. Content-bearing
+fields are represented by redaction metadata unless full-content logging is
+explicitly enabled.
 
 The default trace location is:
 

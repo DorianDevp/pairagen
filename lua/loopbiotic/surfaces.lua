@@ -1,4 +1,5 @@
 local config = require("loopbiotic.config")
+local positions = require("loopbiotic.positions")
 local state = require("loopbiotic.state")
 local ui = require("loopbiotic.ui")
 
@@ -108,6 +109,8 @@ function M.open_prompt(spec)
   prompt.return_to_agent = spec.return_to_agent == true
 
   configure_content_window(win)
+  positions.track("prompt_frame", frame_win)
+  positions.track("prompt", win)
   return buf, win
 end
 
@@ -146,6 +149,7 @@ function M.open_prompt_picker(lines, spec)
   vim.bo[buf].swapfile = false
   vim.bo[buf].filetype = spec.filetype or "loopbiotic-picker"
   configure_content_window(win)
+  positions.track("prompt_picker", win)
   prompt.picker_buf = buf
   prompt.picker_win = win
   return buf, win
@@ -177,7 +181,11 @@ function M.update_prompt_frame(values)
   if not valid_win(prompt.frame_win) then
     return false
   end
-  return pcall(vim.api.nvim_win_set_config, prompt.frame_win, values)
+  local ok = pcall(vim.api.nvim_win_set_config, prompt.frame_win, values)
+  -- Moving a float with nvim_win_set_config fires no autocmd, so the subject
+  -- has to emit its new geometry itself.
+  positions.emit(prompt.frame_win)
+  return ok
 end
 
 function M.relayout_prompt(spec)
@@ -205,6 +213,8 @@ function M.relayout_prompt(spec)
     width = spec.inner_width,
     height = spec.inner_height,
   })
+  positions.emit(prompt.frame_win)
+  positions.emit(prompt.win)
   return frame_ok and content_ok
 end
 
@@ -289,6 +299,7 @@ local function render_agent_now(opts)
   agent.buf = buf
   agent.win = win
   configure_content_window(win)
+  positions.track("agent", win)
   vim.wo[win].wrap = agent.mode == "wrapped" or agent.wrap ~= false
   vim.wo[win].cursorline = agent.mode == "visible" and agent.cursorline == true
 
